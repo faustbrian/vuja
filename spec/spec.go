@@ -1,0 +1,68 @@
+package spec
+
+type GeneratorFunc func(tokens []string, prefix string, partial string) []Suggestion
+
+// Spec defines a top-level command structure
+type Spec struct {
+	Name        string
+	Aliases     []string
+	Description string
+	Icon        string
+	Subcommands []Subcommand
+	Options     []Option
+	Generator   GeneratorFunc
+	MaxArgs     int
+}
+
+// Subcommand defines nested command logic
+type Subcommand struct {
+	Name        string
+	Aliases     []string
+	Description string
+	Icon        string
+	Subcommands []Subcommand
+	Options     []Option
+	Generator   GeneratorFunc
+	MaxArgs     int
+	Priority    int
+}
+
+// Option represents a command flag or option
+type Option struct {
+	Name        string
+	Description string
+	Priority    int
+}
+
+// Suggestion represents an item in the suggestion menu
+type Suggestion struct {
+	Cmd        string
+	Desc       string
+	Icon       string
+	Source     string // "history", "spec", "filesystem", "ai"
+	Confidence int    // 0-100
+	Priority   int    // static author priority
+}
+
+var Registry = map[string]*Spec{}
+
+// Register adds a new spec to the global Registry
+// example: Register(&Spec{Name: "git"})
+func Register(s *Spec) {
+	s.Generator = cacheGenerator(s.Generator)
+	cacheSubcommandGenerators(s.Subcommands)
+	Registry[s.Name] = s
+}
+
+func cacheSubcommandGenerators(subcommands []Subcommand) {
+	for index := range subcommands {
+		subcommands[index].Generator = cacheGenerator(subcommands[index].Generator)
+		cacheSubcommandGenerators(subcommands[index].Subcommands)
+	}
+}
+
+// ResetRegistry clears all registered specs - use in tests only
+func ResetRegistry() {
+	Registry = make(map[string]*Spec)
+	resetGeneratorCache()
+}

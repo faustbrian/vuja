@@ -1,0 +1,18 @@
+package js
+
+import (
+	"github.com/faustbrian/vuja/spec"
+)
+
+func init() {
+	spec.Register(&spec.Spec{
+		Name:        "electron",
+		Description: "Build cross platform desktop apps with JavaScript, HTML and CSS",
+		Options: []spec.Option{
+			{Name: "-i", Description: "Open a REPL to the main process"},
+			{Name: "-r", Description: "Module to preload"},
+			{Name: "-v", Description: "Print the version"},
+			{Name: "-a", Description: "Print the Node ABI version"},
+		},
+	})
+}
