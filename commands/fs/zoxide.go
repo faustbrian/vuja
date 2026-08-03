@@ -1,0 +1,91 @@
+// please note that zoxide also shows external suggestions
+// at the end of the list on command mode
+// they are the old directories that you have visited
+// this is a feature, not a bug, and I want to keep it
+package fs
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"os/exec"
+	"strings"
+
+	"github.com/faustbrian/vuja/spec"
+	"github.com/versenilvis/fuzzy"
+)
+
+func init() {
+	spec.Register(&spec.Spec{
+		Name:        "z",
+		Description: "jump to directory",
+		MaxArgs:     0,
+		Generator:   ZoxideGenerator(),
+	})
+	spec.Register(&spec.Spec{
+		Name:        "zi",
+		Description: "jump to directory interactively",
+		MaxArgs:     0,
+		Generator:   ZoxideGenerator(),
+	})
+}
+
+func ZoxideGenerator() spec.GeneratorFunc {
+	return func(tokens []string, prefix string, partial string) []spec.Suggestion {
+		fullQuery := strings.Join(tokens[1:], " ")
+		localSuggestions := spec.FileGenerator("/")(tokens, prefix, fullQuery)
+
+		var zoxideSuggestions []spec.Suggestion
+		cmd := exec.CommandContext(context.Background(), "zoxide", "query", "-l")
+		out, err := cmd.Output()
+		if err == nil {
+			lines := strings.Split(string(bytes.TrimSpace(out)), "\n")
+			var dirs []string
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					dirs = append(dirs, line)
+				}
+			}
+
+			home, _ := os.UserHomeDir()
+
+			if fullQuery == "" {
+				limit := min(len(dirs), 20)
+				for i := range limit {
+					path := dirs[i]
+					display := strings.Replace(path, home, "~", 1)
+					zoxideSuggestions = append(zoxideSuggestions, spec.Suggestion{
+						Cmd:  path,
+						Desc: display,
+					})
+				}
+			} else if !strings.Contains(fullQuery, "/") {
+				searcher := fuzzy.NewPlainSearcher(dirs)
+				matches := searcher.SearchWithScores(fullQuery, &fuzzy.SearchOptions{Limit: 10})
+				for _, m := range matches {
+					path := m.Str
+					display := strings.Replace(path, home, "~", 1)
+					zoxideSuggestions = append(zoxideSuggestions, spec.Suggestion{
+						Cmd:  path,
+						Desc: display,
+					})
+				}
+			}
+		}
+
+		var finalResults []spec.Suggestion
+		seen := make(map[string]bool)
+
+		finalResults = append(finalResults, localSuggestions...)
+
+		for _, s := range zoxideSuggestions {
+			if !seen[s.Cmd] {
+				finalResults = append(finalResults, s)
+				seen[s.Cmd] = true
+			}
+		}
+
+		return finalResults
+	}
+}
