@@ -31,10 +31,40 @@ func TestDefaultConfigContentComesFromBalancedPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(content)
-	for _, expected := range []string{`prompt-position = "bottom"`, `density = "balanced"`, `metrics = "when-high"`} {
+	for _, expected := range []string{
+		`prompt-position = "bottom"`, `density = "balanced"`, `metrics = "when-high"`,
+		`retention = "unlimited"`, `max-events = 0`, `[history.integrations.atuin]`,
+		`enabled = false`, `[history.integrations.shell]`, `import = false`, `mirror = false`, `path = ""`,
+		`import-zoxide = false`, `history-ranking = "balanced"`,
+	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected generated config to contain %q", expected)
 		}
+	}
+}
+
+func TestLoadPathMigratesLegacyAtuinPreferenceToOptionalIntegration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[history]\nimport-atuin = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.History.Integrations.Atuin.Enabled || cfg.History.ImportAtuin {
+		t.Fatalf("expected legacy Atuin preference to migrate, got %+v", cfg.History)
+	}
+}
+
+func TestLoadPathRejectsAmbiguousAtuinIntegrationSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "[history]\nimport-atuin = true\n[history.integrations.atuin]\nenabled = false\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPath(path); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("expected an explicit ambiguous-setting error, got %v", err)
 	}
 }
 
@@ -50,6 +80,15 @@ func TestValidateRejectsUnorderedThresholds(t *testing.T) {
 	cfg.UI.Chatbox.CPUHigh = cfg.UI.Chatbox.CPUCritical
 	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "cpu thresholds") {
 		t.Fatalf("expected CPU threshold error, got %v", err)
+	}
+}
+
+func TestValidateRejectsRelativeShellHistoryPaths(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.History.Integrations.Shell.Path = "state/history"
+
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "history.integrations.shell.path") {
+		t.Fatalf("expected shell history path error, got %v", err)
 	}
 }
 
@@ -87,6 +126,23 @@ func TestLoadPathTreatsAConfigWithoutSchemaAsAnExistingInstallation(t *testing.T
 	}
 	if cfg.UI.Chatbox.CompletedCommand != "snapshot" || cfg.UI.Chatbox.SnapshotMetadata != "always" {
 		t.Fatalf("expected schema-less existing config to retain snapshot behavior, got command=%q metadata=%q", cfg.UI.Chatbox.CompletedCommand, cfg.UI.Chatbox.SnapshotMetadata)
+	}
+	if !cfg.Suggestions.ImportZoxide {
+		t.Fatal("expected schema-less existing config to retain the previous implicit Zoxide adapter")
+	}
+}
+
+func TestSchemaThreeDefaultsDisableZoxideUnlessExplicitlyEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[core]\nversion = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Suggestions.ImportZoxide {
+		t.Fatal("expected a schema-three configuration to keep Zoxide optional by default")
 	}
 }
 

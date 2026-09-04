@@ -65,6 +65,9 @@ func loadOptionalZoxideDirectories(
 func historyNavigationDirectoryImports(events []integration.HistoryEntry, now time.Time) []scoring.DirectoryImport {
 	byPath := make(map[string]scoring.DirectoryImport)
 	for _, event := range events {
+		if event.HasExitCode && event.ExitCode != 0 {
+			continue
+		}
 		path, ok := importedNavigationDestination(event.Command, event.Cwd)
 		if !ok {
 			continue

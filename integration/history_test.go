@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -10,33 +11,14 @@ import (
 	"github.com/faustbrian/vuja/integration/shell"
 )
 
-func TestRecordSessionCommand_MergeAndDeduplicate(t *testing.T) {
-	sessionHistoryMu.Lock()
-	origSessionHistory := sessionHistory
-	sessionHistory = nil
-	sessionHistoryMu.Unlock()
-
-	mu.Lock()
-	origHistoryCache := historyCache
-	origHistoryStatsCache := historyStatsCache
-	historyCache = nil
-	historyStatsCache = nil
-	mu.Unlock()
-
-	t.Cleanup(func() {
-		sessionHistoryMu.Lock()
-		sessionHistory = origSessionHistory
-		sessionHistoryMu.Unlock()
-
-		mu.Lock()
-		historyCache = origHistoryCache
-		historyStatsCache = origHistoryStatsCache
-		mu.Unlock()
-	})
+func TestRecordSessionCommandPreservesEventsAndDeduplicatesInlineCandidates(t *testing.T) {
+	original := RichHistorySnapshot()
+	PublishCanonicalHistory(nil)
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
 
 	RecordSessionCommand("git status")
 	RecordSessionCommand("npm run dev")
-	RecordSessionCommand("npm run dev") // duplicate subsequent command should be ignored
+	RecordSessionCommand("npm run dev")
 	RecordSessionCommand("printf first\nprintf second")
 	RecordSessionCommand("git push origin fix/scoring")
 
@@ -45,19 +27,22 @@ func TestRecordSessionCommand_MergeAndDeduplicate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(results) < 3 {
-		t.Fatalf("expected at least 3 session commands in search results, got %d", len(results))
+	if len(results) != 4 {
+		t.Fatalf("expected four deduplicated session commands in search results, got %d", len(results))
 	}
 
 	// newest session command must be results[0]
 	if results[0].Cmd != "git push origin fix/scoring" {
 		t.Errorf("expected results[0] to be 'git push origin fix/scoring', got %q", results[0].Cmd)
 	}
-	if results[1].Cmd != "npm run dev" {
-		t.Errorf("expected results[1] to be 'npm run dev', got %q", results[1].Cmd)
+	if results[1].Cmd != "printf first\nprintf second" {
+		t.Errorf("expected results[1] to preserve the multiline command, got %q", results[1].Cmd)
 	}
-	if results[2].Cmd != "git status" {
-		t.Errorf("expected results[2] to be 'git status', got %q", results[2].Cmd)
+	if results[2].Cmd != "npm run dev" || results[3].Cmd != "git status" {
+		t.Errorf("expected recency-ordered deduplicated commands, got %+v", results)
+	}
+	if entries := RichHistorySnapshot(); len(entries) != 5 {
+		t.Fatalf("expected every session execution to remain available to rich history, got %+v", entries)
 	}
 
 	RecordSessionCommandAt("go test ./...", "/repo/service")
@@ -74,33 +59,27 @@ func TestRecordSessionCommand_MergeAndDeduplicate(t *testing.T) {
 }
 
 func TestRecordSessionCommandRejectsLeadingWhitespaceBeforeNormalization(t *testing.T) {
-	sessionHistoryMu.Lock()
-	originalSessionHistory := sessionHistory
-	sessionHistory = nil
-	sessionHistoryMu.Unlock()
-	mu.Lock()
-	originalHistoryCache := historyCache
-	originalHistoryStatsCache := historyStatsCache
-	historyCache = nil
-	historyStatsCache = nil
-	mu.Unlock()
-	t.Cleanup(func() {
-		sessionHistoryMu.Lock()
-		sessionHistory = originalSessionHistory
-		sessionHistoryMu.Unlock()
-		mu.Lock()
-		historyCache = originalHistoryCache
-		historyStatsCache = originalHistoryStatsCache
-		mu.Unlock()
-	})
+	original := RichHistorySnapshot()
+	PublishCanonicalHistory(nil)
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
 
 	RecordSessionCommand(" secret command")
 	RecordSessionCommand("\tsecret command")
 
-	sessionHistoryMu.Lock()
-	defer sessionHistoryMu.Unlock()
-	if len(sessionHistory) != 0 {
-		t.Fatalf("expected leading-whitespace commands to remain private, got %+v", sessionHistory)
+	if entries := RichHistorySnapshot(); len(entries) != 0 {
+		t.Fatalf("expected leading-whitespace commands to remain private, got %+v", entries)
+	}
+}
+
+func TestRecordSessionCommandRejectsSensitiveCommandsAtTheCanonicalBoundary(t *testing.T) {
+	original := RichHistorySnapshot()
+	PublishCanonicalHistory(nil)
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+
+	RecordSessionCommand("curl --token private-value https://example.test")
+
+	if entries := RichHistorySnapshot(); len(entries) != 0 {
+		t.Fatalf("expected sensitive commands to remain outside canonical history, got %+v", entries)
 	}
 }
 
@@ -130,8 +109,6 @@ func TestSearchCachedHistoryKeepsServingPublishedSnapshotDuringReload(t *testing
 	historyCache = []string{"git status"}
 	idMapCache = map[string]int{"git status": 1}
 	mu.Unlock()
-	historyLoadGate <- struct{}{}
-	defer func() { <-historyLoadGate }()
 	t.Cleanup(func() {
 		mu.Lock()
 		historyCache, idMapCache = originalHistory, originalIDs
@@ -153,41 +130,14 @@ func TestHistoryAliasesKeyIsStableAcrossMapOrder(t *testing.T) {
 }
 
 func TestHistorySnapshotPreservesFrequency(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := os.WriteFile(
-		filepath.Join(home, ".bash_history"),
-		[]byte("git status\nmake test\ngit status\n"),
-		0600,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	mu.Lock()
-	originalCache := historyCache
-	originalStats := historyStatsCache
-	originalModTime := lastModTime
-	originalAtuinModTime := lastAtuinModTime
-	historyCache = nil
-	historyStatsCache = nil
-	lastModTime = 0
-	lastAtuinModTime = 0
-	mu.Unlock()
-	originalShell := shell.Current
-	shell.Current = nil
-	t.Cleanup(func() {
-		mu.Lock()
-		historyCache = originalCache
-		historyStatsCache = originalStats
-		lastModTime = originalModTime
-		lastAtuinModTime = originalAtuinModTime
-		mu.Unlock()
-		shell.Current = originalShell
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	now := time.Now()
+	PublishCanonicalHistory([]HistoryEntry{
+		{ID: "1", Command: "git status", StartedAt: now.Add(-time.Minute), Source: "vuja"},
+		{ID: "2", Command: "make test", StartedAt: now, Source: "vuja"},
+		{ID: "3", Command: "git status", StartedAt: now.Add(time.Minute), Source: "vuja"},
 	})
-
-	if _, err := SearchHistory("", nil); err != nil {
-		t.Fatal(err)
-	}
 	stats := HistorySnapshot()
 	if len(stats) != 2 {
 		t.Fatalf("expected two unique commands, got %v", stats)
@@ -201,32 +151,51 @@ func TestHistorySnapshotPreservesFrequency(t *testing.T) {
 }
 
 func TestHistorySnapshotDoesNotFabricateRecencyForTimestampLessHistory(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := os.WriteFile(filepath.Join(home, ".bash_history"), []byte("cd old-project\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	originalCache, originalStats := historyCache, historyStatsCache
-	originalModTime, originalAtuinModTime := lastModTime, lastAtuinModTime
-	historyCache, historyStatsCache = nil, nil
-	lastModTime, lastAtuinModTime = 0, 0
-	mu.Unlock()
-	originalShell := shell.Current
-	shell.Current = nil
-	t.Cleanup(func() {
-		mu.Lock()
-		historyCache, historyStatsCache = originalCache, originalStats
-		lastModTime, lastAtuinModTime = originalModTime, originalAtuinModTime
-		mu.Unlock()
-		shell.Current = originalShell
-	})
-	if _, err := SearchHistory("", nil); err != nil {
-		t.Fatal(err)
-	}
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	PublishCanonicalHistory([]HistoryEntry{{ID: "zsh:1", Command: "cd old-project", Source: "zsh"}})
 	stats := HistorySnapshot()
 	if len(stats) != 1 || !stats[0].LastUsed.IsZero() {
 		t.Fatalf("expected timestamp-less history to have unknown recency, got %+v", stats)
+	}
+}
+
+func TestSearchHistoryKeepsMatchTiersAttachedWhileSorting(t *testing.T) {
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	PublishCanonicalHistory([]HistoryEntry{
+		{ID: "newest-prefix", Command: "ssh forge@newest", StartedAt: now, Source: "vuja"},
+		{ID: "older-prefix", Command: "ssh forge@older", StartedAt: now.Add(-time.Minute), Source: "vuja"},
+		{ID: "exact", Command: "ssh", StartedAt: now.Add(-2 * time.Minute), Source: "vuja"},
+	})
+
+	results, err := SearchHistory("ssh", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 || results[0].Cmd != "ssh" || results[1].Cmd != "ssh forge@newest" || results[2].Cmd != "ssh forge@older" {
+		t.Fatalf("expected exact then prefix matches in recency order, got %+v", results)
+	}
+}
+
+func TestCanceledHistorySearchCannotReplaceIncrementalSearchState(t *testing.T) {
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	PublishCanonicalHistory([]HistoryEntry{
+		{ID: "ssh", Command: "ssh forge@api", StartedAt: time.Now(), Source: "vuja"},
+		{ID: "git", Command: "git status", StartedAt: time.Now(), Source: "vuja"},
+	})
+	if _, err := SearchHistory("ssh", nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := SearchHistoryContext(ctx, "git", nil); err == nil {
+		t.Fatal("expected canceled search to stop")
+	}
+	if status := CurrentHistorySearchStatus(); status.Query != "ssh" {
+		t.Fatalf("expected canceled work not to replace incremental state, got %+v", status)
 	}
 }
 
@@ -278,8 +247,8 @@ VALUES ('event-2', 'printf first' || char(10) || 'printf second', 17200000010000
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occurrences) != 1 {
-		t.Fatalf("expected one Atuin entry, got %+v", occurrences)
+	if len(occurrences) != 2 {
+		t.Fatalf("expected both single-line and multiline Atuin entries, got %+v", occurrences)
 	}
 	entry := occurrences[0]
 	if entry.Command != "go test ./..." || entry.Cwd != "/repo/service" {
@@ -294,47 +263,111 @@ VALUES ('event-2', 'printf first' || char(10) || 'printf second', 17200000010000
 	if entry.ID != "event-1" || entry.Host != "devbox" || entry.SessionID != "shell-1" {
 		t.Fatalf("expected Atuin scope metadata, got %+v", entry)
 	}
+	if occurrences[1].Command != "printf first\nprintf second" {
+		t.Fatalf("expected multiline Atuin command to remain one event, got %+v", occurrences[1])
+	}
 }
 
-func TestPersistentHistoryCanIgnoreAnExistingAtuinDatabase(t *testing.T) {
-	directory := t.TempDir()
-	shellHistory := filepath.Join(directory, "shell-history")
-	if err := os.WriteFile(shellHistory, []byte("shell command\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	atuinPath := filepath.Join(directory, "atuin.db")
-	db, err := sql.Open("sqlite", atuinPath)
+func TestLoadAtuinHistoryOrdersEqualTimestampsDeterministically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.ExecContext(t.Context(), `
+	if _, err := db.Exec(`
 CREATE TABLE history (
-	id TEXT NOT NULL,
-	command TEXT NOT NULL,
-	timestamp INTEGER NOT NULL,
-	duration INTEGER NOT NULL,
-	exit INTEGER NOT NULL,
-	cwd TEXT NOT NULL,
-	hostname TEXT NOT NULL,
-	session TEXT NOT NULL,
-	deleted_at INTEGER
+    id TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
 );
-INSERT INTO history (id, command, timestamp, duration, exit, cwd, hostname, session)
-VALUES ('event-1', 'atuin command', 1720000000000000000, 1000000, 0, '/repo', 'devbox', 'shell-1');
-`)
-	if err != nil {
+INSERT INTO history (id, command, timestamp) VALUES
+    ('event-b', 'ssh forge@b', 1725000000000000000),
+    ('event-a', 'ssh forge@a', 1725000000000000000);
+`); err != nil {
+		_ = db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	occurrences, err := loadPersistentHistory(t.Context(), shellHistory, "bash", atuinPath, false)
+	first, err := loadAtuinHistory(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(occurrences) != 1 || occurrences[0].Command != "shell command" || occurrences[0].Source != "bash" {
-		t.Fatalf("expected disabled Atuin import to use shell history, got %+v", occurrences)
+	second, err := loadAtuinHistory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || len(second) != 2 || first[0].ID != "event-a" || first[1].ID != "event-b" ||
+		first[0].ID != second[0].ID || first[1].ID != second[1].ID {
+		t.Fatalf("expected stable timestamp/id ordering, first=%+v second=%+v", first, second)
+	}
+}
+
+func TestLoadAtuinHistoryBoundsTheAdapterToTheNewestExecutions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE history (
+    id TEXT PRIMARY KEY,
+    command TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+INSERT INTO history (id, command, timestamp) VALUES
+    ('event-1', 'ssh forge@old', 1),
+    ('event-2', 'ssh forge@middle', 2),
+    ('event-3', 'ssh forge@new', 3);
+`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := loadAtuinHistoryContextLimit(t.Context(), path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].ID != "event-2" || entries[1].ID != "event-3" {
+		t.Fatalf("expected the newest bounded Atuin window in chronological order, got %+v", entries)
+	}
+}
+
+func TestLoadShellHistoryBoundsMemoryToTheNewestExecutions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history")
+	if err := os.WriteFile(path, []byte("ssh forge@old\nssh forge@middle\nssh forge@new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	entries, err := loadShellHistoryContextLimit(t.Context(), file, "bash", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Command != "ssh forge@middle" || entries[1].Command != "ssh forge@new" {
+		t.Fatalf("expected the newest bounded shell-history window, got %+v", entries)
+	}
+}
+
+func TestBoundedHistoryBufferEvictsOldestExecutionsByMemory(t *testing.T) {
+	example := historyOccurrence{Command: "x"}
+	buffer := newBoundedHistoryBuffer(10, historyOccurrenceBytes(example)*2)
+	for _, command := range []string{"a", "b", "c"} {
+		buffer.Add(historyOccurrence{Command: command})
+	}
+
+	entries := buffer.Entries()
+	if len(entries) != 2 || entries[0].Command != "b" || entries[1].Command != "c" {
+		t.Fatalf("expected the memory boundary to retain the newest executions, got %+v", entries)
 	}
 }
 

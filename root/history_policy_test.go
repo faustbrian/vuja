@@ -15,6 +15,7 @@ func TestHistoryRecordableCommandPreservesPrivacySignalsUntilTheGate(t *testing.
 		{name: "leading space", raw: " export TOKEN=value", ok: false},
 		{name: "leading tab", raw: "\tprintf secret", ok: false},
 		{name: "shell history pattern", raw: "curl --password value", shellIgnored: true, ok: false},
+		{name: "sensitive flag", raw: "curl --password value", ok: false},
 		{name: "empty", raw: "   ", ok: false},
 	}
 

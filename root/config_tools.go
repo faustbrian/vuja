@@ -358,15 +358,16 @@ func runConfigDoctor(cmd *cobra.Command) error {
 	home, _ := os.UserHomeDir()
 	rcNames := map[string]string{"zsh": ".zshrc", "bash": ".bashrc", "fish": filepath.Join(".config", "fish", "config.fish")}
 	rcPath := filepath.Join(home, rcNames[shell])
+	fmt.Fprintln(cmd.OutOrStdout(), "OK shell: managed Vuja protocol is built in")
 	data, readErr := os.ReadFile(rcPath)
 	if readErr != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "WARN shell: cannot read %s\n", rcPath)
+		fmt.Fprintf(cmd.OutOrStdout(), "INFO shell: optional startup file unavailable at %s\n", rcPath)
 	} else {
 		text := activeShellConfiguration(string(data))
 		if strings.Contains(text, ".local/share/vuja/init.") {
-			fmt.Fprintf(cmd.OutOrStdout(), "OK shell: integration referenced by %s\n", rcPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "OK shell: optional autostart referenced by %s\n", rcPath)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "FAIL shell: integration missing from %s\n", rcPath)
+			fmt.Fprintln(cmd.OutOrStdout(), "INFO shell: no optional Vuja autostart hook")
 		}
 		var conflicts []string
 		for name, marker := range map[string]string{"starship": "starship init", "powerlevel10k": "powerlevel10k", "oh-my-posh": "oh-my-posh", "spaceship": "spaceship", "pure": "prompt pure"} {
@@ -384,12 +385,12 @@ func runConfigDoctor(cmd *cobra.Command) error {
 	if hookData, hookErr := os.ReadFile(hook); hookErr == nil && len(hookData) > 0 {
 		hookText := string(hookData)
 		if strings.Contains(hookText, "VUJA_CMD_START") && strings.Contains(hookText, "prompt-start") {
-			fmt.Fprintf(cmd.OutOrStdout(), "OK hook: %s\n", hook)
+			fmt.Fprintf(cmd.OutOrStdout(), "OK optional hook: %s\n", hook)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "FAIL hook: generated integration is stale at %s\n", hook)
+			fmt.Fprintf(cmd.OutOrStdout(), "WARN optional hook: generated integration is stale at %s\n", hook)
 		}
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "FAIL hook: missing %s\n", hook)
+		fmt.Fprintln(cmd.OutOrStdout(), "INFO optional hook: not installed")
 	}
 	termName := os.Getenv("TERM")
 	if termName == "" || termName == "dumb" {

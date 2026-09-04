@@ -540,6 +540,27 @@ directory-ranking = "random"
 	}
 }
 
+func TestLoadRejectsInvalidHistoryRanking(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+
+	configDir := filepath.Join(configRoot, "vuja")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(`
+[suggestions]
+history-ranking = "random"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "suggestions.history-ranking") {
+		t.Fatalf("expected history ranking validation error, got %v", err)
+	}
+}
+
 func TestLoadSave(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vuja-config-test")
 	if err != nil {

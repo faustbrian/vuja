@@ -35,3 +35,11 @@ func TestEmptyPromptHistoryMirrorsSelectionWithoutExecutingIt(t *testing.T) {
 		t.Fatalf("expected clear-line plus command without enter, got %q", got)
 	}
 }
+
+func TestEmptyPromptHistoryMirrorsMultilineSelectionWithoutExecutingIt(t *testing.T) {
+	command := "printf first\nprintf second"
+	want := append([]byte{0x15}, bracketedPasteSequence(command)...)
+	if got := historyPromptReplacement(command); string(got) != string(want) {
+		t.Fatalf("expected multiline recall to use bracketed paste, got %q", got)
+	}
+}

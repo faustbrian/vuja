@@ -116,9 +116,9 @@ func (e *AIEngine) Suggest(ctx context.Context, buf string, env EnvSnapshot, dyn
 			// Set 20 second backoff cooldown to allow Groq token bucket to reset
 			e.rateLimitUntil = time.Now().Add(20 * time.Second)
 			e.mu.Unlock()
-			logger.Warnf("AI provider rate limited (HTTP 429). Cooldown for 20s. Error: %v", err)
+			logger.Warnf("AI provider rate limited (HTTP 429); cooldown for 20s; error-type=%T", err)
 		} else {
-			logger.Debugf("AI provider error for query '%s': %v", buf, err)
+			logger.Debugf("AI provider error for query length %d: error-type=%T", len(buf), err)
 		}
 		return nil, err
 	}

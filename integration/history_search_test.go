@@ -1,6 +1,8 @@
 package integration
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -84,40 +86,50 @@ func TestRecentRichHistoryIsNewestFirstPreservesRepeatsAndMetadata(t *testing.T)
 
 func TestRecentRichHistoryUsesFileOrderWhenShellHistoryHasNoTimestamps(t *testing.T) {
 	results := RecentRichHistory([]HistoryEntry{
-		{ID: "shell:old", Command: "first", Source: "zsh", historyOrder: 1},
-		{ID: "shell:new", Command: "second", Source: "zsh", historyOrder: 2},
+		{ID: "shell:old", Command: "first", Source: "zsh", HistoryOrder: 1},
+		{ID: "shell:new", Command: "second", Source: "zsh", HistoryOrder: 2},
 	}, time.Time{}, 2)
 	if len(results) != 2 || results[0].Command != "second" || results[1].Command != "first" {
 		t.Fatalf("expected the last shell-history line first, got %+v", results)
 	}
 }
 
-func TestCurrentRecentRichHistoryMergesPersistedAndLiveExecutionsWithoutCollapsingRepeats(t *testing.T) {
+func TestCurrentRecentRichHistoryReadsUnifiedExecutionSnapshotWithoutCollapsingRepeats(t *testing.T) {
 	now := time.Date(2026, time.August, 8, 10, 0, 0, 0, time.UTC)
 
-	richHistoryMu.Lock()
-	previousRich := richHistoryEntries
-	previousPersistent := persistentHistoryCache
-	previousLive := liveHistoryEntries
-	persistentHistoryCache = []HistoryEntry{
+	previousRich := RichHistorySnapshot()
+	PublishCanonicalHistory([]HistoryEntry{
 		{ID: "persisted", Command: "git status", StartedAt: now.Add(-time.Minute), Source: "zsh"},
-	}
-	liveHistoryEntries = []HistoryEntry{
 		{ID: "live", Command: "git status", StartedAt: now.Add(-time.Second), Duration: time.Second, ExitCode: 0, HasExitCode: true, Source: "vuja"},
-	}
-	richHistoryEntries = append([]HistoryEntry(nil), liveHistoryEntries...)
-	richHistoryMu.Unlock()
-	t.Cleanup(func() {
-		richHistoryMu.Lock()
-		richHistoryEntries = previousRich
-		persistentHistoryCache = previousPersistent
-		liveHistoryEntries = previousLive
-		richHistoryMu.Unlock()
 	})
+	t.Cleanup(func() { PublishCanonicalHistory(previousRich) })
 
 	results := CurrentRecentRichHistory(now, 10)
 	if len(results) != 2 || results[0].ID != "live" || results[1].ID != "persisted" {
 		t.Fatalf("expected merged newest-first executions with repeats preserved, got %+v", results)
+	}
+}
+
+func TestSearchCurrentRichHistoryKeepsOnlyTheBestBoundedResultsDeterministically(t *testing.T) {
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	entries := make([]HistoryEntry, 0, 1_000)
+	for index := range 1_000 {
+		entries = append(entries, HistoryEntry{
+			ID: fmt.Sprintf("event-%04d", index), Command: fmt.Sprintf("ssh forge@host-%04d", index),
+			StartedAt: now.Add(time.Duration(index) * time.Second), Source: "vuja",
+		})
+	}
+	PublishCanonicalHistory(entries)
+
+	first := SearchCurrentRichHistory("ssh", RichHistorySearchOptions{Now: now, Limit: 10})
+	second := SearchCurrentRichHistory("ssh", RichHistorySearchOptions{Now: now, Limit: 10})
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("expected deterministic bounded rich-history results, first=%v second=%v", first, second)
+	}
+	if len(first) != 10 || first[0].ID != "event-0999" || first[9].ID != "event-0990" {
+		t.Fatalf("expected the ten newest equal-score matches, got %+v", first)
 	}
 }
 
@@ -226,22 +238,10 @@ func TestRichHistoryMetadataFormatting(t *testing.T) {
 	}
 }
 
-func TestReplaceRichHistoryEntriesPreservesLiveSessionExecutions(t *testing.T) {
-	richHistoryMu.Lock()
-	originalEntries := richHistoryEntries
-	originalLive := liveHistoryEntries
-	originalPersistent := persistentHistoryCache
-	richHistoryEntries = nil
-	liveHistoryEntries = nil
-	persistentHistoryCache = nil
-	richHistoryMu.Unlock()
-	t.Cleanup(func() {
-		richHistoryMu.Lock()
-		richHistoryEntries = originalEntries
-		liveHistoryEntries = originalLive
-		persistentHistoryCache = originalPersistent
-		richHistoryMu.Unlock()
-	})
+func TestReplaceRichHistoryEntriesPublishesOneCanonicalGeneration(t *testing.T) {
+	originalEntries := RichHistorySnapshot()
+	PublishCanonicalHistory(nil)
+	t.Cleanup(func() { PublishCanonicalHistory(originalEntries) })
 
 	live := HistoryEntry{
 		ID:        "vuja:live",
@@ -251,11 +251,14 @@ func TestReplaceRichHistoryEntriesPreservesLiveSessionExecutions(t *testing.T) {
 		SessionID: "current",
 	}
 	AppendRichHistoryEntry(live)
-	ReplaceRichHistoryEntries([]HistoryEntry{{ID: "atuin:old", Command: "git status", Source: "atuin"}})
+	ReplaceRichHistoryEntries([]HistoryEntry{
+		live,
+		{ID: "atuin:old", Command: "git status", Source: "atuin"},
+	})
 
 	entries := RichHistorySnapshot()
 	if len(entries) != 2 || entries[0].ID != live.ID {
-		t.Fatalf("expected live execution to survive the asynchronous import refresh, got %+v", entries)
+		t.Fatalf("expected one canonical generation containing both sources, got %+v", entries)
 	}
 }
 

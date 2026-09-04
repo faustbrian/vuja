@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
 )
 
@@ -22,6 +23,37 @@ func TestCollectSuggestionCandidatesIncludesHistoryInDefaultMode(t *testing.T) {
 	}
 	if !foundHistory {
 		t.Fatal("expected learned history candidate in the default suggestion pool")
+	}
+}
+
+func TestLimitScoredSuggestionsKeepsExactPrefixHistoryVisible(t *testing.T) {
+	scored := []scoring.ScoredSuggestion{
+		{Suggestion: spec.Suggestion{Cmd: "deploy --help", Source: "spec"}, Score: 100},
+		{Suggestion: spec.Suggestion{Cmd: "deploy --version", Source: "spec"}, Score: 90},
+		{Suggestion: spec.Suggestion{Cmd: "deploy production", Source: "history"}, Score: 80},
+	}
+
+	results := limitScoredSuggestions(scored, 2, "deploy")
+
+	if len(results) != 2 {
+		t.Fatalf("expected two displayed suggestions, got %+v", results)
+	}
+	if results[1].Cmd != "deploy production" || results[1].Source != "history" {
+		t.Fatalf("expected an exact-prefix history candidate to survive the specification cap, got %+v", results)
+	}
+}
+
+func TestLimitScoredSuggestionsDoesNotReserveFuzzyHistory(t *testing.T) {
+	scored := []scoring.ScoredSuggestion{
+		{Suggestion: spec.Suggestion{Cmd: "deploy --help", Source: "spec"}, Score: 100},
+		{Suggestion: spec.Suggestion{Cmd: "deploy --version", Source: "spec"}, Score: 90},
+		{Suggestion: spec.Suggestion{Cmd: "run deploy production", Source: "history"}, Score: 80},
+	}
+
+	results := limitScoredSuggestions(scored, 2, "deploy")
+
+	if results[1].Cmd != "deploy --version" {
+		t.Fatalf("expected a non-prefix history match to follow normal ranking, got %+v", results)
 	}
 }
 

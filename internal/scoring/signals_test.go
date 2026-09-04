@@ -2,6 +2,7 @@ package scoring
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,5 +55,33 @@ func TestFilterSignalsNarrowsCachedCommandSignals(t *testing.T) {
 	}
 	if len(filtered.Feedback) != 1 || len(filtered.Outcomes) != 1 {
 		t.Fatalf("expected feedback and outcomes to narrow with the query, got feedback=%v outcomes=%v", filtered.Feedback, filtered.Outcomes)
+	}
+}
+
+func TestCollectSignalsRestartsAfterTruncatedBroadPrefix(t *testing.T) {
+	InvalidateSignalCache()
+	t.Cleanup(InvalidateSignalCache)
+	cwd := t.TempDir()
+	store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for index := range 60 {
+		if err := store.Record(t.Context(), fmt.Sprintf("status-command-%02d", index), cwd, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Record(t.Context(), "ssh forge@api", cwd, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	broad := CollectSignalsWithRanking(t.Context(), cwd, "s", "s", store, "", "", "balanced")
+	if !broad.Truncated {
+		t.Fatal("expected the broad signal query to report truncation")
+	}
+	narrow := CollectSignalsWithRanking(t.Context(), cwd, "ssh", "ssh", store, "", "", "balanced")
+	if len(narrow.LocalFrecency) != 1 || narrow.LocalFrecency[0].Cmd != "ssh forge@api" {
+		t.Fatalf("expected the narrow query to restart from indexed history, got %+v", narrow.LocalFrecency)
 	}
 }

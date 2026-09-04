@@ -2,43 +2,31 @@ package integration
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration/shell"
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/versenilvis/fuzzy"
 )
 
 var (
-	sessionHistory   []sessionHistoryEntry
-	sessionHistoryMu sync.Mutex
-
-	historyCache      []string
-	historyStatsCache []HistoryStat
-	idMapCache        map[string]int
-	searcherCache     *fuzzy.Searcher
-	mu                sync.RWMutex
-	historyLoadGate   = make(chan struct{}, 1)
-	historySearchMu   sync.Mutex
-	lastModTime       int64
-	lastAtuinModTime  int64
-	lastHistoryCheck  time.Time
-	lastHistorySource string
-	lastSearchQuery   string
-	lastSearchAliases string
-	lastSearchResults []HistResult
+	historyCache        []string
+	historyCommandIndex map[string]int
+	historyStatsCache   []HistoryStat
+	historyStatIndex    map[string]int
+	historyEventCount   int
+	historyEntryIndex   map[string]int
+	idMapCache          map[string]int
+	searcherCache       *fuzzy.Searcher
+	mu                  sync.RWMutex
+	historySearchMu     sync.Mutex
+	lastSearchQuery     string
+	lastSearchAliases   string
+	lastSearchResults   []HistResult
+	lastSearchTruncated bool
 )
-
-type sessionHistoryEntry struct {
-	Command    string
-	Cwd        string
-	RecordedAt time.Time
-}
 
 func RecordSessionCommand(cmd string) {
 	RecordSessionCommandAt(cmd, "")
@@ -47,29 +35,48 @@ func RecordSessionCommand(cmd string) {
 func RecordSessionCommandAt(cmd, cwd string) {
 	var recordable bool
 	cmd, recordable = normalizeInteractiveHistoryCommand(cmd)
-	if !recordable {
+	if !recordable || policy.IsSensitive(cmd) {
 		return
 	}
-	sessionHistoryMu.Lock()
-	if len(sessionHistory) > 0 && sessionHistory[len(sessionHistory)-1].Command == cmd {
-		sessionHistoryMu.Unlock()
-		return
-	}
-	sessionHistory = append(sessionHistory, sessionHistoryEntry{Command: cmd, Cwd: strings.TrimSpace(cwd), RecordedAt: time.Now()})
-	sessionHistoryMu.Unlock()
-
-	mu.Lock()
-	historyCache = nil // invalidate to merge session history on next search
-	historyStatsCache = nil
-	lastHistoryCheck = time.Time{}
-	resetIncrementalHistorySearchLocked()
-	mu.Unlock()
+	recordedAt := time.Now()
+	PublishCanonicalHistoryEntry(HistoryEntry{
+		ID:          "session:" + commandHistoryIdentity(cmd, cwd, recordedAt),
+		Command:     cmd,
+		Cwd:         strings.TrimSpace(cwd),
+		SubmittedAt: recordedAt,
+		StartedAt:   recordedAt,
+		Source:      "session",
+		State:       HistoryStateCompleted,
+	})
 }
 
 type HistResult struct {
 	ID         int
 	Cmd        string
 	FuzzyScore int
+}
+
+type HistorySearchStatus struct {
+	Query      string
+	Events     int
+	Candidates int
+	Matches    int
+	Truncated  bool
+}
+
+func CurrentHistorySearchStatus() HistorySearchStatus {
+	historySearchMu.Lock()
+	status := HistorySearchStatus{
+		Query:     lastSearchQuery,
+		Matches:   len(lastSearchResults),
+		Truncated: lastSearchTruncated,
+	}
+	historySearchMu.Unlock()
+	mu.RLock()
+	status.Events = historyEventCount
+	status.Candidates = len(historyCache)
+	mu.RUnlock()
+	return status
 }
 
 type HistoryStat struct {
@@ -97,7 +104,10 @@ func HistoryLoaded() bool {
 }
 
 func EnsureHistoryLoaded(ctx context.Context) error {
-	return ensureHistoryCache(ctx)
+	if ctx != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // SearchCachedHistory returns only already-loaded history and never waits for a
@@ -111,234 +121,107 @@ func SearchCachedHistory(query string, aliases map[string]string) ([]HistResult,
 		mu.RUnlock()
 		return nil, false
 	}
-	limit := min(len(historyCache), 2000)
 	// Published history snapshots are immutable. Pin their slice and map while
-	// holding the read lock, then search them without copying thousands of
-	// commands on every keystroke.
-	commands := historyCache[:limit]
+	// holding the read lock, then search them without copying on every keystroke.
+	commands := historyCache
 	ids := idMapCache
 	mu.RUnlock()
 
-	queries := []string{strings.ToLower(strings.TrimSpace(query))}
-	for name, target := range aliases {
-		name = strings.ToLower(strings.TrimSpace(name))
-		target = strings.ToLower(strings.TrimSpace(target))
-		if queries[0] == name && target != "" {
-			queries = append(queries, target)
-		} else if queries[0] == target && name != "" {
-			queries = append(queries, name)
-		}
-	}
-
-	results := make([]HistResult, 0, min(len(commands), 100))
-	for _, command := range commands {
-		lower := strings.ToLower(command)
-		matched := false
-		for _, candidate := range queries {
-			if candidate == "" || strings.HasPrefix(lower, candidate) || strings.Contains(lower, candidate) {
-				matched = true
+	queries := historyQueryAlternatives(query, aliases)
+	collect := func(requireSubcommand bool) []HistResult {
+		results := make([]HistResult, 0, min(len(commands), 1000))
+		for _, command := range commands {
+			if !historyCommandEligibleForAnyQuery(command, queries, requireSubcommand) {
+				continue
+			}
+			results = append(results, HistResult{ID: ids[command], Cmd: command})
+			if len(results) == 1000 {
 				break
 			}
 		}
-		if !matched {
-			continue
-		}
-		results = append(results, HistResult{ID: ids[command], Cmd: command})
-		if len(results) == 100 {
-			break
-		}
+		return results
+	}
+	results := collect(true)
+	if len(results) == 0 {
+		results = collect(false)
 	}
 	return results, true
 }
 
+func historyQueryAlternatives(query string, aliases map[string]string) []string {
+	query = strings.ToLower(strings.TrimSpace(query))
+	queries := []string{query}
+	for name, target := range aliases {
+		name = strings.ToLower(strings.TrimSpace(name))
+		target = strings.ToLower(strings.TrimSpace(target))
+		if query == name && target != "" {
+			queries = append(queries, target)
+		} else if query == target && name != "" {
+			queries = append(queries, name)
+		} else if name != "" && target != "" && strings.HasPrefix(query, name+" ") {
+			queries = append(queries, target+query[len(name):])
+		} else if name != "" && target != "" && strings.HasPrefix(query, target+" ") {
+			queries = append(queries, name+query[len(target):])
+		}
+	}
+	sort.Strings(queries[1:])
+	return queries
+}
+
+func historyCommandEligibleForAnyQuery(command string, queries []string, requireSubcommand bool) bool {
+	for _, query := range queries {
+		if historyCommandEligible(command, query, requireSubcommand) {
+			return true
+		}
+	}
+	return false
+}
+
+func historyCommandEligible(command, query string, requireSubcommand bool) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	fields := strings.Fields(strings.ToLower(command))
+	if len(fields) == 0 {
+		return false
+	}
+	queryFields := strings.Fields(query)
+	if len(queryFields) == 0 || !strings.Contains(query, " ") {
+		return strings.HasPrefix(fields[0], query)
+	}
+	if fields[0] != queryFields[0] {
+		return false
+	}
+	if !requireSubcommand {
+		return true
+	}
+	querySecondWord := ""
+	for _, field := range queryFields[1:] {
+		if !strings.HasPrefix(field, "-") {
+			querySecondWord = field
+			break
+		}
+	}
+	if querySecondWord == "" {
+		return true
+	}
+	return len(fields) > 1 && strings.HasPrefix(fields[1], querySecondWord)
+}
+
 func init() {
+	historyEntryIndex = make(map[string]int)
+	historyCommandIndex = make(map[string]int)
+	historyStatIndex = make(map[string]int)
 	idMapCache = make(map[string]int)
+	searcherCache = fuzzy.NewPlainSearcher(nil)
 }
 
 func ensureHistoryCache(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	shellName := "bash"
-	if shell.Current != nil {
-		shellName = shell.Current.GetName()
-	}
-	histFile := filepath.Join(home, ".bash_history")
-	switch shellName {
-	case "zsh":
-		histFile = filepath.Join(home, ".zsh_history")
-	case "fish":
-		histFile = filepath.Join(home, ".local", "share", "fish", "fish_history")
-	}
-	importAtuin := config.Get().History.ImportAtuin
-	atuinPath := ""
-	sourceKind := "shell"
-	if importAtuin {
-		atuinPath = atuinHistoryPath(home)
-		sourceKind = "atuin"
-	}
-	sourceKey := shellName + "\x00" + histFile + "\x00" + atuinPath + "\x00" + sourceKind
-	mu.RLock()
-	recentlyChecked := historyCache != nil && lastHistorySource == sourceKey && time.Since(lastHistoryCheck) < 500*time.Millisecond
-	mu.RUnlock()
-	if recentlyChecked {
-		return nil
-	}
-	historyModTime := maxFileModTime(histFile)
-	atuinModTime := maxFileModTime(atuinPath, atuinPath+"-wal")
-
-	cacheCurrent := func() bool {
-		mu.RLock()
-		defer mu.RUnlock()
-		return historyCache != nil && lastHistorySource == sourceKey &&
-			historyModTime <= lastModTime && atuinModTime <= lastAtuinModTime
-	}
-	if cacheCurrent() {
-		mu.Lock()
-		lastHistoryCheck = time.Now()
-		lastHistorySource = sourceKey
-		mu.Unlock()
-		return nil
-	}
-
-	select {
-	case historyLoadGate <- struct{}{}:
-		defer func() { <-historyLoadGate }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	if cacheCurrent() {
-		mu.Lock()
-		lastHistoryCheck = time.Now()
-		lastHistorySource = sourceKey
-		mu.Unlock()
-		return nil
-	}
-
-	persistent, err := loadPersistentHistory(ctx, histFile, shellName, atuinPath, importAtuin)
-	if err != nil {
-		return err
-	}
-	setPersistentHistoryEntries(historyOccurrencesToEntries(persistent))
-
-	sessionHistoryMu.Lock()
-	session := append([]sessionHistoryEntry(nil), sessionHistory...)
-	sessionHistoryMu.Unlock()
-
-	seen := make(map[string]bool)
-	commands := make([]string, 0, len(session)+len(persistent))
-	ids := make(map[string]int)
-	currentID := len(session) + len(persistent)
-	for index := len(session) - 1; index >= 0; index-- {
-		command := session[index].Command
-		if !seen[command] {
-			commands = append(commands, command)
-			seen[command] = true
-			ids[command] = currentID
-			currentID--
-		}
-	}
-	for index := len(persistent) - 1; index >= 0; index-- {
-		command := persistent[index].Command
-		if !seen[command] {
-			commands = append(commands, command)
-			seen[command] = true
-			ids[command] = currentID
-			currentID--
-		}
-	}
-
-	byCommandAndDirectory := make(map[string]*HistoryStat)
-	for _, occurrence := range persistent {
-		key := occurrence.Command + "\x00" + occurrence.Cwd
-		stat := byCommandAndDirectory[key]
-		if stat == nil {
-			stat = &HistoryStat{
-				Command: occurrence.Command, Cwd: occurrence.Cwd, LastUsed: occurrence.Timestamp,
-				ExitCode: occurrence.ExitCode, HasExitCode: occurrence.HasExitCode,
-				Duration: occurrence.Duration, Source: occurrence.Source,
-			}
-			byCommandAndDirectory[key] = stat
-		}
-		stat.Count++
-		if occurrence.Timestamp.After(stat.LastUsed) {
-			stat.LastUsed = occurrence.Timestamp
-			stat.ExitCode = occurrence.ExitCode
-			stat.HasExitCode = occurrence.HasExitCode
-			stat.Duration = occurrence.Duration
-		}
-	}
-	for _, entry := range session {
-		key := entry.Command + "\x00" + entry.Cwd
-		stat := byCommandAndDirectory[key]
-		if stat == nil {
-			stat = &HistoryStat{Command: entry.Command, Cwd: entry.Cwd, Source: "session"}
-			byCommandAndDirectory[key] = stat
-		}
-		stat.Count++
-		if entry.RecordedAt.After(stat.LastUsed) {
-			stat.LastUsed = entry.RecordedAt
-		}
-	}
-	stats := make([]HistoryStat, 0, len(byCommandAndDirectory))
-	for _, stat := range byCommandAndDirectory {
-		stats = append(stats, *stat)
-	}
-	sort.SliceStable(stats, func(i, j int) bool {
-		if !stats[i].LastUsed.Equal(stats[j].LastUsed) {
-			return stats[i].LastUsed.After(stats[j].LastUsed)
-		}
-		if stats[i].Command != stats[j].Command {
-			return stats[i].Command < stats[j].Command
-		}
-		return stats[i].Cwd < stats[j].Cwd
-	})
-	searcher := fuzzy.NewPlainSearcher(commands)
-
-	mu.Lock()
-	historyCache = commands
-	historyStatsCache = stats
-	idMapCache = ids
-	searcherCache = searcher
-	lastModTime = historyModTime
-	lastAtuinModTime = atuinModTime
-	lastHistoryCheck = time.Now()
-	lastHistorySource = sourceKey
-	resetIncrementalHistorySearchLocked()
-	mu.Unlock()
-	return nil
-}
-
-func loadPersistentHistory(ctx context.Context, histFile, shellName, atuinPath string, importAtuin bool) ([]historyOccurrence, error) {
-	if importAtuin {
-		if atuin, err := loadAtuinHistoryContext(ctx, atuinPath); err == nil && len(atuin) > 0 {
-			return atuin, nil
-		}
-	}
-
-	file, err := os.Open(histFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	persistent, loadErr := loadShellHistoryContext(ctx, file, shellName)
-	closeErr := file.Close()
-	if loadErr != nil {
-		return nil, loadErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	return persistent, nil
+	return ctx.Err()
 }
 
 func SearchHistory(query string, aliases map[string]string) ([]HistResult, error) {
@@ -396,6 +279,7 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 			}
 		}
 	}
+	sort.Strings(alternativeQueries)
 
 	var results []HistResult
 	seenCmds := make(map[string]bool)
@@ -406,9 +290,10 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 	previousQuery := lastSearchQuery
 	previousAliases := lastSearchAliases
 	previousResults := append([]HistResult(nil), lastSearchResults...)
+	previousTruncated := lastSearchTruncated
 	historySearchMu.Unlock()
 	if previousQuery != "" && strings.HasPrefix(strings.ToLower(query), strings.ToLower(previousQuery)) &&
-		aliasesKey == previousAliases && len(previousResults) > 0 && len(previousResults) < 1000 {
+		aliasesKey == previousAliases && len(previousResults) > 0 && !previousTruncated {
 		candidateHistory = make([]string, 0, len(previousResults))
 		for _, result := range previousResults {
 			candidateHistory = append(candidateHistory, result.Cmd)
@@ -416,6 +301,7 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 		candidateSearcher = fuzzy.NewPlainSearcher(candidateHistory)
 	}
 
+	truncated := false
 	addMatches := func(q string, subcmdFilter bool) {
 		if ctx.Err() != nil {
 			return
@@ -470,19 +356,49 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 				}
 			}
 
+			strictMatches++
+			if strictMatches > 1000 {
+				truncated = true
+				continue
+			}
 			seenCmds[cmd] = true
 			results = append(results, HistResult{
 				ID:         statsIDs[cmd],
 				Cmd:        cmd,
 				FuzzyScore: 10000,
 			})
-			strictMatches++
-			if strictMatches >= 200 {
-				break
-			}
 		}
 
-		matches := candidateSearcher.SearchWithScores(q, &fuzzy.SearchOptions{Limit: 1000})
+		fuzzyHistory := make([]string, 0, len(candidateHistory))
+		for _, command := range candidateHistory {
+			fields := strings.Fields(command)
+			firstWordLow := ""
+			if len(fields) > 0 {
+				firstWordLow = strings.ToLower(fields[0])
+			}
+			if queryFirstWord != "" {
+				if firstWordLow != queryFirstWord {
+					continue
+				}
+				if subcmdFilter && querySecondWord != "" {
+					if len(fields) < 2 || !strings.HasPrefix(strings.ToLower(fields[1]), querySecondWord) {
+						continue
+					}
+				}
+			} else if !strings.HasPrefix(firstWordLow, qLow) {
+				continue
+			}
+			fuzzyHistory = append(fuzzyHistory, command)
+		}
+		fuzzySearcher := candidateSearcher
+		if len(fuzzyHistory) != len(candidateHistory) {
+			fuzzySearcher = fuzzy.NewPlainSearcher(fuzzyHistory)
+		}
+		matches := fuzzySearcher.SearchWithScores(q, &fuzzy.SearchOptions{Limit: 1001})
+		if len(matches) > 1000 {
+			truncated = true
+			matches = matches[:1000]
+		}
 		for _, m := range matches {
 			if ctx.Err() != nil {
 				return
@@ -566,14 +482,14 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 		return bestTier
 	}
 
-	tiers := make([]int, len(results))
-	for i, r := range results {
-		tiers[i] = getTier(r.Cmd, query)
+	tiers := make(map[string]int, len(results))
+	for _, result := range results {
+		tiers[result.Cmd] = getTier(result.Cmd, query)
 	}
 
 	sort.SliceStable(results, func(i, j int) bool {
-		tI := tiers[i]
-		tJ := tiers[j]
+		tI := tiers[results[i].Cmd]
+		tJ := tiers[results[j].Cmd]
 		if tI != tJ {
 			return tI < tJ
 		}
@@ -584,11 +500,19 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 
 		return results[i].ID > results[j].ID
 	})
+	if len(results) > 1000 {
+		results = results[:1000]
+		truncated = true
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	historySearchMu.Lock()
 	lastSearchQuery = query
 	lastSearchAliases = aliasesKey
 	lastSearchResults = append([]HistResult(nil), results...)
+	lastSearchTruncated = truncated
 	historySearchMu.Unlock()
 	return results, nil
 }
@@ -617,5 +541,6 @@ func resetIncrementalHistorySearchLocked() {
 	lastSearchQuery = ""
 	lastSearchAliases = ""
 	lastSearchResults = nil
+	lastSearchTruncated = false
 	historySearchMu.Unlock()
 }

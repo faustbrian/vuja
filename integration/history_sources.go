@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/faustbrian/vuja/internal/policy"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,13 +29,81 @@ type historyOccurrence struct {
 	SessionID   string
 }
 
+const (
+	externalHistoryImportLimit   = 100_000
+	externalHistoryRecordLimit   = 1024 * 1024
+	externalHistoryMetadataLimit = 64 * 1024
+	externalHistoryMemoryLimit   = 64 * 1024 * 1024
+)
+
+type boundedHistoryBuffer struct {
+	slots    []historyOccurrence
+	start    int
+	size     int
+	bytes    int
+	maxBytes int
+}
+
+func newBoundedHistoryBuffer(maxEntries, maxBytes int) *boundedHistoryBuffer {
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+	return &boundedHistoryBuffer{slots: make([]historyOccurrence, maxEntries), maxBytes: max(maxBytes, 0)}
+}
+
+func historyOccurrenceBytes(occurrence historyOccurrence) int {
+	return len(occurrence.ID) + len(occurrence.Command) + len(occurrence.Cwd) + len(occurrence.Source) +
+		len(occurrence.Host) + len(occurrence.SessionID) + 128
+}
+
+func (buffer *boundedHistoryBuffer) Add(occurrence historyOccurrence) bool {
+	if buffer == nil || len(buffer.slots) == 0 {
+		return false
+	}
+	size := historyOccurrenceBytes(occurrence)
+	if size > buffer.maxBytes {
+		return false
+	}
+	for buffer.size == len(buffer.slots) || buffer.bytes+size > buffer.maxBytes {
+		removed := &buffer.slots[buffer.start]
+		buffer.bytes -= historyOccurrenceBytes(*removed)
+		*removed = historyOccurrence{}
+		buffer.start = (buffer.start + 1) % len(buffer.slots)
+		buffer.size--
+	}
+	index := (buffer.start + buffer.size) % len(buffer.slots)
+	buffer.slots[index] = occurrence
+	buffer.size++
+	buffer.bytes += size
+	return true
+}
+
+func (buffer *boundedHistoryBuffer) Entries() []historyOccurrence {
+	if buffer == nil || buffer.size == 0 {
+		return nil
+	}
+	entries := make([]historyOccurrence, 0, buffer.size)
+	for index := range buffer.size {
+		entries = append(entries, buffer.slots[(buffer.start+index)%len(buffer.slots)])
+	}
+	return entries
+}
+
 func loadShellHistory(file *os.File, shellName string) ([]historyOccurrence, error) {
 	return loadShellHistoryContext(context.Background(), file, shellName)
 }
 
 func loadShellHistoryContext(ctx context.Context, file *os.File, shellName string) ([]historyOccurrence, error) {
-	var occurrences []historyOccurrence
+	return loadShellHistoryContextLimit(ctx, file, shellName, externalHistoryImportLimit)
+}
+
+func loadShellHistoryContextLimit(ctx context.Context, file *os.File, shellName string, limit int) ([]historyOccurrence, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	occurrences := newBoundedHistoryBuffer(limit, externalHistoryMemoryLimit)
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), externalHistoryRecordLimit)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -60,10 +128,13 @@ func loadShellHistoryContext(ctx context.Context, file *os.File, shellName strin
 		var recordable bool
 		occurrence.Command, recordable = normalizeInteractiveHistoryCommand(occurrence.Command)
 		if recordable {
-			occurrences = append(occurrences, occurrence)
+			occurrences.Add(occurrence)
 		}
 	}
-	return occurrences, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return occurrences.Entries(), nil
 }
 
 func parseZshHistoryLine(line string) historyOccurrence {
@@ -118,6 +189,13 @@ func loadAtuinHistory(path string) ([]historyOccurrence, error) {
 }
 
 func loadAtuinHistoryContext(ctx context.Context, path string) ([]historyOccurrence, error) {
+	return loadAtuinHistoryContextLimit(ctx, path, externalHistoryImportLimit)
+}
+
+func loadAtuinHistoryContextLimit(ctx context.Context, path string, limit int) ([]historyOccurrence, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
@@ -149,21 +227,37 @@ func loadAtuinHistoryContext(ctx context.Context, path string) ([]historyOccurre
 		columnExpr("id", "''") + ", " +
 		columnExpr("hostname", "''") + ", " +
 		columnExpr("session", "''") +
-		" FROM history WHERE command IS NOT NULL"
+		" FROM history WHERE command IS NOT NULL AND length(CAST(command AS BLOB)) <= ?"
+	queryArguments := []any{externalHistoryRecordLimit}
+	for _, name := range []string{"timestamp", "cwd", "exit", "duration", "id", "hostname", "session"} {
+		if columns[name] {
+			query += " AND length(CAST(" + name + " AS BLOB)) <= ?"
+			queryArguments = append(queryArguments, externalHistoryMetadataLimit)
+		}
+	}
 	if columns["deleted_at"] {
 		query += " AND deleted_at IS NULL"
 	}
+	order := make([]string, 0, 2)
 	if columns["timestamp"] {
-		query += " ORDER BY timestamp ASC"
+		order = append(order, "timestamp DESC")
 	}
+	if columns["id"] {
+		order = append(order, "id DESC")
+	} else {
+		order = append(order, "rowid DESC")
+	}
+	query += " ORDER BY " + strings.Join(order, ", ") + " LIMIT ?"
+	queryArguments = append(queryArguments, limit)
 
-	rows, err := db.QueryContext(ctx, query)
+	rows, err := db.QueryContext(ctx, query, queryArguments...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var occurrences []historyOccurrence
+	occurrences := make([]historyOccurrence, 0, min(limit, 1024))
+	usedBytes := 0
 	for rows.Next() {
 		var command, timestamp, cwd, exitCode, duration, id, host, sessionID string
 		if err := rows.Scan(&command, &timestamp, &cwd, &exitCode, &duration, &id, &host, &sessionID); err != nil {
@@ -189,21 +283,60 @@ func loadAtuinHistoryContext(ctx context.Context, path string) ([]historyOccurre
 		if nanoseconds, parseErr := strconv.ParseInt(strings.TrimSpace(duration), 10, 64); parseErr == nil {
 			occurrence.Duration = time.Duration(nanoseconds)
 		}
+		size := historyOccurrenceBytes(occurrence)
+		if usedBytes+size > externalHistoryMemoryLimit {
+			break
+		}
+		usedBytes += size
 		occurrences = append(occurrences, occurrence)
 	}
-	return occurrences, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(occurrences)-1; left < right; left, right = left+1, right-1 {
+		occurrences[left], occurrences[right] = occurrences[right], occurrences[left]
+	}
+	return occurrences, nil
+}
+
+func DefaultAtuinHistoryPath(home string) string {
+	return atuinHistoryPath(home)
+}
+
+func LoadAtuinHistoryEntries(ctx context.Context, path string) ([]HistoryEntry, error) {
+	occurrences, err := loadAtuinHistoryContext(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return historyOccurrencesToEntries(occurrences), nil
+}
+
+func LoadShellHistoryEntries(ctx context.Context, path, shellName string) ([]HistoryEntry, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	occurrences, err := loadShellHistoryContext(ctx, file, shellName)
+	if err != nil {
+		return nil, err
+	}
+	return historyOccurrencesToEntries(occurrences), nil
+}
+
+func DefaultShellHistoryPath(home, shellName string) string {
+	switch shellName {
+	case "zsh":
+		return filepath.Join(home, ".zsh_history")
+	case "fish":
+		return filepath.Join(home, ".local", "share", "fish", "fish_history")
+	default:
+		return filepath.Join(home, ".bash_history")
+	}
 }
 
 func normalizeInteractiveHistoryCommand(command string) (string, bool) {
-	if command == "" {
-		return "", false
-	}
-	first, _ := utf8.DecodeRuneInString(command)
-	if unicode.IsSpace(first) {
-		return "", false
-	}
-	command = strings.TrimSpace(command)
-	return command, command != "" && strings.IndexFunc(command, unicode.IsControl) == -1
+	return policy.HistoryCommand(command, false)
 }
 
 func tableColumns(db *sql.DB, table string) (map[string]bool, error) {

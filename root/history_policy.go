@@ -1,9 +1,7 @@
 package root
 
 import (
-	"strings"
-	"unicode"
-	"unicode/utf8"
+	"github.com/faustbrian/vuja/internal/policy"
 )
 
 const (
@@ -23,13 +21,5 @@ func parseCommandStartMessage(message string) (match, ignored bool) {
 }
 
 func historyRecordableCommand(raw string, shellIgnored bool) (string, bool) {
-	if raw == "" || shellIgnored {
-		return "", false
-	}
-	first, _ := utf8.DecodeRuneInString(raw)
-	if unicode.IsSpace(first) {
-		return "", false
-	}
-	normalized := strings.TrimSpace(raw)
-	return normalized, normalized != ""
+	return policy.HistoryCommand(raw, shellIgnored)
 }

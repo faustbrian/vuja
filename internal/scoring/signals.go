@@ -14,6 +14,7 @@ type signalCacheKey struct {
 	cwd          string
 	previous     string
 	prevSkeleton string
+	historyRank  string
 }
 
 type signalCacheEntry struct {
@@ -39,6 +40,7 @@ type SignalSet struct {
 	ExactTransitionIsLocal bool
 	Feedback               []FeedbackEntry
 	Outcomes               []OutcomeEntry
+	Truncated              bool
 	Query                  string
 	RootCommand            string
 	Cwd                    string
@@ -46,14 +48,23 @@ type SignalSet struct {
 
 // CollectSignals gathers environment, workspace, and historical frecency/transition signals for the given query and directory
 func CollectSignals(ctx context.Context, cwd, query, rootCmd string, frecency *FrecencyStore, prevCommand, prevCmdSkeleton string) SignalSet {
+	return CollectSignalsWithRanking(ctx, cwd, query, rootCmd, frecency, prevCommand, prevCmdSkeleton, "balanced")
+}
+
+func CollectSignalsWithRanking(
+	ctx context.Context,
+	cwd, query, rootCmd string,
+	frecency *FrecencyStore,
+	prevCommand, prevCmdSkeleton, historyRanking string,
+) SignalSet {
 	query = strings.TrimSpace(query)
 	rootCmd = strings.TrimSpace(rootCmd)
-	key := signalCacheKey{frecency, cwd, prevCommand, prevCmdSkeleton}
+	key := signalCacheKey{frecency, cwd, prevCommand, prevCmdSkeleton, historyRanking}
 	if frecency != nil {
 		signalCacheMu.Lock()
 		cached := signalCache
 		signalCacheMu.Unlock()
-		if cached.key == key && time.Since(cached.updatedAt) < 2*time.Second && strings.HasPrefix(strings.ToLower(query), strings.ToLower(cached.query)) {
+		if cached.key == key && !cached.signals.Truncated && time.Since(cached.updatedAt) < 2*time.Second && strings.HasPrefix(strings.ToLower(query), strings.ToLower(cached.query)) {
 			return filterSignals(cached.signals, query, rootCmd)
 		}
 	}
@@ -71,17 +82,21 @@ func CollectSignals(ctx context.Context, cwd, query, rootCmd string, frecency *F
 	var exactTransIsLocal bool
 	var feedback []FeedbackEntry
 	var outcomes []OutcomeEntry
+	var truncated bool
 
 	if frecency != nil {
 		limit := 50
 		if rootCmd == "cd" || rootCmd == "z" {
 			limit = 200
 		}
-		snapshot, _ := frecency.QuerySignalSnapshot(ctx, cwd, ws.Root, query, limit, prevCommand, prevCmdSkeleton)
+		snapshot, _ := frecency.QuerySignalSnapshotRanked(
+			ctx, cwd, ws.Root, query, limit, prevCommand, prevCmdSkeleton, historyRanking,
+		)
 		local, project, global = snapshot.Local, snapshot.Project, snapshot.Global
 		trans, transIsLocal = snapshot.Transitions, snapshot.TransitionsLocal
 		exactTrans, exactTransIsLocal = snapshot.ExactTransitions, snapshot.ExactTransitionsLocal
 		feedback, outcomes = snapshot.Feedback, snapshot.Outcomes
+		truncated = snapshot.Truncated
 	}
 
 	result := SignalSet{
@@ -98,6 +113,7 @@ func CollectSignals(ctx context.Context, cwd, query, rootCmd string, frecency *F
 		Query:                  query,
 		RootCommand:            rootCmd,
 		Cwd:                    cwd,
+		Truncated:              truncated,
 	}
 	if frecency != nil {
 		signalCacheMu.Lock()

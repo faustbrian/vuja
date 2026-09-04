@@ -1,6 +1,9 @@
 package root
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 type historyNavigation struct {
 	mu       sync.Mutex
@@ -84,5 +87,9 @@ func historyPromptReplacement(command string) []byte {
 	if command == "" {
 		return nil
 	}
-	return append([]byte{0x15}, command...)
+	replacement := []byte{0x15}
+	if strings.ContainsAny(command, "\r\n") {
+		return append(replacement, bracketedPasteSequence(command)...)
+	}
+	return append(replacement, command...)
 }

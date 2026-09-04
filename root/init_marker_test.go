@@ -1,11 +1,13 @@
 package root
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSupportedShellsEmitOrderedTerminalMarkers(t *testing.T) {
@@ -128,6 +130,190 @@ func TestZshInitReportsHistoryIgnoreWithoutSendingTheCommand(t *testing.T) {
 	}
 	if strings.Contains(script, `VUJA_CMD_START:$1`) {
 		t.Fatal("history decision message must not send command text")
+	}
+}
+
+func TestZshInitPreservesLoadedHistoryHookDecision(t *testing.T) {
+	path, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh is not installed")
+	}
+	for name, setup := range map[string]string{
+		"special function": "zshaddhistory() { return 1 }",
+		"hook array":       "reject_history() { return 1 }; typeset -ga zshaddhistory_functions=(reject_history)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			integrationPath := filepath.Join(t.TempDir(), "init.zsh")
+			if err := os.WriteFile(integrationPath, []byte(shellInitScript("zsh", "/unused/vuja")), 0600); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(path, "-f", "-c", setup+`
+source "$1"
+zshaddhistory $'private command\n'
+_vuja_preexec 'private command'
+`, "vuja-zsh-policy-test", integrationPath)
+			command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=1")
+			output, err := command.Output()
+			if err != nil {
+				t.Fatalf("zsh history-policy integration failed: %v", err)
+			}
+			if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+				t.Fatalf("expected rejected zsh history entry to be ignored, got %q", output)
+			}
+		})
+	}
+}
+
+func TestZshInitPreservesHistoryPoliciesLoadedBetweenHookSources(t *testing.T) {
+	path, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh is not installed")
+	}
+	integrationPath := filepath.Join(t.TempDir(), "init.zsh")
+	if err := os.WriteFile(integrationPath, []byte(shellInitScript("zsh", "/unused/vuja")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(path, "-f", "-c", `
+source "$1"
+zshaddhistory() { return 0 }
+reject_late_history() { return 1 }
+typeset -ga zshaddhistory_functions=(reject_late_history)
+source "$1"
+zshaddhistory $'private command\n'
+_vuja_preexec 'private command'
+`, "vuja-zsh-late-policy-test", integrationPath)
+	command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=1")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("zsh late history-policy integration failed: %v", err)
+	}
+	if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+		t.Fatalf("expected late zsh history policy to remain effective, got %q", output)
+	}
+}
+
+func TestBashInitReportsHistoryControlAndIgnorePolicies(t *testing.T) {
+	script := shellInitScript("bash", "/unused/vuja")
+	for _, expected := range []string{"HISTCONTROL", "HISTIGNORE", "HISTCMD", "_vuja_previous_histcmd", "[[ -o history"} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected Bash integration to contain %q", expected)
+		}
+	}
+	if strings.Contains(script, "BASH_COMMAND") {
+		t.Fatal("Bash history policy must use the shell's complete-line history decision, not the current simple command")
+	}
+}
+
+func TestFishInitPreservesTheLoadedHistoryPolicyDecision(t *testing.T) {
+	script := shellInitScript("fish", "/unused/vuja")
+	for _, expected := range []string{
+		"fish_should_add_to_history",
+		"_vuja_original_fish_should_add_to_history",
+		"_vuja_history_policy_status",
+		"fish_private_mode",
+		"VUJA_CMD_START:IGNORE",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("expected Fish integration to contain %q", expected)
+		}
+	}
+}
+
+func TestFishInitReportsLoadedHistoryPolicyDecision(t *testing.T) {
+	path, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish is not installed")
+	}
+	integrationPath := filepath.Join(t.TempDir(), "init.fish")
+	if err := os.WriteFile(integrationPath, []byte(shellInitScript("fish", "/unused/vuja")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(path, "--no-config", "-c", `
+function fish_should_add_to_history
+    return 1
+end
+source "$argv[1]"
+fish_should_add_to_history 'private command'
+emit fish_preexec 'private command'
+`, integrationPath)
+	command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=1")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("fish history-policy integration failed: %v", err)
+	}
+	if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+		t.Fatalf("expected rejected fish history entry to be ignored, got %q", output)
+	}
+}
+
+func TestFishInitPreservesHistoryPolicyLoadedBetweenHookSources(t *testing.T) {
+	path, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish is not installed")
+	}
+	integrationPath := filepath.Join(t.TempDir(), "init.fish")
+	if err := os.WriteFile(integrationPath, []byte(shellInitScript("fish", "/unused/vuja")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(path, "--no-config", "-c", `
+source "$argv[1]"
+function fish_should_add_to_history
+    return 1
+end
+source "$argv[1]"
+fish_should_add_to_history 'private command'
+emit fish_preexec 'private command'
+`, integrationPath)
+	command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=1")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("fish late history-policy integration failed: %v", err)
+	}
+	if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+		t.Fatalf("expected late fish history policy to remain effective, got %q", output)
+	}
+}
+
+func TestFishInitCanBeResourcedWithoutRecursingHistoryPolicy(t *testing.T) {
+	path, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish is not installed")
+	}
+	integrationPath := filepath.Join(t.TempDir(), "init.fish")
+	if err := os.WriteFile(integrationPath, []byte(shellInitScript("fish", "/unused/vuja")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, path, "--no-config", "-c", `
+source "$argv[1]"
+source "$argv[1]"
+fish_should_add_to_history 'public command'
+echo $status
+`, integrationPath)
+	command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=1")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("fish repeated history-policy integration failed: %v", err)
+	}
+	if strings.TrimSpace(string(output)) != "0" {
+		t.Fatalf("expected unchanged fish history policy to remain non-recursive, got %q", output)
+	}
+}
+
+func TestManagedShellProtocolAcknowledgesDurableHistoryWithoutFlushingShellHistory(t *testing.T) {
+	for _, shellName := range []string{"zsh", "bash", "fish"} {
+		t.Run(shellName, func(t *testing.T) {
+			script := shellInitScript(shellName, "/unused/vuja")
+			if !strings.Contains(script, "VUJA_HISTORY_ACK_FD") {
+				t.Fatalf("expected %s managed protocol to wait for durable history", shellName)
+			}
+			for _, unsafeFlush := range []string{"fc -AI", "history -a", "history save", "VUJA_HISTORY_MIRROR"} {
+				if strings.Contains(script, unsafeFlush) {
+					t.Fatalf("expected %s managed protocol not to flush unrelated native history with %q", shellName, unsafeFlush)
+				}
+			}
+		})
 	}
 }
 

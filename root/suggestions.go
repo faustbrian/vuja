@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/faustbrian/vuja/integration"
@@ -35,16 +34,7 @@ func mergeResultsProfiled(query string, mode string) ([]spec.Suggestion, map[str
 
 func mergeResultsProfiledContext(ctx context.Context, query string, mode string) ([]spec.Suggestion, map[string]time.Duration) {
 	scored, timings := scoreResultsProfiledContext(ctx, query, mode)
-	maxSugg := config.Get().UI.MaxSuggestions
-
-	finalResults := make([]spec.Suggestion, 0, min(len(scored), maxSugg))
-	for _, result := range scored {
-		finalResults = append(finalResults, result.Suggestion)
-		if len(finalResults) == maxSugg {
-			break
-		}
-	}
-	return finalResults, timings
+	return limitScoredSuggestions(scored, config.Get().UI.MaxSuggestions, query), timings
 }
 
 func mergeFastResultsProfiled(query string, mode string) ([]spec.Suggestion, map[string]time.Duration) {
@@ -82,15 +72,42 @@ func mergeFastResultsProfiled(query string, mode string) ([]spec.Suggestion, map
 	measure("fast-rank", func() {
 		scored = scoring.ScoreWithConfig(candidates, scoring.SignalSet{Query: strings.TrimSpace(query), Cwd: spec.GetCWD()}, suggestionScoreConfig())
 	})
-	limit := config.Get().UI.MaxSuggestions
-	results := make([]spec.Suggestion, 0, min(len(scored), limit))
-	for _, result := range scored {
-		results = append(results, result.Suggestion)
-		if len(results) == limit {
+	return limitScoredSuggestions(scored, config.Get().UI.MaxSuggestions, query), timings
+}
+
+// limitScoredSuggestions applies the configured display cap after every
+// candidate has been scored. A single genuine exact-prefix history row is
+// reserved when generic specification rows would otherwise occupy the whole
+// display, preserving history recall without bypassing normal ranking for
+// fuzzy history matches.
+func limitScoredSuggestions(scored []scoring.ScoredSuggestion, limit int, query string) []spec.Suggestion {
+	if limit <= 0 || len(scored) == 0 {
+		return nil
+	}
+	visible := min(len(scored), limit)
+	results := make([]spec.Suggestion, visible)
+	for index := range visible {
+		results[index] = scored[index].Suggestion
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return results
+	}
+	isExactPrefixHistory := func(suggestion spec.Suggestion) bool {
+		return suggestion.Source == "history" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(suggestion.Cmd)), query)
+	}
+	for _, suggestion := range results {
+		if isExactPrefixHistory(suggestion) {
+			return results
+		}
+	}
+	for index := visible; index < len(scored); index++ {
+		if isExactPrefixHistory(scored[index].Suggestion) {
+			results[visible-1] = scored[index].Suggestion
 			break
 		}
 	}
-	return results, timings
+	return results
 }
 
 func scoreResults(query string, mode string) []scoring.ScoredSuggestion {
@@ -118,7 +135,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 	cwd := spec.GetCWD()
 
 	// Refresh aliases once, then run immutable provider reads in parallel.
-	logger.Debugf("Merge Calling Lookup for '%s'", query)
+	logger.Debugf("suggestion lookup requested: bytes=%d", len(query))
 	aliases := spec.RefreshShellAliases()
 	type coreProviderResult struct {
 		name        string
@@ -179,10 +196,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 		return nil, timings
 	}
 	deduped := collectSuggestionCandidates(activeQuery, cmdResults, histResults)
-	var store *scoring.FrecencyStore
-	if !persistentHistoryImporting.Load() {
-		store, _ = scoring.GetFrecencyStore()
-	}
+	store := scoring.LoadedFrecencyStore()
 	type localProviderResult struct {
 		name        string
 		suggestions []spec.Suggestion
@@ -289,7 +303,10 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 	prevCommand, prevSkeleton := getPrevCommandSignals()
 	var signals scoring.SignalSet
 	measure("signals", func() {
-		signals = scoring.CollectSignals(ctxTimeout, cwd, normalizedQuery, rootCmd, store, prevCommand, prevSkeleton)
+		signals = scoring.CollectSignalsWithRanking(
+			ctxTimeout, cwd, normalizedQuery, rootCmd, store, prevCommand, prevSkeleton,
+			config.Get().Suggestions.HistoryRanking,
+		)
 	})
 	var results []scoring.ScoredSuggestion
 	measure("rank", func() {
@@ -464,108 +481,17 @@ func collectSuggestionCandidates(query string, commandResults []spec.Suggestion,
 	}
 	for i, result := range historyResults {
 		add(spec.Suggestion{
-			Cmd:        result.Cmd,
-			Desc:       "history",
-			Icon:       "history",
-			Source:     "history",
-			Confidence: max(55-(i*2), 40),
+			Cmd:    result.Cmd,
+			Desc:   "history",
+			Icon:   "history",
+			Source: "history",
+			// Exact history recall must remain eligible ahead of generic
+			// specification options; recency still differentiates history rows.
+			Confidence: max(90-(i/4), 65),
 		})
 	}
 	return candidates
 }
-
-func importPersistentHistory() {
-	persistentHistoryImporting.Store(true)
-	defer func() {
-		persistentHistoryImporting.Store(false)
-		scoring.InvalidateSignalCache()
-		spec.NotifyCompletionUpdate()
-	}()
-	if _, err := integration.SearchHistory("", nil); err != nil {
-		return
-	}
-	stats := integration.HistorySnapshot()
-	entries := make([]scoring.ImportedHistoryEntry, 0, len(stats))
-	for _, stat := range stats {
-		if policy.IsSensitive(stat.Command) {
-			continue
-		}
-		entries = append(entries, scoring.ImportedHistoryEntry{
-			Command:     stat.Command,
-			Cwd:         stat.Cwd,
-			Count:       stat.Count,
-			LastUsed:    stat.LastUsed,
-			ExitCode:    stat.ExitCode,
-			HasExitCode: stat.HasExitCode,
-			Duration:    stat.Duration,
-			Source:      stat.Source,
-		})
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if store, err := scoring.GetFrecencyStore(); err == nil {
-		_ = store.ReplaceImportedHistory(ctx, entries)
-		persistentExecutions := integration.PersistentHistoryEntriesSnapshot()
-		historyEvents := make([]scoring.HistoryEvent, 0, len(persistentExecutions))
-		for _, execution := range persistentExecutions {
-			if policy.IsSensitive(execution.Command) {
-				continue
-			}
-			historyEvents = append(historyEvents, scoring.HistoryEvent{
-				EventKey:    execution.ID,
-				Command:     execution.Command,
-				Cwd:         execution.Cwd,
-				StartedAt:   execution.StartedAt,
-				Duration:    execution.Duration,
-				ExitCode:    execution.ExitCode,
-				HasExitCode: execution.HasExitCode,
-				Source:      execution.Source,
-				Host:        execution.Host,
-				SessionID:   execution.SessionID,
-				Imported:    true,
-			})
-		}
-		_ = store.ReplaceImportedHistoryEvents(ctx, historyEvents)
-		if storedEvents, queryErr := store.QueryHistoryEvents(ctx, 10_000); queryErr == nil {
-			richEntries := make([]integration.HistoryEntry, 0, len(storedEvents))
-			for _, event := range storedEvents {
-				richEntries = append(richEntries, integration.HistoryEntry{
-					ID:          event.EventKey,
-					Command:     event.Command,
-					Cwd:         event.Cwd,
-					StartedAt:   event.StartedAt,
-					Duration:    event.Duration,
-					ExitCode:    event.ExitCode,
-					HasExitCode: event.HasExitCode,
-					Source:      event.Source,
-					Host:        event.Host,
-					SessionID:   event.SessionID,
-				})
-			}
-			integration.ReplaceRichHistoryEntries(richEntries)
-		}
-		historyDirectories := historyNavigationDirectoryImports(persistentExecutions, time.Now())
-		_ = store.ReplaceDirectorySource(ctx, "history", historyDirectories)
-		zoxideDirectories := loadOptionalZoxideDirectories(
-			ctx,
-			config.Get().Suggestions.ImportZoxide,
-			func(parent context.Context) []scoring.DirectoryImport {
-				zoxideCtx, zoxideCancel := context.WithTimeout(parent, 500*time.Millisecond)
-				defer zoxideCancel()
-				return loadZoxideDirectories(zoxideCtx)
-			},
-		)
-		_ = store.ReplaceDirectorySource(ctx, "zoxide", zoxideDirectories)
-		_ = store.ReplaceDirectorySource(
-			ctx,
-			"git-worktrees",
-			gitWorktreeImports(spec.GetCWD(), historyDirectories),
-		)
-	}
-}
-
-var persistentHistoryImporting atomic.Bool
 
 func injectAISuggestion(deduped *[]spec.Suggestion, seen map[string]bool, normalizedQuery string) {
 	if aiSugg := GetCurrentAISuggestion(); aiSugg != nil {

@@ -89,6 +89,9 @@ func LoadPath(path string) (*Config, error) {
 	}
 	applyLegacyChatboxColors(cfg, &metadata)
 	applySchemaCompatibility(cfg, &metadata)
+	if err := applyHistoryCompatibility(cfg, &metadata); err != nil {
+		return cfg, fmt.Errorf("config: invalid value: %w", err)
+	}
 	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, 0, len(undecoded))
 		for _, key := range undecoded {

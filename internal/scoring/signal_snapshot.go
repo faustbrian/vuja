@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 )
 
 // SignalSnapshot is one consistent read of every scoring table used for a
@@ -18,6 +19,7 @@ type SignalSnapshot struct {
 	ExactTransitionsLocal bool
 	Feedback              []FeedbackEntry
 	Outcomes              []OutcomeEntry
+	Truncated             bool
 }
 
 func (f *FrecencyStore) QuerySignalSnapshot(
@@ -28,6 +30,19 @@ func (f *FrecencyStore) QuerySignalSnapshot(
 	limit int,
 	previousCommand string,
 	previousSkeleton string,
+) (SignalSnapshot, error) {
+	return f.QuerySignalSnapshotRanked(ctx, cwd, root, prefix, limit, previousCommand, previousSkeleton, "balanced")
+}
+
+func (f *FrecencyStore) QuerySignalSnapshotRanked(
+	ctx context.Context,
+	cwd string,
+	root string,
+	prefix string,
+	limit int,
+	previousCommand string,
+	previousSkeleton string,
+	historyRanking string,
 ) (SignalSnapshot, error) {
 	if f == nil {
 		return SignalSnapshot{}, nil
@@ -41,25 +56,25 @@ func (f *FrecencyStore) QuerySignalSnapshot(
 	prefixPattern := strings.TrimSpace(prefix) + "%"
 	rows, err := f.db.QueryContext(ctx, `
 WITH history_candidates AS (
-	SELECT cmd, cwd, count, last_used, 'vuja' AS source FROM history_entries
+	SELECT cmd, cwd, count, last_used FROM history_entries
 	UNION ALL
-	SELECT cmd, cwd, count, last_used, source FROM imported_history_entries
+	SELECT cmd, cwd, count, last_used FROM imported_history_entries
 ), signal_rows AS (
-	SELECT 'local' AS kind, cmd AS text1, cwd AS text2, source AS text3,
+	SELECT 'local' AS kind, cmd AS text1, cwd AS text2, '' AS text3,
 		SUM(count) AS n1, 0 AS n2, 0 AS n3, 0 AS n4, MAX(last_used) AS last_used
 	FROM history_candidates
 	WHERE cwd = ? AND cmd LIKE ?
-	GROUP BY cmd, cwd, source
+	GROUP BY cmd, cwd
 	UNION ALL
-	SELECT 'project', cmd, ?, source, SUM(count), 0, 0, 0, MAX(last_used)
+	SELECT 'project', cmd, ?, '', SUM(count), 0, 0, 0, MAX(last_used)
 	FROM history_candidates
 	WHERE ? != '' AND (cwd = ? OR substr(cwd, 1, length(?) + 1) = ? || '/') AND cmd LIKE ?
-	GROUP BY cmd, source
+	GROUP BY cmd
 	UNION ALL
-	SELECT 'global', cmd, '', source, SUM(count), 0, 0, 0, MAX(last_used)
+	SELECT 'global', cmd, '', '', SUM(count), 0, 0, 0, MAX(last_used)
 	FROM history_candidates
 	WHERE cmd LIKE ?
-	GROUP BY cmd, source
+	GROUP BY cmd
 	UNION ALL
 	SELECT 'feedback', cmd, '', '', SUM(accepted), SUM(typed), SUM(edited), SUM(dismissed), MAX(last_used)
 	FROM suggestion_feedback
@@ -111,6 +126,7 @@ ORDER BY last_used DESC, text1 ASC, text2 ASC
 	defer rows.Close()
 
 	var snapshot SignalSnapshot
+	scoredAt := time.Now()
 	var transitionLocal, transitionGlobal []TransitionEntry
 	var exactLocal, exactGlobal []ExactTransitionEntry
 	for rows.Next() {
@@ -122,7 +138,10 @@ ORDER BY last_used DESC, text1 ASC, text2 ASC
 		lastUsed := parseKnownTimestamp(lastUsedRaw)
 		switch kind {
 		case "local", "project", "global":
-			entry := FrecencyEntry{Cmd: text1, Cwd: text2, Count: n1, LastUsed: lastUsed, RawScore: f.RawScore(n1, lastUsed)}
+			entry := FrecencyEntry{
+				Cmd: text1, Cwd: text2, Count: n1, LastUsed: lastUsed,
+				RawScore: historyRankingScore(n1, lastUsed, historyRanking, scoredAt),
+			}
 			switch kind {
 			case "local":
 				snapshot.Local = append(snapshot.Local, entry)
@@ -158,6 +177,7 @@ ORDER BY last_used DESC, text1 ASC, text2 ASC
 	trimFrecency := func(entries []FrecencyEntry) []FrecencyEntry {
 		sort.SliceStable(entries, func(i, j int) bool { return frecencyEntryLess(entries[i], entries[j]) })
 		if len(entries) > limit {
+			snapshot.Truncated = true
 			entries = entries[:limit]
 		}
 		return entries
@@ -166,9 +186,11 @@ ORDER BY last_used DESC, text1 ASC, text2 ASC
 	snapshot.Project = trimFrecency(snapshot.Project)
 	snapshot.Global = trimFrecency(snapshot.Global)
 	if len(snapshot.Feedback) > 50 {
+		snapshot.Truncated = true
 		snapshot.Feedback = snapshot.Feedback[:50]
 	}
 	if len(snapshot.Outcomes) > 50 {
+		snapshot.Truncated = true
 		snapshot.Outcomes = snapshot.Outcomes[:50]
 	}
 	snapshot.Transitions, snapshot.TransitionsLocal = selectTransitionDepth(transitionLocal, transitionGlobal)

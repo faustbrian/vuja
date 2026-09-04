@@ -180,7 +180,7 @@ func lookupContext(ctx context.Context, input string) []Suggestion {
 
 	rootCmdName := tokens[0]
 	spec, exists := Registry[rootCmdName]
-	logger.Debugf("core lookup tokens: %v, registry exists: %v", tokens, exists)
+	logger.Debugf("core lookup: tokens=%d, registry-exists=%v", len(tokens), exists)
 	if !exists {
 		return nil
 	}
@@ -248,7 +248,7 @@ func lookupContext(ctx context.Context, input string) []Suggestion {
 	partial := tokens[len(tokens)-1]
 	allowMoreArgs := currentLimit <= 0 || argCount < currentLimit
 
-	logger.Debugf("core query tokens: %v (partial: '%s')", tokens, partial)
+	logger.Debugf("core query: tokens=%d, partial-bytes=%d", len(tokens), len(partial))
 	logger.Debugf("core depth: %d, argCount: %d, limit: %d, allowMore: %v", depth, argCount, currentLimit, allowMoreArgs)
 
 	prefixBuilder := strings.Builder{}

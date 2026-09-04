@@ -64,19 +64,27 @@ func recordSuggestionFeedback(events []suggestionFeedbackEvent, cwd string) {
 	if len(events) == 0 {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		store, err := scoring.GetFrecencyStore()
-		if err != nil {
-			return
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	recordSuggestionFeedbackToStore(ctx, scoring.LoadedFrecencyStore(), events, cwd)
+}
+
+func recordSuggestionFeedbackToStore(
+	ctx context.Context,
+	store *scoring.FrecencyStore,
+	events []suggestionFeedbackEvent,
+	cwd string,
+) {
+	if store == nil || len(events) == 0 {
+		return
+	}
+	for _, event := range events {
+		if policy.IsSensitive(event.command) {
+			continue
 		}
-		for _, event := range events {
-			if policy.IsSensitive(event.command) {
-				continue
-			}
-			_ = store.RecordFeedback(ctx, event.command, cwd, event.kind)
+		if err := store.RecordFeedback(ctx, event.command, cwd, event.kind); err != nil {
+			recordHistoryDerivedFailure("feedback", err)
 		}
-		scoring.InvalidateSignalCache()
-	}()
+	}
+	scoring.InvalidateSignalCache()
 }

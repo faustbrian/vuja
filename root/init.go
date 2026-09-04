@@ -93,6 +93,62 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     print -u $VUJA_FD -N -r -- "VUJA_FUNCTIONS_END" 2>/dev/null
   }
 
+  # Observe the complete native history-policy decision without asking user
+  # hooks to run twice or changing their first-nonzero return semantics.
+  if [[ -n ${_vuja_zsh_history_policy_wrapped-} ]]; then
+    typeset -ga _vuja_resourced_zshaddhistory_functions=("${zshaddhistory_functions[@]}")
+    if (( $+functions[zshaddhistory] && $+functions[_vuja_installed_zshaddhistory] )) &&
+       [[ ${functions[zshaddhistory]} != ${functions[_vuja_installed_zshaddhistory]} ]]; then
+      functions -c zshaddhistory _vuja_resourced_zshaddhistory
+    fi
+    unfunction zshaddhistory 2>/dev/null
+    if (( $+functions[_vuja_resourced_zshaddhistory] )); then
+      functions -c _vuja_resourced_zshaddhistory zshaddhistory
+    elif (( $+functions[_vuja_original_zshaddhistory] )); then
+      functions -c _vuja_original_zshaddhistory zshaddhistory
+    fi
+    unfunction _vuja_original_zshaddhistory _vuja_installed_zshaddhistory _vuja_resourced_zshaddhistory 2>/dev/null
+    zshaddhistory_functions=("${_vuja_original_zshaddhistory_functions[@]}" "${_vuja_resourced_zshaddhistory_functions[@]}")
+    zshaddhistory_functions=("${(u)zshaddhistory_functions[@]}")
+    unset _vuja_original_zshaddhistory_functions _vuja_resourced_zshaddhistory_functions _vuja_zsh_history_policy_wrapped
+  fi
+  if (( $+functions[zshaddhistory] )); then
+    functions -c zshaddhistory _vuja_original_zshaddhistory
+  fi
+  typeset -ga _vuja_original_zshaddhistory_functions=("${zshaddhistory_functions[@]}")
+  unset zshaddhistory_functions
+  zshaddhistory() {
+    local _vuja_policy_status=0
+    local _vuja_hook_status=0
+    local _vuja_hook
+    if (( ${#zshaddhistory_functions} )); then
+      _vuja_original_zshaddhistory_functions+=("${zshaddhistory_functions[@]}")
+      _vuja_original_zshaddhistory_functions=("${(u)_vuja_original_zshaddhistory_functions[@]}")
+      unset zshaddhistory_functions
+    fi
+    if (( $+functions[_vuja_original_zshaddhistory] )); then
+      _vuja_original_zshaddhistory "$@"
+      _vuja_hook_status=$?
+      (( _vuja_hook_status != 0 )) && _vuja_policy_status=$_vuja_hook_status
+    fi
+    if (( _vuja_policy_status == 0 )); then
+      for _vuja_hook in "${_vuja_original_zshaddhistory_functions[@]}"; do
+        (( $+functions[$_vuja_hook] )) || continue
+        "$_vuja_hook" "$@"
+        _vuja_hook_status=$?
+        if (( _vuja_hook_status != 0 )); then
+          _vuja_policy_status=$_vuja_hook_status
+          break
+        fi
+      done
+    fi
+    typeset -g _vuja_history_policy_status=$_vuja_policy_status
+    return $_vuja_policy_status
+  }
+  functions -c zshaddhistory _vuja_installed_zshaddhistory
+  typeset -g _vuja_zsh_history_policy_wrapped=1
+  typeset -g _vuja_history_policy_status=0
+
   _vuja_precmd() {
     local _vuja_exit_code=$?
     local _vuja_stopped_jobs=0
@@ -120,6 +176,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     print -u $VUJA_FD -N -r -- "VUJA_CWD:$PWD" 2>/dev/null
     _vuja_publish_functions
     print -u $VUJA_FD -N -r -- "VUJA_CMD_STOP:${_vuja_exit_code}" 2>/dev/null
+    typeset -g _vuja_history_policy_status=0
     return $_vuja_exit_code
   }
 
@@ -129,10 +186,14 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
       builtin printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
     fi
     local _vuja_history_marker="VUJA_CMD_START"
-    if [[ $1 == [[:space:]]* ]] || [[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]]; then
+    if [[ $1 == [[:space:]]* ]] || [[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]] || (( ${_vuja_history_policy_status:-0} != 0 )); then
       _vuja_history_marker="VUJA_CMD_START:IGNORE"
     fi
     print -u $VUJA_FD -N -r -- "$_vuja_history_marker" 2>/dev/null
+	    if [[ -n ${VUJA_HISTORY_ACK_FD-} ]]; then
+	      read -u "$VUJA_HISTORY_ACK_FD" -k 1 _vuja_history_ack 2>/dev/null
+	    fi
+	    typeset -g _vuja_history_recordable=${_vuja_history_ack:-0}
   }
 
   autoload -Uz add-zle-hook-widget
@@ -225,6 +286,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     printf 'VUJA_CWD:%%s\0' "$PWD" >&"$VUJA_FD" 2>/dev/null
     _vuja_publish_functions
     printf 'VUJA_CMD_STOP:%%s\0' "$_vuja_exit_code" >&"$VUJA_FD" 2>/dev/null
+	    _vuja_previous_histcmd=${HISTCMD-}
     return "$_vuja_exit_code"
   }
 
@@ -233,7 +295,19 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     if [[ -n "$VUJA_MARKER" ]]; then
       printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
     fi
-    printf 'VUJA_CMD_START\0' >&"$VUJA_FD" 2>/dev/null
+	    local _vuja_history_marker="VUJA_CMD_START"
+	    # Bash applies HISTCONTROL and HISTIGNORE before PS0 is expanded. A
+	    # recordable line advances HISTCMD; an ignored line does not. Observe
+	    # that shell-owned decision instead of attempting to reimplement the
+	    # patterns against only the current simple command.
+	    if [[ -o history && ${HISTSIZE-0} != 0 && -n ${_vuja_previous_histcmd+x} && ${HISTCMD-} == ${_vuja_previous_histcmd-} ]]; then
+	      _vuja_history_marker="VUJA_CMD_START:IGNORE"
+	    fi
+	    printf '%%s\0' "$_vuja_history_marker" >&"$VUJA_FD" 2>/dev/null
+	    if [[ -n "${VUJA_HISTORY_ACK_FD-}" ]]; then
+	      IFS= read -r -n 1 -u "$VUJA_HISTORY_ACK_FD" _vuja_history_ack 2>/dev/null
+	    fi
+	    _vuja_history_recordable=${_vuja_history_ack:-0}
   }
 
   if [[ "${PS0-}" != *'$(_vuja_preexec)'* ]]; then
@@ -288,6 +362,47 @@ if set -q VUJA_PID; and set -q VUJA_FD
     if set -q VUJA_MARKER
         set --unexport VUJA_MARKER
     end
+
+    if set -q _vuja_fish_history_policy_wrapped
+        if functions -q fish_should_add_to_history; and functions -q _vuja_installed_fish_should_add_to_history
+            # The functions builtin includes the function name in its first line. Normalize
+            # copied names before comparing definitions so merely re-sourcing the
+            # unchanged Vuja wrapper cannot be mistaken for a user replacement.
+            set -l _vuja_current_fish_history_policy (functions fish_should_add_to_history | string replace -r '^function [^ ]+' 'function' | string collect)
+            set -l _vuja_installed_fish_history_policy (functions _vuja_installed_fish_should_add_to_history | string replace -r '^function [^ ]+' 'function' | string collect)
+            if test "$_vuja_current_fish_history_policy" != "$_vuja_installed_fish_history_policy"
+                functions -c fish_should_add_to_history _vuja_resourced_fish_should_add_to_history
+            end
+        end
+        functions -e fish_should_add_to_history
+        if functions -q _vuja_resourced_fish_should_add_to_history
+            functions -c _vuja_resourced_fish_should_add_to_history fish_should_add_to_history
+        else if functions -q _vuja_original_fish_should_add_to_history
+            functions -c _vuja_original_fish_should_add_to_history fish_should_add_to_history
+        end
+        functions -e _vuja_original_fish_should_add_to_history
+        functions -e _vuja_installed_fish_should_add_to_history
+        functions -e _vuja_resourced_fish_should_add_to_history
+        set -e _vuja_fish_history_policy_wrapped
+    end
+
+    if functions -q fish_should_add_to_history
+        functions -c fish_should_add_to_history _vuja_original_fish_should_add_to_history
+    end
+    function fish_should_add_to_history
+        set -l _vuja_policy_status 0
+        if functions -q _vuja_original_fish_should_add_to_history
+            _vuja_original_fish_should_add_to_history $argv
+            set _vuja_policy_status $status
+        else if string match -qr '^[[:space:]]' -- "$argv[1]"
+            set _vuja_policy_status 1
+        end
+        set -g _vuja_history_policy_status $_vuja_policy_status
+        return $_vuja_policy_status
+    end
+    functions -c fish_should_add_to_history _vuja_installed_fish_should_add_to_history
+    set -g _vuja_fish_history_policy_wrapped 1
+    set -g _vuja_history_policy_status 0
 
     if set -q _vuja_fish_markers_installed
         functions -e _vuja_prompt_start
@@ -348,6 +463,7 @@ if set -q VUJA_PID; and set -q VUJA_FD
     end
 
     function _vuja_publish_shell_status
+		set -g _vuja_history_policy_status 0
         set -l _vuja_jobs (count (jobs -p 2>/dev/null))
         set -l _vuja_stopped_jobs (count (jobs 2>/dev/null | string match -r 'stopped'))
         printf 'VUJA_JOBS:%%s:%%s\0' "$_vuja_jobs" "$_vuja_stopped_jobs" >&$VUJA_FD 2>/dev/null
@@ -392,7 +508,15 @@ if set -q VUJA_PID; and set -q VUJA_FD
         if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
             printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
         end
-        printf 'VUJA_CMD_START\0' >&$VUJA_FD 2>/dev/null
+	        set -l _vuja_history_marker VUJA_CMD_START
+	        if string match -qr '^[[:space:]]' -- "$argv[1]"; or set -q fish_private_mode; or test "$_vuja_history_policy_status" -ne 0
+	            set _vuja_history_marker VUJA_CMD_START:IGNORE
+	        end
+	        printf '%%s\0' "$_vuja_history_marker" >&$VUJA_FD 2>/dev/null
+	        if set -q VUJA_HISTORY_ACK_FD
+	            read --nchars 1 --local _vuja_history_ack <&$VUJA_HISTORY_ACK_FD 2>/dev/null
+	        end
+	        set -g _vuja_history_recordable $_vuja_history_ack
     end
 
     function _vuja_postexec --on-event fish_postexec

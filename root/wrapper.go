@@ -28,13 +28,79 @@ import (
 	"github.com/faustbrian/vuja/internal/ai"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/internal/logger"
-	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/internal/workspace"
 	"github.com/faustbrian/vuja/spec"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
+
+const (
+	promptTrackingByteLimit = 64 * 1024
+	shellMessageByteLimit   = 8 * 1024 * 1024
+)
+
+func appendPromptTrackingBytes(current, data []byte) []byte {
+	if newline := bytes.LastIndexByte(data, '\n'); newline >= 0 {
+		current = current[:0]
+		data = data[newline+1:]
+	}
+	if len(data) >= promptTrackingByteLimit {
+		data = data[len(data)-promptTrackingByteLimit:]
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data = data[1:]
+		}
+		return append(current[:0], data...)
+	}
+	retain := promptTrackingByteLimit - len(data)
+	if len(current) > retain {
+		current = current[len(current)-retain:]
+		for len(current) > 0 && !utf8.RuneStart(current[0]) {
+			current = current[1:]
+		}
+	}
+	return append(current, data...)
+}
+
+func readShellMessage(reader *bufio.Reader, limit int) ([]byte, bool, error) {
+	if reader == nil {
+		return nil, false, io.EOF
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	message := make([]byte, 0, min(limit, 4096))
+	oversized := false
+	for {
+		fragment, err := reader.ReadSlice(0)
+		terminated := len(fragment) > 0 && fragment[len(fragment)-1] == 0
+		if terminated {
+			fragment = fragment[:len(fragment)-1]
+		}
+		if !oversized {
+			if len(message)+len(fragment) > limit {
+				message = nil
+				oversized = true
+			} else {
+				message = append(message, fragment...)
+			}
+		}
+		if terminated {
+			return message, oversized, nil
+		}
+		switch err {
+		case nil, bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			if len(message) > 0 || oversized {
+				return message, oversized, nil
+			}
+			return nil, false, io.EOF
+		default:
+			return nil, oversized, err
+		}
+	}
+}
 
 var (
 	prevRecordedCommand string
@@ -120,6 +186,10 @@ func restoreTerminal() {
 // it handles raw terminal mode to intercept keystrokes and
 // coordinates between the shell process and the suggestion overlay
 func runWrapper() {
+	if !hasInteractiveTerminal(int(os.Stdin.Fd()), int(os.Stdout.Fd()), term.IsTerminal) {
+		_, _ = fmt.Fprintln(os.Stderr, "[VUJA] an interactive terminal is required")
+		return
+	}
 	isDarkBackground := detectDarkBackground()
 	switch config.Get().UI.Palette {
 	case "serein-day":
@@ -136,6 +206,8 @@ func runWrapper() {
 	var feedback suggestionFeedbackSession
 	var historyNav historyNavigation
 	var historySearch historySearchSession
+	var activeHistoryPersisted bool
+	var activeHistoryJournaled bool
 	var tabNav tabNavigation
 	inputBindings := newInputKeybindings(config.Get().Keybindings)
 	host, _ := os.Hostname()
@@ -144,6 +216,17 @@ func runWrapper() {
 		fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		host,
 	)
+	historyStore, historyStoreErr := initializeCanonicalHistory(executionTracker.sessionID)
+	if historyStoreErr != nil {
+		recordHistoryPersistenceFailure()
+		logger.Errorf("failed to initialize canonical history: %v", historyStoreErr)
+	}
+	historySync := &canonicalHistorySyncManager{}
+	historySync.Restart(historyStore, executionTracker.sessionID)
+	defer historySync.Close()
+	historyRecovery := &historyRecoveryRetryManager{}
+	historyRecovery.Restart(historyStore)
+	defer historyRecovery.Close()
 	initialWidth, initialHeight, terminalSizeErr := term.GetSize(int(os.Stdout.Fd()))
 	terminalMarkerID := ""
 	if config.Get().UI.PromptPosition == "bottom" &&
@@ -163,6 +246,18 @@ func runWrapper() {
 	if err != nil {
 		return
 	}
+	historyAckReader, historyAckWriter, err := os.Pipe()
+	if err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		return
+	}
+	defer func() {
+		_ = r.Close()
+		_ = w.Close()
+		_ = historyAckReader.Close()
+		_ = historyAckWriter.Close()
+	}()
 
 	var shellName string
 	if active := os.Getenv("VUJA_ACTIVE_SHELL"); active != "" {
@@ -175,16 +270,21 @@ func runWrapper() {
 	}
 
 	shell.Init(shellName)
-	persistentHistoryImporting.Store(true)
-	go importPersistentHistory()
+	historyImports := &configuredHistoryImportManager{}
+	historyImports.Restart(historyStore, shellName)
+	defer historyImports.Close()
 	adapter := shell.Current
 
 	ctx := context.Background()
 	c := exec.CommandContext(ctx, adapter.GetShellPath())
-	c.ExtraFiles = make([]*os.File, 11)
+	c.ExtraFiles = make([]*os.File, 12)
 	// pass write end of pipe to shell as fd 13 (since index 10 maps to 13)
 	c.ExtraFiles[10] = w
+	// pass the read end of the history acknowledgement pipe as fd 14. Shell
+	// pre-exec hooks wait for this acknowledgement before launching a command.
+	c.ExtraFiles[11] = historyAckReader
 	c.Env = adapter.GetEnv(13, os.Getpid())
+	c.Env = append(c.Env, "VUJA_HISTORY_ACK_FD=14")
 	c.Env = slices.DeleteFunc(c.Env, func(value string) bool {
 		return strings.HasPrefix(value, "VUJA_MARKER=") ||
 			strings.HasPrefix(value, "VUJA_MANAGED_PROMPT=") ||
@@ -197,6 +297,12 @@ func runWrapper() {
 			"VUJA_PROMPT_TEXT="+config.Get().UI.Chatbox.Prompt,
 		)
 	}
+	managedShellCleanup, managedShellErr := prepareManagedShellInit(c, shellName)
+	if managedShellErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "[VUJA] failed to prepare managed shell integration: %v\n", managedShellErr)
+		return
+	}
+	defer managedShellCleanup()
 
 	ptmx, err := pty.Start(c)
 	if err != nil {
@@ -215,7 +321,10 @@ func runWrapper() {
 	oldState, errMakeRaw = term.MakeRaw(int(os.Stdin.Fd()))
 	if errMakeRaw != nil {
 		logger.Errorf("Failed to set terminal raw mode: %v", errMakeRaw)
-		panic(errMakeRaw)
+		_, _ = fmt.Fprintf(os.Stderr, "[VUJA] failed to enter terminal raw mode: %v\n", errMakeRaw)
+		_ = c.Process.Kill()
+		_, _ = c.Process.Wait()
+		return
 	}
 	logger.Debugf("Terminal set to raw mode successfully")
 	defer restoreTerminal()
@@ -331,7 +440,7 @@ func runWrapper() {
 		overlay.BottomRegion,
 		overlay.IsVisible,
 	)
-	uiPresenter := newTerminalUIPresenter(display.ComposeUI)
+	uiPresenter := newTerminalUIPresenter(display.ComposeUI, display.recoverVisualPipeline)
 	presentOverlay := func(render func() string) {
 		uiPresenter.Present(func() []byte { return []byte(render()) })
 	}
@@ -355,8 +464,7 @@ func runWrapper() {
 			case syscall.SIGWINCH:
 				logger.Debugf("Received SIGWINCH terminal resize signal")
 				if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-					display.Resize(width, height)
-					overlay.SetTerminalSize(width, height)
+					resizeManagedTerminal(uiPresenter, display, overlay, width, height)
 				}
 				_ = pty.InheritSize(os.Stdin, ptmx) // handle terminal window resize
 			// this is the core feature of reloading
@@ -495,10 +603,7 @@ func runWrapper() {
 			if isExecuting() {
 				lastPromptBuf = nil
 			} else if nbEmpty && !navigated {
-				lastPromptBuf = append(lastPromptBuf, buf[:n]...)
-				if idx := bytes.LastIndexByte(lastPromptBuf, '\n'); idx >= 0 {
-					lastPromptBuf = append([]byte(nil), lastPromptBuf[idx+1:]...)
-				}
+				lastPromptBuf = appendPromptTrackingBytes(lastPromptBuf, buf[:n])
 				pLen := integration.ComputeCursorCol(lastPromptBuf)
 				if pLen >= 0 {
 					uiPresenter.Update(func(_ func(func() []byte)) {
@@ -526,22 +631,20 @@ func runWrapper() {
 				os.Exit(2)
 			}
 		}()
-		scanner := bufio.NewScanner(r)
-		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-			if atEOF && len(data) == 0 {
-				return 0, nil, nil
+		reader := bufio.NewReader(r)
+		for {
+			message, oversized, err := readShellMessage(reader, shellMessageByteLimit)
+			if err != nil {
+				if err != io.EOF {
+					logger.Errorf("IPC reader error: %v", err)
+				}
+				return
 			}
-			if i := bytes.IndexByte(data, '\x00'); i >= 0 {
-				return i + 1, data[0:i], nil
+			if oversized {
+				writeNotification([]byte("[VUJA] an oversized shell update was ignored; command execution remains available"))
+				continue
 			}
-			if atEOF {
-				return len(data), data, nil
-			}
-			return 0, nil, nil
-		})
-
-		for scanner.Scan() {
-			query := scanner.Text()
+			query := string(message)
 			if loadedShellFunctions.Handle(query) {
 				if query == shellFunctionsEnd {
 					spec.NotifyCompletionUpdate()
@@ -563,14 +666,59 @@ func runWrapper() {
 			}
 
 			if commandStart, ignored := parseCommandStartMessage(query); commandStart {
-				executionTracker.Start()
+				bufferMu.Lock()
+				rawCommand := lastSubmittedCommand
+				lastCommandHistoryIgnored = ignored
+				bufferMu.Unlock()
+				command, recordable := historyRecordableCommand(rawCommand, ignored)
+				entry := executionTracker.StartRaw(rawCommand, command, spec.GetCWD(), shellName)
+				activeHistoryJournaled = false
+				if recordable && historyStore == nil {
+					recoveredStore, recovered, recoverErr := ensureCanonicalHistoryStore(
+						historyStore,
+						executionTracker.sessionID,
+						initializeCanonicalHistory,
+					)
+					if recoverErr != nil {
+						logger.Errorf("failed to recover canonical history: %v", recoverErr)
+					} else {
+						historyStore = recoveredStore
+						if recovered {
+							historySync.Restart(historyStore, executionTracker.sessionID)
+							historyRecovery.Restart(historyStore)
+							historyImports.Restart(historyStore, shellName)
+						}
+					}
+				}
+				if recordable {
+					activeHistoryPersisted, activeHistoryJournaled = persistHistorySubmissionDurably(historyStore, entry)
+				} else {
+					activeHistoryPersisted = false
+				}
+				acknowledgement := byte('0')
+				if activeHistoryPersisted {
+					acknowledgement = '1'
+				}
+				_, _ = historyAckWriter.Write([]byte{acknowledgement})
+				if activeHistoryPersisted {
+					publishHistorySubmission(entry)
+				}
+				if recordable && !activeHistoryPersisted {
+					writeNotification([]byte("[VUJA] history persistence failed; this command will run without being recorded"))
+				} else if activeHistoryJournaled {
+					writeNotification([]byte("[VUJA] history database unavailable; submission secured in the recovery journal"))
+				} else if activeHistoryPersisted && config.Get().History.Integrations.Shell.Mirror {
+					if err := mirrorHistorySubmission(entry.Command, shellName, entry.SubmittedAt); err != nil {
+						logger.Errorf("optional native history mirror failed: %v", err)
+						writeNotification([]byte("[VUJA] native history mirror failed; Vuja history is unaffected"))
+					}
+				}
 				feedback.reset()
 				historyNav.Cancel()
 				historySearch.Close()
 				isCommandActive.Store(true)
 				status.SetCommandActive(true)
 				bufferMu.Lock()
-				lastCommandHistoryIgnored = ignored
 				naiveBuffer = ""
 				cursorOffset = 0
 				bufferMu.Unlock()
@@ -601,53 +749,74 @@ func runWrapper() {
 				bufferMu.Unlock()
 				if strings.TrimSpace(rawCommand) != "" {
 					cwd := spec.GetCWD()
-					displayCommand := strings.TrimSpace(rawCommand)
-					historyEntry := executionTracker.Finish(displayCommand, cwd, exitCode)
+					historyEntry := executionTracker.Finish(exitCode)
 					if managedStatus {
 						status.SetCommandResult(exitCode, historyEntry.Duration)
 						status.RefreshAfterCommand(cwd)
 					}
 					cmdToRecord, recordable := historyRecordableCommand(rawCommand, historyIgnored)
-					if recordable && !policy.IsSensitive(cmdToRecord) {
-						historyEntry.Command = cmdToRecord
-						integration.RecordSessionCommandAt(cmdToRecord, cwd)
-						scoring.InvalidateSignalCache()
-						integration.AppendRichHistoryEntry(historyEntry)
-						prevCommand, prevSkeleton := getPrevCommandSignals()
-						currSkeleton := scoring.ExtractSkeleton(cmdToRecord)
-						go func(c, d string, code int, entry integration.HistoryEntry, pCmd, pSkel, cSkel string) {
-							defer func() {
-								if r := recover(); r != nil {
-									WriteCrashLog(r)
-								}
-							}()
-							ctxRecord, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-							defer cancel()
-							defer scoring.InvalidateSignalCache()
-							if store, err := scoring.GetFrecencyStore(); err == nil && store != nil {
-								_ = store.Record(ctxRecord, c, d, code)
-								_ = store.RecordHistoryEvent(ctxRecord, scoring.HistoryEvent{
-									EventKey: entry.ID, Command: entry.Command, Cwd: entry.Cwd,
-									StartedAt: entry.StartedAt, Duration: entry.Duration,
-									ExitCode: entry.ExitCode, HasExitCode: entry.HasExitCode,
-									Source: entry.Source, Host: entry.Host, SessionID: entry.SessionID,
-								})
-								if code == 0 && isDirectoryNavigationCommand(c) {
-									_ = store.RecordDirectory(ctxRecord, d)
-								}
-								if pSkel != "" && cSkel != "" {
-									_ = store.RecordTransition(ctxRecord, pSkel, cSkel, d, code)
-								}
-								if pCmd != "" {
-									_ = store.RecordExactTransition(ctxRecord, pCmd, c, d, code)
+					if recordable && activeHistoryPersisted {
+						historyCleared := isHistoryClearCommand(cmdToRecord)
+						historyCompleted := false
+						completionJournaled := false
+						if historyCleared {
+							if err := clearHistoryRecoveryJournal(); err != nil {
+								recordHistoryDerivedFailure("recovery journal clear", err)
+							}
+						} else if activeHistoryJournaled {
+							if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, historyEntry); err != nil {
+								recordHistoryDerivedFailure("recovery completion", err)
+							} else {
+								historyCompleted = true
+								publishHistorySubmission(historyEntry)
+								if historyStore != nil {
+									if err := replayHistoryRecoveryJournal(historyStore); err != nil {
+										logger.Errorf("failed to replay completed history recovery event: %v", err)
+									}
 								}
 							}
-						}(cmdToRecord, cwd, exitCode, historyEntry, prevCommand, prevSkeleton, currSkeleton)
-						recordSuggestionFeedback(feedbackEvents, feedbackCWD)
-						setPrevRecordedInfo(cmdToRecord, cwd)
+						} else {
+							historyCompleted, completionJournaled = completeHistoryEventDurably(historyStore, historyEntry)
+							if completionJournaled {
+								publishHistorySubmission(historyEntry)
+								writeNotification([]byte("[VUJA] history completion secured in the recovery journal"))
+							}
+						}
+						if historyCompleted {
+							ctxRecord, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+							if exitCode == 0 && isDirectoryNavigationCommand(cmdToRecord) {
+								if err := historyStore.RecordDirectory(ctxRecord, cwd); err != nil {
+									recordHistoryDerivedFailure("directory", err)
+								}
+							}
+							cancel()
+							scoring.InvalidateSignalCache()
+							spec.NotifyCompletionUpdate()
+						}
+						if historyCleared {
+							setPrevRecordedInfo("", "")
+						} else if historyCompleted {
+							recordSuggestionFeedback(feedbackEvents, feedbackCWD)
+							setPrevRecordedInfo(cmdToRecord, cwd)
+						} else {
+							setPrevRecordedInfo("", "")
+						}
+						if isHistoryMutationCommand(cmdToRecord) {
+							ctxRefresh, cancelRefresh := context.WithTimeout(context.Background(), 5*time.Second)
+							if limit, ok := historyPruneLimit(cmdToRecord); ok {
+								if _, err := historyStore.PruneHistoryEvents(ctxRefresh, limit); err != nil {
+									recordHistoryDerivedFailure("post-command prune", err)
+								}
+							}
+							if _, err := publishCanonicalStoreHistory(ctxRefresh, historyStore); err != nil {
+								recordHistoryDerivedFailure("snapshot refresh", err)
+							}
+							cancelRefresh()
+						}
 					} else {
 						setPrevRecordedInfo("", "")
 					}
+					activeHistoryPersisted = false
 				}
 				// hook: after user executes a command, print the update notice exactly once per session
 				if !updatePrinted {
@@ -696,9 +865,6 @@ func runWrapper() {
 			display.SetMultilineInput(strings.ContainsAny(query, "\r\n"))
 
 			renderOverlay()
-		}
-		if err := scanner.Err(); err != nil {
-			logger.Errorf("IPC scanner error: %v", err)
 		}
 	}()
 
@@ -1064,7 +1230,7 @@ inputLoop:
 				continue
 			}
 
-			logger.Debugf("Stdin raw input: bytes=%q, hex=%x", inputSlice[:n], inputSlice[:n])
+			logger.Debugf("stdin input received: bytes=%d", n)
 
 			shouldOverlayDraw := false
 			for i := 0; i < n; i++ {
@@ -1320,7 +1486,7 @@ inputLoop:
 						cursorOffset = 0
 						bufferMu.Unlock()
 						if mirrored {
-							_, _ = ptmx.Write(append([]byte{0x15}, original...))
+							_, _ = ptmx.Write(historyPromptReplacement(original))
 						}
 						disableGhostText.Store(false)
 						userNavigated.Store(false)
@@ -1336,7 +1502,7 @@ inputLoop:
 						bufferMu.Unlock()
 						if ok {
 							intercepted = true
-							_, _ = ptmx.Write(append([]byte{0x15}, restored...))
+							_, _ = ptmx.Write(historyPromptReplacement(restored))
 							presentOverlay(overlay.ClearAndDisable)
 							userNavigated.Store(false)
 							shouldOverlayDraw = restored != ""
@@ -1353,7 +1519,7 @@ inputLoop:
 
 							if len(ghostText) > 0 {
 								intercepted = true
-								logger.Debugf("Intercepted Right Arrow (accepted ghost text: %q)", ghostText)
+								logger.Debugf("Intercepted Right Arrow (accepted ghost text bytes=%d)", len(ghostText))
 								bufferMu.Lock()
 								naiveBuffer += ghostText
 								feedback.accept(naiveBuffer)
@@ -1483,7 +1649,7 @@ inputLoop:
 									selected = s + " "
 								}
 							}
-							_, _ = ptmx.Write(append([]byte{0x15}, selected...))
+							_, _ = ptmx.Write(historyPromptReplacement(selected))
 						}
 					}
 					if searchWasActive && cmdToSubmit == "" {
@@ -1610,7 +1776,7 @@ inputLoop:
 						acceptedUndo.record(originalBeforeAcceptance, selected)
 						bufferMu.Unlock()
 
-						_, _ = ptmx.Write(append([]byte{0x15}, selected...))
+						_, _ = ptmx.Write(historyPromptReplacement(selected))
 
 						overlay.ResetCursor() // this prevents when you tab, it switches between suggestions non-stop
 
@@ -1737,6 +1903,28 @@ inputLoop:
 			}
 		}
 	}
+}
+
+func hasInteractiveTerminal(stdinFD, stdoutFD int, isTerminal func(int) bool) bool {
+	return isTerminal != nil && isTerminal(stdinFD) && isTerminal(stdoutFD)
+}
+
+// resizeManagedTerminal keeps overlay geometry and compositor redraws behind
+// the same presenter lock used by keystroke-driven UI updates. Concurrent
+// iTerm resize signals therefore cannot race an in-flight suggestion render.
+func resizeManagedTerminal(
+	presenter *terminalUIPresenter,
+	display *terminalCompositor,
+	overlay *integration.Overlay,
+	width, height int,
+) {
+	if presenter == nil || display == nil || overlay == nil {
+		return
+	}
+	presenter.Update(func(_ func(func() []byte)) {
+		display.Resize(width, height)
+		overlay.SetTerminalSize(width, height)
+	})
 }
 
 func newTerminalMarkerID() string {

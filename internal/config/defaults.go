@@ -2,7 +2,7 @@ package config
 
 import "time"
 
-const CurrentVersion = 2
+const CurrentVersion = 3
 
 func DefaultConfig() *Config {
 	return &Config{
@@ -115,7 +115,12 @@ func DefaultConfig() *Config {
 			},
 		},
 		History: HistoryConfig{
-			ImportAtuin: true,
+			Retention: "unlimited",
+			MaxEvents: 0,
+			Integrations: HistoryIntegrationsConfig{
+				Atuin: HistoryAtuinIntegrationConfig{Enabled: false, Mode: "import"},
+				Shell: HistoryShellIntegrationConfig{Import: false, Mirror: false, Path: ""},
+			},
 		},
 		Git: GitConfig{
 			FilterActiveBranch:  true,
@@ -140,8 +145,9 @@ func DefaultConfig() *Config {
 		},
 		Suggestions: SuggestionsConfig{
 			SuppressDestructive: true,
+			HistoryRanking:      "balanced",
 			DirectoryRanking:    "balanced",
-			ImportZoxide:        true,
+			ImportZoxide:        false,
 		},
 		Keybindings: KeybindingsConfig{
 			Keymap:             "emacs",

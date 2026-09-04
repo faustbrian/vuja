@@ -12,9 +12,6 @@ import (
 )
 
 func indexedDirectorySuggestions(ctx context.Context, query, cwd string) []spec.Suggestion {
-	if persistentHistoryImporting.Load() {
-		return nil
-	}
 	fields := strings.Fields(query)
 	if len(fields) == 0 || (fields[0] != "cd" && fields[0] != "z") {
 		return nil
@@ -29,8 +26,8 @@ func indexedDirectorySuggestions(ctx context.Context, query, cwd string) []spec.
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	store, err := scoring.GetFrecencyStore()
-	if err != nil {
+	store := scoring.LoadedFrecencyStore()
+	if store == nil {
 		return nil
 	}
 	paths, err := store.QueryDirectories(ctx, lookupFragment, 20, config.Get().Suggestions.DirectoryRanking)

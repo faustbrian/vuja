@@ -17,6 +17,7 @@ Vuja supports Linux and macOS. Windows is not supported.
 - [Usage](#usage)
 - [Shortcuts](#shortcuts)
 - [Configuration](#configuration)
+- [History](#history)
 - [Privacy](#privacy)
 - [Updates](#updates)
 - [Troubleshooting](#troubleshooting)
@@ -77,11 +78,14 @@ just install bash
 just install fish
 ```
 
-### Manual shell integration
+### Optional shell autostart
 
-`vuja setup [shell]` installs the current executable and writes a static shell
-hook under `~/.local/share/vuja`. It sources that hook first for the bootstrap
-and again after the rest of the shell configuration to finalize prompt hooks.
+`vuja setup [shell]` installs the current executable and writes an optional
+autostart hook under `~/.local/share/vuja`. Vuja injects its managed shell
+protocol whenever it is launched directly, so this hook is not required for
+history, suggestions, prompt capture, or status metadata. It sources that hook
+first for the bootstrap and again after the rest of the shell configuration to
+finalize prompt hooks.
 The first source avoids starting a separate `vuja init` process whenever a
 terminal opens. The final source orders Vuja after prompt frameworks that
 install or replace prompt hooks while the inner shell starts.
@@ -143,6 +147,13 @@ vuja config preset <minimal|balanced|context-rich|ops> [--write] [--force]
 vuja config preview --preset balanced --width 120 --night
 vuja debug suggest "<query>" [--cwd <directory>] [--mode spec|history] [--json]
 vuja debug latency [--session <id>] [--json]
+vuja history doctor
+vuja history stats
+vuja history sources
+vuja history explain "<query>"
+vuja history import <atuin|shell>
+vuja history prune --max <events>
+vuja history clear --confirm
 vuja setup [bash|zsh|fish]
 vuja update
 vuja version
@@ -237,6 +248,100 @@ write creates a timestamped backup beside the original first. Schema-1 files
 retain the former full-snapshot behavior unless migration writes the equivalent
 settings explicitly.
 
+## History
+
+Vuja owns command history by default. Zsh, Bash, or Fish is the execution
+runtime, not the authoritative history store. Each recordable submission is
+durably stored before execution continues, appears in recall while a
+long-running command is still active, and is enriched with duration, outcome,
+directory, host, shell, and session metadata when it finishes. On startup,
+unfinished events from terminated sessions become `interrupted` rather than
+being discarded.
+
+If SQLite is temporarily unavailable, Vuja fsyncs the accepted event to an
+owner-only recovery journal before acknowledging the shell. The journal is
+replayed idempotently into the canonical event store in bounded background
+batches during a live session and again at recovery or restart boundaries.
+Large replays checkpoint their byte position so bounded retries continue from
+the last durable record instead of repeatedly scanning from the beginning. Malformed,
+oversized, and policy-rejected records are discarded without logging command
+text or preventing later valid records from recovering. If SQLite accepts the
+submission but its later completion update fails, duration and outcome are
+secured in the same journal and replayed into that event. A failure of both
+durable stores is reported explicitly.
+
+Inline suggestions, empty-prompt Up/Down recall, Ctrl+R, ranking, transitions,
+and historical snapshots consume the same Vuja-owned event generation. Rich
+history preserves repeated executions; inline recall deduplicates only the
+display candidate. Search and ranking perform no Atuin or shell-history I/O on
+the keystroke path.
+
+Managed sessions publish history changes through a bounded database change
+feed. Long-lived terminal windows therefore pick up ordinary submissions and
+completions from other Vuja windows through bounded event-key reads instead of
+rebuilding a large history generation for every command. Synchronization starts
+at the change boundary represented by the published startup snapshot, so old
+feed entries cannot delay a newly submitted command. Resets and falling behind
+the bounded feed trigger one complete snapshot refresh.
+
+Atuin, native shell history, and Zoxide are finite, optional adapters. They
+unlock no core capability and are disabled for new installations:
+
+```toml
+[history]
+retention = "unlimited" # unlimited | bounded
+max-events = 0
+
+[history.integrations.atuin]
+enabled = false
+mode = "import" # import | sync
+
+[history.integrations.shell]
+import = false
+mirror = false
+path = "" # optional absolute or ~/ path; empty uses the shell convention
+
+[suggestions]
+import-zoxide = false
+history-ranking = "balanced" # balanced | recent | frequent
+```
+
+`import` loads an external snapshot without replacing Vuja-owned events.
+Repeated imports are idempotent, and a matching Vuja execution wins over a less
+complete imported copy. Each adapter retains at most its newest 100,000
+executions and 64 MiB of decoded records; individual commands and shell-history
+lines are also size-bounded, so corrupt or unexpectedly large external stores
+cannot consume memory without limit. Atuin `sync` refreshes only at its bounded
+background adapter boundary. Shell `mirror` appends only the exact command that
+already passed Vuja's privacy policy and durable-write gate; it never flushes
+the shell's broader in-memory history. Missing, stale, locked, malformed, or
+removed external history never disables Vuja recall.
+
+Use `vuja history import atuin` or `vuja history import shell` for a one-time
+import. `vuja history doctor`, `stats`, `sources`, and `explain` are
+non-interactive and do not start a managed shell. Bounded retention never
+removes running commands. Its event limit counts logical executions, including
+occurrences represented compactly by a legacy migration, rather than database
+rows or displayed suggestions. `prune` and `clear --confirm` update canonical
+events and derived ranking data transactionally.
+
+Commands beginning with whitespace, commands excluded by the active shell's
+history-ignore policy, and commands matching Vuja's sensitive-data policy are
+rejected before persistence. They do not enter events, ranking aggregates,
+transitions, feedback, debug logs, or external mirroring.
+
+Existing history databases receive lifecycle and occurrence columns through an
+additive, transactional, restart-safe migration. Pre-lifecycle Vuja and import
+aggregates become compact canonical representatives that preserve their counts,
+timestamps, outcomes, source provenance, and available duration without
+inventing individual timestamps. Before the migration removes legacy entries
+excluded by the current privacy policy, Vuja creates an owner-only
+`history.db.pre-lifecycle-v2.bak` beside the database. Bounded pruning rebuilds
+event-derived aggregates transactionally and discards transition evidence that
+cannot be attributed safely to retained executions. The backup may contain
+commands rejected by the new privacy policy; after validating the migration,
+users who do not need rollback can remove that owner-only backup explicitly.
+
 Vuja selects the day or night palette from `COLORFGBG` when available and
 otherwise uses the night palette. This avoids terminal status queries entering
 the shell input stream. Every configured color must use `#RRGGBB` format. The
@@ -263,11 +368,10 @@ prompt-position = "bottom"
 The hyphenated key follows Vuja's existing TOML naming convention. Newly
 initialized configurations use `bottom`; existing files are never migrated
 implicitly. The no-file runtime fallback remains `classic` for compatibility.
-Bottom mode supports the same zsh, bash, and fish integrations as Vuja. The
-shell integration places session-scoped prompt and command markers directly in
-the PTY stream; Vuja consumes those markers and never displays them.
-Existing installations must rerun `vuja setup [shell]` after upgrading so the
-static shell hook includes these markers and the final prompt-hook source.
+Bottom mode supports Zsh, Bash, and Fish. Vuja injects session-scoped prompt,
+command, history-policy, and persistence-acknowledgement markers into its child
+shell; users do not maintain that protocol. Vuja consumes the markers and never
+displays them. The optional static setup hook only starts Vuja automatically.
 For Zsh, bottom mode installs a session-scoped plain-text prompt and clears the
 right prompt. Zsh remains the line editor, but prompt frameworks do not render
 inside the managed session.
@@ -450,19 +554,18 @@ the same command, highlights every literal or fuzzy match, and shows duration,
 relative execution time, and command by default. Set
 `ui.history.show-exit-status` or `ui.history.show-cwd` to add those columns.
 Optional columns are removed first on narrow terminals so command text retains
-the available space. Atuin execution metadata is imported when its local
-database is available; otherwise Vuja uses the active shell's history and
-records native Vuja executions without doing database work while you type. Set
-`history.import-atuin = false` to ignore an existing Atuin database and use
-shell and native Vuja history only. Set
+the available space. Vuja-owned execution metadata is always available;
+optional Atuin or native-shell imports are configured under
+`history.integrations`. Set
 `suggestions.import-zoxide = false` to rank directories without executing or
 importing Zoxide.
 
 On an empty prompt, Up is a deterministic history operation rather than a
-prediction request. It shows at most `ui.max-suggestions` executions newest
-first, preserves repeats, includes available time, directory, duration, and
-outcome metadata, and selects the newest command immediately. Up and Down then
-move in their visual directions through the displayed rows.
+prediction request. It shows at most `ui.max-suggestions` executions oldest to
+newest from top to bottom, preserves repeats, includes available time,
+directory, duration, and outcome metadata, and selects the newest command at
+the bottom immediately. Up and Down then move in their visual directions
+through the displayed rows.
 
 `pins` always promotes matching commands. `blocks` and `ignore-patterns`
 accept shell-style patterns. Ignored commands are neither stored nor shown.
@@ -470,16 +573,16 @@ Known destructive commands remain hidden until the typed query is itself
 destructive. Credentials in assignments and common secret flags are always
 excluded.
 
-Directory suggestions default to a balanced combination of recent navigation
-frequency and continuous recency decay. Balanced mode counts navigation during
-a rolling 14-day activity window, then applies a 45-day recency half-life, so
-large lifetime totals cannot dominate current work. Explicit frequent mode
-still uses lifetime navigation frequency.
-Set `directory-ranking = "recent"` or `"frequent"` under `[suggestions]` to
-favor either signal explicitly:
+History and directory suggestions default to balanced ranking. Command history
+uses logarithmic frequency with a 45-day recency half-life. Directory ranking
+counts navigation during a rolling 14-day activity window and applies the same
+recency half-life. Large lifetime totals therefore cannot dominate current
+work. Set either ranking to `"recent"` or `"frequent"` to favor one signal
+explicitly:
 
 ```toml
 [suggestions]
+history-ranking = "balanced"   # balanced | recent | frequent
 directory-ranking = "balanced" # balanced | recent | frequent
 ```
 
@@ -690,9 +793,10 @@ compositor-owned.
 Model-generated terminal-query replies are drained internally; foreground
 queries still pass through to the containing terminal.
 
-Zsh, Bash, and Fish integrations place session-scoped prompt and command
-boundaries in the ordered PTY stream. The separate IPC descriptor continues to
-carry command metadata, working-directory changes, and input-buffer updates.
+Vuja's managed Zsh, Bash, and Fish protocol places session-scoped prompt and
+command boundaries in the ordered PTY stream. The separate IPC descriptor
+carries command metadata, working-directory changes, input-buffer updates, and
+the durable-history acknowledgement.
 
 An active process listens for `SIGUSR1` and replaces itself with the newly
 installed executable while preserving the underlying PTY shell.
@@ -700,7 +804,8 @@ installed executable while preserving the underlying PTY shell.
 ### Suggestion sources and ranking
 
 Vuja gathers command specifications, aliases, loaded dotfiles functions,
-executable names, filesystem entries, shell history, and optional AI output.
+executable names, filesystem entries, Vuja-owned history, optional imported
+history, and optional AI output.
 Structured and historical candidates are ranked in one pool. The active
 `spec` or `history` mode changes source emphasis without hiding the other
 source.
@@ -720,9 +825,9 @@ After a failed command, Vuja temporarily prioritizes recently successful
 variants. Exit status 127 also enables local edit-distance correction against
 installed executable names.
 
-Persistent shell history is imported as a replaceable snapshot so restarts do
-not inflate learned frequency counts. Successful commands recorded by Vuja
-remain separate from that snapshot.
+Vuja's event store is authoritative. Optional Atuin and shell imports are
+replaceable, idempotent snapshots so restarts do not inflate learned frequency
+counts or overwrite newer Vuja-owned executions.
 
 Directory suggestions combine paths visited through Vuja with working
 directories imported from shell or Atuin history, Zoxide rankings, and linked

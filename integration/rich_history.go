@@ -1,22 +1,17 @@
 package integration
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 )
 
-var (
-	richHistoryMu          sync.RWMutex
-	richHistoryEntries     []HistoryEntry
-	liveHistoryEntries     []HistoryEntry
-	persistentHistoryCache []HistoryEntry
-)
+var richHistoryEntries []HistoryEntry
 
 type MatchRange struct {
 	Start int
@@ -24,18 +19,24 @@ type MatchRange struct {
 }
 
 type HistoryEntry struct {
-	ID           string
-	Command      string
-	Cwd          string
-	StartedAt    time.Time
-	Duration     time.Duration
-	ExitCode     int
-	HasExitCode  bool
-	Source       string
-	Host         string
-	SessionID    string
-	searchRunes  []rune
-	historyOrder int
+	ID                string
+	Command           string
+	NormalizedCommand string
+	Cwd               string
+	SubmittedAt       time.Time
+	StartedAt         time.Time
+	CompletedAt       time.Time
+	Duration          time.Duration
+	ExitCode          int
+	HasExitCode       bool
+	Source            string
+	Host              string
+	SessionID         string
+	Shell             string
+	State             string
+	HistoryOrder      int
+	Occurrences       int
+	searchRunes       []rune
 }
 
 type RichHistoryResult struct {
@@ -76,71 +77,66 @@ func historyOccurrencesToEntries(occurrences []historyOccurrence) []HistoryEntry
 		if source == "" {
 			source = "shell"
 		}
+		state := HistoryStateUnknown
+		if occurrence.HasExitCode {
+			state = HistoryStateCompleted
+			if occurrence.ExitCode != 0 {
+				state = HistoryStateFailed
+			}
+		}
+		completedAt := time.Time{}
+		if !occurrence.Timestamp.IsZero() && occurrence.Duration > 0 {
+			completedAt = occurrence.Timestamp.Add(occurrence.Duration)
+		}
+		shellName := ""
+		if source == "zsh" || source == "bash" || source == "fish" {
+			shellName = source
+		}
 		entries = append(entries, HistoryEntry{
-			ID:           source + ":" + id,
-			Command:      occurrence.Command,
-			Cwd:          occurrence.Cwd,
-			StartedAt:    occurrence.Timestamp,
-			Duration:     occurrence.Duration,
-			ExitCode:     occurrence.ExitCode,
-			HasExitCode:  occurrence.HasExitCode,
-			Source:       source,
-			Host:         occurrence.Host,
-			SessionID:    occurrence.SessionID,
-			searchRunes:  lowerRunes(occurrence.Command),
-			historyOrder: index + 1,
+			ID:                source + ":" + id,
+			Command:           occurrence.Command,
+			NormalizedCommand: occurrence.Command,
+			Cwd:               occurrence.Cwd,
+			SubmittedAt:       occurrence.Timestamp,
+			StartedAt:         occurrence.Timestamp,
+			CompletedAt:       completedAt,
+			Duration:          occurrence.Duration,
+			ExitCode:          occurrence.ExitCode,
+			HasExitCode:       occurrence.HasExitCode,
+			Source:            source,
+			Host:              occurrence.Host,
+			SessionID:         occurrence.SessionID,
+			Shell:             shellName,
+			State:             state,
+			searchRunes:       lowerRunes(occurrence.Command),
+			HistoryOrder:      index + 1,
 		})
 	}
 	return entries
 }
 
-func setPersistentHistoryEntries(entries []HistoryEntry) {
-	richHistoryMu.Lock()
-	defer richHistoryMu.Unlock()
-	prepareHistoryEntries(entries)
-	sortHistoryEntries(entries)
-	persistentHistoryCache = append([]HistoryEntry(nil), entries...)
-	if len(richHistoryEntries) == 0 {
-		richHistoryEntries = append([]HistoryEntry(nil), entries...)
-	}
-}
-
 func PersistentHistoryEntriesSnapshot() []HistoryEntry {
-	richHistoryMu.RLock()
-	defer richHistoryMu.RUnlock()
-	return append([]HistoryEntry(nil), persistentHistoryCache...)
+	return RichHistorySnapshot()
 }
 
 func ReplaceRichHistoryEntries(entries []HistoryEntry) {
-	richHistoryMu.Lock()
-	defer richHistoryMu.Unlock()
-	prepareHistoryEntries(entries)
-	seen := make(map[string]bool, len(entries)+len(liveHistoryEntries))
-	for _, entry := range entries {
-		seen[entry.ID] = true
-	}
-	for _, entry := range liveHistoryEntries {
-		if !seen[entry.ID] {
-			entries = append(entries, entry)
-			seen[entry.ID] = true
-		}
-	}
-	sortHistoryEntries(entries)
-	richHistoryEntries = append([]HistoryEntry(nil), entries...)
+	PublishCanonicalHistory(entries)
 }
 
 func AppendRichHistoryEntry(entry HistoryEntry) {
-	richHistoryMu.Lock()
-	defer richHistoryMu.Unlock()
-	prepareHistoryEntry(&entry)
-	liveHistoryEntries = append([]HistoryEntry{entry}, liveHistoryEntries...)
-	richHistoryEntries = append([]HistoryEntry{entry}, richHistoryEntries...)
+	PublishCanonicalHistoryEntry(entry)
+}
+
+func UpsertRichHistoryEntry(entry HistoryEntry) bool {
+	return publishCanonicalHistoryEntry(entry)
 }
 
 func RichHistorySnapshot() []HistoryEntry {
-	richHistoryMu.RLock()
-	defer richHistoryMu.RUnlock()
-	return append([]HistoryEntry(nil), richHistoryEntries...)
+	mu.RLock()
+	entries := append([]HistoryEntry(nil), richHistoryEntries...)
+	mu.RUnlock()
+	sortHistoryEntries(entries)
+	return entries
 }
 
 func SearchRichHistory(entries []HistoryEntry, query string, options RichHistorySearchOptions) []RichHistoryResult {
@@ -148,43 +144,24 @@ func SearchRichHistory(entries []HistoryEntry, query string, options RichHistory
 }
 
 func SearchCurrentRichHistory(query string, options RichHistorySearchOptions) []RichHistoryResult {
-	richHistoryMu.RLock()
-	entries := richHistoryEntries
-	richHistoryMu.RUnlock()
-	// Published history generations are immutable. Search the pinned generation
-	// off-lock so a large Ctrl+R query cannot block recording a completed command.
-	return searchRichHistory(entries, query, options, true)
+	mu.RLock()
+	defer mu.RUnlock()
+	// The read lock pins the indexed generation without copying an unbounded
+	// event slice on every Ctrl+R keystroke. Publication swaps or updates the
+	// generation only after an active search finishes.
+	return searchRichHistory(richHistoryEntries, query, options, true)
 }
 
 func RecentRichHistory(entries []HistoryEntry, now time.Time, limit int) []RichHistoryResult {
 	ordered := append([]HistoryEntry(nil), entries...)
 	prepareHistoryEntries(ordered)
-	sortHistoryEntries(ordered)
 	return searchRichHistory(ordered, "", RichHistorySearchOptions{Now: now, Limit: limit}, true)
 }
 
 func CurrentRecentRichHistory(now time.Time, limit int) []RichHistoryResult {
-	richHistoryMu.RLock()
-	entries := make([]HistoryEntry, 0, len(richHistoryEntries)+len(persistentHistoryCache)+len(liveHistoryEntries))
-	seen := make(map[string]bool, cap(entries))
-	appendUnique := func(source []HistoryEntry) {
-		for _, entry := range source {
-			key := entry.ID
-			if key == "" {
-				key = entry.Source + "\x00" + entry.Command + "\x00" + entry.Cwd + "\x00" + entry.StartedAt.String()
-			}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			entries = append(entries, entry)
-		}
-	}
-	appendUnique(persistentHistoryCache)
-	appendUnique(liveHistoryEntries)
-	appendUnique(richHistoryEntries)
-	richHistoryMu.RUnlock()
-	return RecentRichHistory(entries, now, limit)
+	mu.RLock()
+	defer mu.RUnlock()
+	return recentRichHistory(richHistoryEntries, RichHistorySearchOptions{Now: now, Limit: limit})
 }
 
 func searchRichHistory(entries []HistoryEntry, query string, options RichHistorySearchOptions, newestFirst bool) []RichHistoryResult {
@@ -197,23 +174,16 @@ func searchRichHistory(entries []HistoryEntry, query string, options RichHistory
 	if limit <= 0 {
 		limit = 100
 	}
-	results := make([]RichHistoryResult, 0, min(len(entries), limit*2))
+	if newestFirst && len(strings.TrimSpace(query)) == 0 {
+		return recentRichHistory(entries, options)
+	}
+	results := make(richHistoryResultHeap, 0, min(len(entries), limit))
 	queryRunes := lowerRunes(strings.TrimSpace(query))
 	for _, entry := range entries {
 		if !richHistoryEntryMatchesScope(entry, options) {
 			continue
 		}
 		if options.SuccessfulOnly && (!entry.HasExitCode || entry.ExitCode != 0) {
-			continue
-		}
-		if newestFirst && len(queryRunes) == 0 {
-			results = append(results, RichHistoryResult{
-				HistoryEntry: entry,
-				RelativeTime: formatRelativeTime(entry.StartedAt, now),
-			})
-			if len(results) == limit {
-				return results
-			}
 			continue
 		}
 		commandRunes := entry.searchRunes
@@ -224,25 +194,90 @@ func searchRichHistory(entries []HistoryEntry, query string, options RichHistory
 		if !ok {
 			continue
 		}
-		results = append(results, RichHistoryResult{
+		candidate := RichHistoryResult{
 			HistoryEntry: entry,
 			RelativeTime: formatRelativeTime(entry.StartedAt, now),
 			MatchRanges:  ranges,
 			Score:        score,
-		})
+		}
+		if len(results) < limit {
+			heap.Push(&results, candidate)
+		} else if richHistoryResultBetter(candidate, results[0]) {
+			results[0] = candidate
+			heap.Fix(&results, 0)
+		}
 	}
 
 	sort.SliceStable(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		return results[i].StartedAt.After(results[j].StartedAt)
+		return richHistoryResultBetter(results[i], results[j])
 	})
-
-	if len(results) > limit {
-		results = results[:limit]
-	}
 	return results
+}
+
+type richHistoryResultHeap []RichHistoryResult
+
+func (results richHistoryResultHeap) Len() int { return len(results) }
+
+func (results richHistoryResultHeap) Less(i, j int) bool {
+	return richHistoryResultBetter(results[j], results[i])
+}
+
+func (results richHistoryResultHeap) Swap(i, j int) { results[i], results[j] = results[j], results[i] }
+
+func (results *richHistoryResultHeap) Push(value any) {
+	*results = append(*results, value.(RichHistoryResult))
+}
+
+func (results *richHistoryResultHeap) Pop() any {
+	old := *results
+	last := len(old) - 1
+	value := old[last]
+	*results = old[:last]
+	return value
+}
+
+func richHistoryResultBetter(left, right RichHistoryResult) bool {
+	if left.Score != right.Score {
+		return left.Score > right.Score
+	}
+	return historyEntryNewer(left.HistoryEntry, right.HistoryEntry)
+}
+
+func recentRichHistory(entries []HistoryEntry, options RichHistorySearchOptions) []RichHistoryResult {
+	now := options.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	limit := options.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	results := make(richHistoryResultHeap, 0, min(len(entries), limit))
+	for _, entry := range entries {
+		if !richHistoryEntryMatchesScope(entry, options) ||
+			options.SuccessfulOnly && (!entry.HasExitCode || entry.ExitCode != 0) {
+			continue
+		}
+		candidate := RichHistoryResult{HistoryEntry: entry, RelativeTime: formatRelativeTime(entry.StartedAt, now)}
+		if len(results) < limit {
+			heap.Push(&results, candidate)
+		} else if richHistoryResultBetter(candidate, results[0]) {
+			results[0] = candidate
+			heap.Fix(&results, 0)
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool { return richHistoryResultBetter(results[i], results[j]) })
+	return results
+}
+
+func historyEntryNewer(left, right HistoryEntry) bool {
+	if !left.StartedAt.Equal(right.StartedAt) {
+		return left.StartedAt.After(right.StartedAt)
+	}
+	if left.HistoryOrder != right.HistoryOrder {
+		return left.HistoryOrder > right.HistoryOrder
+	}
+	return left.ID > right.ID
 }
 
 func richHistoryEntryMatchesScope(entry HistoryEntry, options RichHistorySearchOptions) bool {
@@ -298,16 +333,23 @@ func sortHistoryEntries(entries []HistoryEntry) {
 		if !entries[i].StartedAt.Equal(entries[j].StartedAt) {
 			return entries[i].StartedAt.After(entries[j].StartedAt)
 		}
-		if entries[i].historyOrder != entries[j].historyOrder {
-			return entries[i].historyOrder > entries[j].historyOrder
+		if entries[i].HistoryOrder != entries[j].HistoryOrder {
+			return entries[i].HistoryOrder > entries[j].HistoryOrder
 		}
 		return entries[i].ID > entries[j].ID
 	})
 }
 
 func prepareHistoryEntry(entry *HistoryEntry) {
-	if entry != nil && len(entry.searchRunes) == 0 && entry.Command != "" {
-		entry.searchRunes = lowerRunes(entry.Command)
+	if entry == nil {
+		return
+	}
+	entry.NormalizedCommand = strings.TrimSpace(entry.NormalizedCommand)
+	if entry.NormalizedCommand == "" {
+		entry.NormalizedCommand = strings.TrimSpace(entry.Command)
+	}
+	if len(entry.searchRunes) == 0 && entry.NormalizedCommand != "" {
+		entry.searchRunes = lowerRunes(entry.NormalizedCommand)
 	}
 }
 

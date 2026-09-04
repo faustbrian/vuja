@@ -77,6 +77,7 @@ func TestHistoryNavigationDirectoryImportsUseNavigationEventsInsteadOfDirectoryA
 		{Command: "cd service", Cwd: "/repo", StartedAt: now.Add(-time.Hour)},
 		{Command: "cd service/", Cwd: "/repo", StartedAt: now},
 		{Command: "cd legacy", Cwd: "/repo", StartedAt: now.Add(-90 * 24 * time.Hour)},
+		{Command: "cd missing", Cwd: "/repo", StartedAt: now, ExitCode: 1, HasExitCode: true},
 		{Command: "cd service && pwd", Cwd: "/repo", StartedAt: now},
 	}, now)
 	if len(entries) != 2 {

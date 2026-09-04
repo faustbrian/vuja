@@ -29,6 +29,8 @@ const (
 	terminalModelScrollback        = 256
 	terminalInputHorizontalPadding = 2
 	terminalModelChunkSize         = 8 * 1024
+	terminalModelSequenceLimit     = 4 * 1024
+	terminalWriterMaxPending       = 1 * 1024 * 1024
 )
 
 var statusVersionOrder = [...]string{
@@ -59,15 +61,18 @@ type terminalCompositor struct {
 	height         int
 	closed         bool
 
-	emulator        *vt.Emulator
-	emulatorDone    <-chan struct{}
-	backdrop        *vt.Emulator
-	backdropDone    <-chan struct{}
-	modelUTF8Tail   []byte
-	modelCSITail    []byte
-	modelRecoveries uint64
-	stream          terminalMarkerStream
-	phase           terminalPhase
+	emulator           *vt.Emulator
+	emulatorDone       <-chan struct{}
+	backdrop           *vt.Emulator
+	backdropDone       <-chan struct{}
+	modelUTF8Tail      []byte
+	modelCSITail       []byte
+	backdropCSITail    []byte
+	modelRecoveries    uint64
+	backdropRecoveries uint64
+	visualRecoveries   uint64
+	stream             terminalMarkerStream
+	phase              terminalPhase
 
 	promptStartAbs          int
 	surfaceBottomAbs        int
@@ -137,15 +142,24 @@ func newAsyncTerminalWriter(out io.Writer) *asyncTerminalWriter {
 }
 
 func (w *asyncTerminalWriter) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	if w.closed {
+	written := 0
+	for written < len(data) {
+		w.mu.Lock()
+		for len(w.pending) >= terminalWriterMaxPending && !w.closed {
+			w.cond.Wait()
+		}
+		if w.closed {
+			w.mu.Unlock()
+			return written, io.ErrClosedPipe
+		}
+		available := terminalWriterMaxPending - len(w.pending)
+		count := min(available, len(data)-written)
+		w.pending = append(w.pending, data[written:written+count]...)
+		written += count
+		w.cond.Signal()
 		w.mu.Unlock()
-		return 0, io.ErrClosedPipe
 	}
-	w.pending = append(w.pending, data...)
-	w.cond.Signal()
-	w.mu.Unlock()
-	return len(data), nil
+	return written, nil
 }
 
 func (w *asyncTerminalWriter) run() {
@@ -161,6 +175,7 @@ func (w *asyncTerminalWriter) run() {
 		}
 		batch := w.pending
 		w.pending = nil
+		w.cond.Broadcast()
 		w.mu.Unlock()
 		for len(batch) > 0 {
 			written, err := w.out.Write(batch)
@@ -247,18 +262,34 @@ type terminalStatusSegment struct {
 }
 
 type terminalUIPresenter struct {
-	mu      sync.Mutex
-	compose func(func() []byte)
+	mu        sync.Mutex
+	compose   func(func() []byte)
+	onFailure func()
 }
 
-func newTerminalUIPresenter(compose func(func() []byte)) *terminalUIPresenter {
-	return &terminalUIPresenter{compose: compose}
+func newTerminalUIPresenter(compose func(func() []byte), onFailure ...func()) *terminalUIPresenter {
+	presenter := &terminalUIPresenter{compose: compose}
+	if len(onFailure) > 0 {
+		presenter.onFailure = onFailure[0]
+	}
+	return presenter
 }
 
 func (p *terminalUIPresenter) Update(update func(compose func(func() []byte))) {
 	if p == nil || p.compose == nil || update == nil {
 		return
 	}
+	defer func() {
+		failure := recover()
+		if failure == nil {
+			return
+		}
+		if p.onFailure != nil {
+			p.onFailure()
+			return
+		}
+		panic(failure)
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	update(p.compose)
@@ -298,11 +329,112 @@ func newTerminalCompositor(out io.Writer, promptPosition, marker string, width, 
 }
 
 func (c *terminalCompositor) WritePTY(data []byte) {
+	defer c.containVisualFailure()
 	for len(data) > terminalModelChunkSize {
 		c.writePTYChunk(data[:terminalModelChunkSize])
 		data = data[terminalModelChunkSize:]
 	}
 	c.writePTYChunk(data)
+}
+
+func (c *terminalCompositor) containVisualFailure() {
+	if recover() != nil {
+		c.recoverVisualPipeline()
+	}
+}
+
+// recoverVisualPipeline contains an unexpected renderer failure at the PTY
+// boundary. The managed shell and durable history store remain alive; Vuja
+// discards only disposable visual state and waits for the next prompt marker.
+// Transient UI callbacks are disabled because their failure source cannot be
+// distinguished safely from the compositor itself at this boundary.
+func (c *terminalCompositor) recoverVisualPipeline() {
+	defer func() {
+		if recover() != nil {
+			c.degradeVisualPipeline()
+		}
+	}()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.visualRecoveries++
+	if c.closed || !c.enabled {
+		return
+	}
+	c.clearTransientUI = nil
+	c.setTransientUIGeometry = nil
+	c.renderTransientUI = nil
+	c.disableTransientUI = nil
+	c.transientUIRegion = nil
+	c.recoverModel()
+	c.recoverBackdrop()
+}
+
+// degradeVisualPipeline is the last-resort recovery path when even allocating
+// fresh shadow terminal models fails. It keeps marker parsing enabled so
+// Vuja's internal protocol stays hidden, but sends shell text directly to the
+// terminal until a later valid resize can rebuild the disposable models.
+func (c *terminalCompositor) degradeVisualPipeline() {
+	c.mu.Lock()
+	if c.closed || !c.enabled {
+		c.mu.Unlock()
+		return
+	}
+	emulator, emulatorDone := c.emulator, c.emulatorDone
+	backdrop, backdropDone := c.backdrop, c.backdropDone
+	c.layout = false
+	c.awaitingPrompt = true
+	c.emulator = nil
+	c.emulatorDone = nil
+	c.backdrop = nil
+	c.backdropDone = nil
+	c.modelUTF8Tail = c.modelUTF8Tail[:0]
+	c.modelCSITail = c.modelCSITail[:0]
+	c.backdropCSITail = c.backdropCSITail[:0]
+	c.phase = terminalOutput
+	c.surfaceRows = 0
+	c.surfaceContentRows = 0
+	c.surfaceContentLines = nil
+	c.surfaceContentCells = nil
+	c.renderedLines = nil
+	c.pendingLineBreak = false
+	c.pendingRedraw = c.pendingRedraw[:0]
+	c.promptPrelude = ""
+	c.commandCardOpen = false
+	c.commandOutputDirect = false
+	c.commandOutputLineOpen = false
+	c.commandOutputPositioned = false
+	c.commandOutputStarted = false
+	c.commandOutputColumn = 0
+	c.rawCommandPending = false
+	c.commandStartedAt = time.Time{}
+	c.commandDirectory = ""
+	c.commandStatusSnapshot = statusSnapshot{}
+	c.clearTransientUI = nil
+	c.setTransientUIGeometry = nil
+	c.renderTransientUI = nil
+	c.disableTransientUI = nil
+	c.transientUIRegion = nil
+	c.transientUIVisible = nil
+	c.mu.Unlock()
+	abandonTerminalModel(emulator, emulatorDone)
+	abandonTerminalModel(backdrop, backdropDone)
+}
+
+func abandonTerminalModel(model *vt.Emulator, done <-chan struct{}) {
+	if model == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	if closer, ok := model.InputPipe().(io.Closer); ok {
+		_ = closer.Close()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	_ = model.Close()
 }
 
 func (c *terminalCompositor) writePTYChunk(data []byte) {
@@ -499,6 +631,7 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 	if render == nil {
 		return
 	}
+	defer c.containVisualFailure()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -553,6 +686,7 @@ func (c *terminalCompositor) SetTransientUIReflow(
 }
 
 func (c *terminalCompositor) SetInputBoxTheme(theme terminalInputBoxTheme) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -574,6 +708,7 @@ func (c *terminalCompositor) SetInputBoxTheme(theme terminalInputBoxTheme) {
 }
 
 func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -633,6 +768,7 @@ func cloneTerminalChatboxBar(bar terminalChatboxBarConfig) terminalChatboxBarCon
 }
 
 func (c *terminalCompositor) SetStatusSnapshot(snapshot statusSnapshot) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -690,6 +826,7 @@ func cloneStatusSnapshot(snapshot statusSnapshot) statusSnapshot {
 }
 
 func (c *terminalCompositor) SetCommandContext(command string) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -745,6 +882,7 @@ func statusCommandContext(command string) string {
 }
 
 func (c *terminalCompositor) SetInputBoxPath(path string) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -773,6 +911,7 @@ func (c *terminalCompositor) WriteNotification(data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	defer c.containVisualFailure()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -787,6 +926,7 @@ func (c *terminalCompositor) WriteNotification(data []byte) {
 }
 
 func (c *terminalCompositor) Resize(width, height int) {
+	defer c.containVisualFailure()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -856,14 +996,13 @@ func (c *terminalCompositor) Resize(width, height int) {
 	c.titleLinesCache = nil
 	c.statusLinesCache = nil
 	c.transientGeometryDirty = true
-	c.emulator.Resize(width, height)
-	// x/vt currently retains scroll margins across resize even when their old
-	// bounds no longer fit the resized buffer. Real terminals clamp or reset
-	// those margins, so normalize the shadow model while preserving its cursor.
-	_, _ = c.emulator.Write([]byte("\x1b7\x1b[r\x1b[?69l\x1b8"))
+	modelReady := c.resizeModel(width, height)
 	c.modelCSITail = c.modelCSITail[:0]
 	if c.backdrop != nil {
-		c.backdrop.Resize(width, height)
+		c.resizeBackdrop(width, height)
+	}
+	if !modelReady {
+		return
 	}
 	cursorAbs := c.absoluteCursorLine()
 	c.promptStartAbs = max(c.emulator.ScrollbackLen(), cursorAbs-max(oldRows-1, 0))
@@ -937,6 +1076,7 @@ func (c *terminalCompositor) resetEmulator(width, height int) {
 
 func (c *terminalCompositor) resetBackdrop(width, height int) {
 	c.backdrop = vt.NewEmulator(width, height)
+	c.backdropCSITail = c.backdropCSITail[:0]
 	done := make(chan struct{})
 	c.backdropDone = done
 	go func(backdrop *vt.Emulator) {
@@ -965,15 +1105,55 @@ func (c *terminalCompositor) writeTerminal(data []byte) {
 		return
 	}
 	_, _ = c.out.Write(data)
-	if c.backdrop != nil {
-		_, _ = c.backdrop.Write(data)
-	}
+	c.writeBackdrop(data)
 }
 
 func (c *terminalCompositor) recordBackdrop(data []byte) {
-	if c.backdrop != nil && len(data) > 0 {
-		_, _ = c.backdrop.Write(data)
+	c.writeBackdrop(data)
+}
+
+func (c *terminalCompositor) writeBackdrop(data []byte) {
+	if c.backdrop == nil || len(data) == 0 {
+		return
 	}
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		c.recoverBackdrop()
+	}()
+	data = sanitizeTerminalModelCSI(data, &c.backdropCSITail, c.width, c.height)
+	if len(data) == 0 {
+		return
+	}
+	if _, err := c.backdrop.Write(data); err != nil {
+		c.recoverBackdrop()
+	}
+}
+
+func (c *terminalCompositor) resizeBackdrop(width, height int) {
+	if c.backdrop == nil {
+		return
+	}
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		c.recoverBackdrop()
+	}()
+	c.backdrop.Resize(width, height)
+	c.backdropCSITail = c.backdropCSITail[:0]
+	// x/vt retains margins from the previous buffer dimensions. Reset them so
+	// reverse index cannot scroll a region beyond the resized backdrop.
+	if _, err := c.backdrop.Write([]byte("\x1b7\x1b[r\x1b[?69l\x1b8")); err != nil {
+		c.recoverBackdrop()
+	}
+}
+
+func (c *terminalCompositor) recoverBackdrop() {
+	c.backdropRecoveries++
+	c.closeBackdrop()
+	c.resetBackdrop(c.width, c.height)
 }
 
 func (c *terminalCompositor) currentTransientUIRegion() (int, int) {
@@ -988,10 +1168,17 @@ func (c *terminalCompositor) currentTransientUIRegion() (int, int) {
 	return top, min(rows, c.height-top)
 }
 
-func (c *terminalCompositor) restoreBackdropRows(top, rows int) []byte {
+func (c *terminalCompositor) restoreBackdropRows(top, rows int) (result []byte) {
 	if c.backdrop == nil || rows <= 0 || c.width <= 0 || c.height <= 0 {
 		return nil
 	}
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		c.recoverBackdrop()
+		result = nil
+	}()
 	bottom := min(top+rows, c.height)
 	var restored strings.Builder
 	restored.Grow((bottom - top) * (c.width + 24))
@@ -2633,32 +2820,7 @@ func (c *terminalCompositor) writeModel(data []byte) {
 		if recover() == nil {
 			return
 		}
-		c.modelRecoveries++
-		c.closeEmulator()
-		c.resetEmulator(c.width, c.height)
-		c.awaitingPrompt = true
-		c.phase = terminalOutput
-		c.promptStartAbs = 0
-		c.surfaceBottomAbs = 0
-		c.surfaceRows = 0
-		c.surfaceContentRows = 0
-		c.surfaceContentLines = nil
-		c.surfaceContentCells = nil
-		c.renderedLines = nil
-		c.pendingLineBreak = false
-		c.pendingRedraw = c.pendingRedraw[:0]
-		c.promptPrelude = ""
-		c.commandCardOpen = false
-		c.commandOutputDirect = false
-		c.commandOutputLineOpen = false
-		c.commandOutputPositioned = false
-		c.commandOutputStarted = false
-		c.commandOutputColumn = 0
-		c.rawCommandPending = false
-		c.commandStartedAt = time.Time{}
-		c.commandDirectory = ""
-		c.commandStatusSnapshot = statusSnapshot{}
-		c.transientGeometryDirty = true
+		c.recoverModel()
 	}()
 
 	data = c.sanitizeModelCSI(data)
@@ -2678,13 +2840,66 @@ func (c *terminalCompositor) writeModel(data []byte) {
 	c.attachTrailingZeroWidthCell(attachment)
 }
 
+func (c *terminalCompositor) resizeModel(width, height int) (ready bool) {
+	ready = true
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		c.recoverModel()
+		ready = false
+	}()
+	c.emulator.Resize(width, height)
+	// x/vt currently retains scroll margins across resize even when their old
+	// bounds no longer fit the resized buffer. Real terminals clamp or reset
+	// those margins, so normalize the shadow model while preserving its cursor.
+	if _, err := c.emulator.Write([]byte("\x1b7\x1b[r\x1b[?69l\x1b8")); err != nil {
+		c.recoverModel()
+		return false
+	}
+	return true
+}
+
+func (c *terminalCompositor) recoverModel() {
+	c.modelRecoveries++
+	c.closeEmulator()
+	c.resetEmulator(c.width, c.height)
+	c.awaitingPrompt = true
+	c.phase = terminalOutput
+	c.promptStartAbs = 0
+	c.surfaceBottomAbs = 0
+	c.surfaceRows = 0
+	c.surfaceContentRows = 0
+	c.surfaceContentLines = nil
+	c.surfaceContentCells = nil
+	c.renderedLines = nil
+	c.pendingLineBreak = false
+	c.pendingRedraw = c.pendingRedraw[:0]
+	c.promptPrelude = ""
+	c.commandCardOpen = false
+	c.commandOutputDirect = false
+	c.commandOutputLineOpen = false
+	c.commandOutputPositioned = false
+	c.commandOutputStarted = false
+	c.commandOutputColumn = 0
+	c.rawCommandPending = false
+	c.commandStartedAt = time.Time{}
+	c.commandDirectory = ""
+	c.commandStatusSnapshot = statusSnapshot{}
+	c.transientGeometryDirty = true
+}
+
 func (c *terminalCompositor) sanitizeModelCSI(data []byte) []byte {
-	if len(c.modelCSITail) > 0 {
-		combined := make([]byte, 0, len(c.modelCSITail)+len(data))
-		combined = append(combined, c.modelCSITail...)
+	return sanitizeTerminalModelCSI(data, &c.modelCSITail, c.width, c.height)
+}
+
+func sanitizeTerminalModelCSI(data []byte, tail *[]byte, width, height int) []byte {
+	if len(*tail) > 0 {
+		combined := make([]byte, 0, len(*tail)+len(data))
+		combined = append(combined, *tail...)
 		combined = append(combined, data...)
 		data = combined
-		c.modelCSITail = c.modelCSITail[:0]
+		*tail = (*tail)[:0]
 	}
 
 	result := make([]byte, 0, len(data))
@@ -2695,7 +2910,10 @@ func (c *terminalCompositor) sanitizeModelCSI(data []byte) []byte {
 			continue
 		}
 		if index+1 >= len(data) {
-			c.modelCSITail = append(c.modelCSITail, data[index:]...)
+			if len(data)-index > terminalModelSequenceLimit {
+				break
+			}
+			*tail = append(*tail, data[index:]...)
 			break
 		}
 		if data[index+1] != '[' {
@@ -2709,15 +2927,18 @@ func (c *terminalCompositor) sanitizeModelCSI(data []byte) []byte {
 			end++
 		}
 		if end >= len(data) {
-			c.modelCSITail = append(c.modelCSITail, data[index:]...)
+			if len(data)-index > terminalModelSequenceLimit {
+				break
+			}
+			*tail = append(*tail, data[index:]...)
 			break
 		}
 
 		sequence := data[index : end+1]
 		if data[end] == 'r' {
-			sequence = clampModelVerticalMargins(sequence, c.height)
+			sequence = clampModelVerticalMargins(sequence, height)
 		} else if data[end] == 's' && end > index+2 {
-			sequence = clampModelHorizontalMargins(sequence, c.width)
+			sequence = clampModelHorizontalMargins(sequence, width)
 		}
 		result = append(result, sequence...)
 		index = end + 1

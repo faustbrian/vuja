@@ -176,7 +176,27 @@ type HistoryUIConfig struct {
 }
 
 type HistoryConfig struct {
-	ImportAtuin bool `toml:"import-atuin"`
+	Retention    string                    `toml:"retention"`
+	MaxEvents    int                       `toml:"max-events"`
+	Integrations HistoryIntegrationsConfig `toml:"integrations"`
+	// ImportAtuin is retained as a migration-only compatibility switch.
+	ImportAtuin bool `toml:"import-atuin,omitempty"`
+}
+
+type HistoryIntegrationsConfig struct {
+	Atuin HistoryAtuinIntegrationConfig `toml:"atuin"`
+	Shell HistoryShellIntegrationConfig `toml:"shell"`
+}
+
+type HistoryAtuinIntegrationConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Mode    string `toml:"mode"`
+}
+
+type HistoryShellIntegrationConfig struct {
+	Import bool   `toml:"import"`
+	Mirror bool   `toml:"mirror"`
+	Path   string `toml:"path"`
 }
 
 type ColorsConfig struct {
@@ -244,6 +264,7 @@ type SuggestionsConfig struct {
 	Blocks              []string `toml:"blocks"`
 	IgnorePatterns      []string `toml:"ignore-patterns"`
 	SuppressDestructive bool     `toml:"suppress-destructive"`
+	HistoryRanking      string   `toml:"history-ranking"`
 	DirectoryRanking    string   `toml:"directory-ranking"`
 	ImportZoxide        bool     `toml:"import-zoxide"`
 }
@@ -362,6 +383,9 @@ func Load() (*Config, error) {
 			}
 			applyLegacyChatboxColors(cfg, &metadata)
 			applySchemaCompatibility(cfg, &metadata)
+			if err := applyHistoryCompatibility(cfg, &metadata); err != nil {
+				return cfg, fmt.Errorf("config: invalid value: %w", err)
+			}
 		}
 	}
 
@@ -382,6 +406,12 @@ func applySchemaCompatibility(cfg *Config, metadata *toml.MetaData) {
 	if !metadata.IsDefined("core", "version") {
 		schemaVersion = 1
 	}
+	if schemaVersion < 3 && !metadata.IsDefined("suggestions", "import-zoxide") {
+		// Zoxide was implicitly enabled before schema 3. Preserve that behavior
+		// for existing installations while new configurations keep every
+		// external adapter disabled by default.
+		cfg.Suggestions.ImportZoxide = true
+	}
 	if schemaVersion >= 2 {
 		return
 	}
@@ -391,6 +421,18 @@ func applySchemaCompatibility(cfg *Config, metadata *toml.MetaData) {
 	if !metadata.IsDefined("ui", "chatbox", "snapshot-metadata") {
 		cfg.UI.Chatbox.SnapshotMetadata = "always"
 	}
+}
+
+func applyHistoryCompatibility(cfg *Config, metadata *toml.MetaData) error {
+	if cfg == nil || metadata == nil || !metadata.IsDefined("history", "import-atuin") {
+		return nil
+	}
+	if metadata.IsDefined("history", "integrations", "atuin", "enabled") {
+		return fmt.Errorf("history.import-atuin: cannot be combined with history.integrations.atuin.enabled")
+	}
+	cfg.History.Integrations.Atuin.Enabled = cfg.History.ImportAtuin
+	cfg.History.ImportAtuin = false
+	return nil
 }
 
 func applyLegacyChatboxLayout(cfg *Config, metadata *toml.MetaData) error {
@@ -573,6 +615,26 @@ func validate(cfg *Config) error {
 	}
 	if !oneOf(cfg.Suggestions.DirectoryRanking, "balanced", "recent", "frequent") {
 		return fmt.Errorf("suggestions.directory-ranking: invalid value %q (want: balanced|recent|frequent)", cfg.Suggestions.DirectoryRanking)
+	}
+	if !oneOf(cfg.Suggestions.HistoryRanking, "balanced", "recent", "frequent") {
+		return fmt.Errorf("suggestions.history-ranking: invalid value %q (want: balanced|recent|frequent)", cfg.Suggestions.HistoryRanking)
+	}
+	if !oneOf(cfg.History.Retention, "unlimited", "bounded") {
+		return fmt.Errorf("history.retention: invalid value %q (want: unlimited|bounded)", cfg.History.Retention)
+	}
+	if cfg.History.MaxEvents < 0 {
+		return fmt.Errorf("history.max-events: must be zero or greater")
+	}
+	if cfg.History.Retention == "bounded" && cfg.History.MaxEvents == 0 {
+		return fmt.Errorf("history.max-events: must be greater than zero when retention is bounded")
+	}
+	if !oneOf(cfg.History.Integrations.Atuin.Mode, "import", "sync") {
+		return fmt.Errorf("history.integrations.atuin.mode: invalid value %q (want: import|sync)", cfg.History.Integrations.Atuin.Mode)
+	}
+	shellHistoryPath := strings.TrimSpace(cfg.History.Integrations.Shell.Path)
+	if shellHistoryPath != "" && shellHistoryPath != "~" &&
+		!strings.HasPrefix(shellHistoryPath, "~/") && !filepath.IsAbs(shellHistoryPath) {
+		return fmt.Errorf("history.integrations.shell.path: must be absolute or start with ~/")
 	}
 
 	if err := validateChatbox(cfg.UI.Chatbox); err != nil {

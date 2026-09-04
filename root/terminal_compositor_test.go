@@ -17,6 +17,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
+	"github.com/faustbrian/vuja/integration"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -47,6 +48,43 @@ func TestAsyncTerminalWriterKeepsRenderingOffTheStateLock(t *testing.T) {
 		t.Fatal("terminal worker did not receive the frame")
 	}
 	close(sink.release)
+	writer.Close()
+}
+
+func TestAsyncTerminalWriterAppliesBoundedBackpressure(t *testing.T) {
+	sink := &gatedTerminalWriter{started: make(chan struct{}), release: make(chan struct{})}
+	writer := newAsyncTerminalWriter(sink)
+	first := make([]byte, terminalWriterMaxPending)
+	if written, err := writer.Write(first); err != nil || written != len(first) {
+		t.Fatalf("unexpected first enqueue result written=%d err=%v", written, err)
+	}
+	select {
+	case <-sink.started:
+	case <-time.After(time.Second):
+		t.Fatal("terminal worker did not begin the first blocked write")
+	}
+	second := make([]byte, terminalWriterMaxPending)
+	if written, err := writer.Write(second); err != nil || written != len(second) {
+		t.Fatalf("unexpected second enqueue result written=%d err=%v", written, err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = writer.Write([]byte("blocked"))
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("expected the bounded queue to apply backpressure")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(sink.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected the blocked writer to resume after output drained")
+	}
 	writer.Close()
 }
 
@@ -1830,6 +1868,21 @@ func TestTerminalUIPresenterOrdersRenderBeforeLaterClear(t *testing.T) {
 	}
 }
 
+func TestTerminalUIPresenterContainsUpdateFailure(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 34)
+	t.Cleanup(compositor.Close)
+	presenter := newTerminalUIPresenter(compositor.ComposeUI, compositor.recoverVisualPipeline)
+
+	presenter.Update(func(_ func(func() []byte)) { panic("overlay update failed") })
+
+	if compositor.visualRecoveries != 1 {
+		t.Fatalf("expected one contained presenter recovery, got %d", compositor.visualRecoveries)
+	}
+	if !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected presenter recovery to preserve the shell and wait for the next prompt")
+	}
+}
+
 func TestBottomCompositorClearsTransientUIAtOrderedCommandBoundary(t *testing.T) {
 	var output bytes.Buffer
 	const marker = "test-session"
@@ -1924,6 +1977,226 @@ func TestBottomCompositorRejectsScrollMarginsBeyondModelHeight(t *testing.T) {
 	}
 }
 
+func TestBottomCompositorContainsBackdropFailureAfterResize(t *testing.T) {
+	var output bytes.Buffer
+	compositor := newTerminalCompositor(&output, "bottom", "test-session", 80, 40)
+	t.Cleanup(compositor.Close)
+
+	// Preserve a scroll region that is valid before the resize but extends past
+	// the resized buffer. Reverse index at the top margin made x/vt scroll this
+	// stale region and panic while Vuja recorded its terminal backdrop.
+	compositor.WritePTY([]byte("\x1b[1;39r\x1b[1;1H"))
+	compositor.Resize(80, 34)
+	compositor.WritePTY([]byte("\x1bMstill alive"))
+
+	if compositor.backdropRecoveries != 0 {
+		t.Fatalf("expected resize to normalize backdrop margins without recovery, got %d", compositor.backdropRecoveries)
+	}
+	if !strings.Contains(output.String(), "still alive") {
+		t.Fatalf("expected foreground output to survive shadow-model handling, got %q", output.String())
+	}
+}
+
+func TestBottomCompositorSerializesRepeatedResizeWithReverseIndexOutput(t *testing.T) {
+	var output lockedBuffer
+	compositor := newTerminalCompositor(&output, "bottom", "test-session", 120, 80)
+	t.Cleanup(compositor.Close)
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for range 200 {
+			compositor.WritePTY([]byte("\x1b[1;80r\x1b[1;1H\x1bMstreamed\r\n"))
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for index := range 200 {
+			if index%2 == 0 {
+				compositor.Resize(90, 24)
+			} else {
+				compositor.Resize(120, 80)
+			}
+		}
+	}()
+	workers.Wait()
+
+	if compositor.closed || compositor.emulator == nil || compositor.backdrop == nil {
+		t.Fatal("expected repeated concurrent resize traffic to preserve the managed terminal models")
+	}
+	if compositor.visualRecoveries != 0 || compositor.modelRecoveries != 0 || compositor.backdropRecoveries != 0 {
+		t.Fatalf(
+			"expected stale scroll regions to be sanitized without recovery, visual=%d model=%d backdrop=%d",
+			compositor.visualRecoveries,
+			compositor.modelRecoveries,
+			compositor.backdropRecoveries,
+		)
+	}
+}
+
+func TestManagedTerminalResizeSerializesOverlayAndCompositorState(t *testing.T) {
+	var output lockedBuffer
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 120, 40)
+	t.Cleanup(compositor.Close)
+	overlay := integration.NewOverlay(true)
+	overlay.SetBottomPrompt(true)
+	overlay.SetTerminalSize(120, 40)
+	presenter := newTerminalUIPresenter(compositor.ComposeUI, compositor.recoverVisualPipeline)
+
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+	compositor.WritePTY([]byte("lambda"))
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		for range 200 {
+			presenter.Present(func() []byte { return []byte(overlay.Render()) })
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		for index := range 200 {
+			width := 90
+			height := 24
+			if index%2 != 0 {
+				width = 120
+				height = 40
+			}
+			resizeManagedTerminal(presenter, compositor, overlay, width, height)
+		}
+	}()
+	workers.Wait()
+
+	if compositor.closed || compositor.emulator == nil || compositor.backdrop == nil {
+		t.Fatal("expected serialized overlay and compositor resize traffic to preserve the managed terminal")
+	}
+}
+
+func TestBottomCompositorContainsModelFailureDuringResize(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 40)
+	t.Cleanup(compositor.Close)
+	compositor.closeEmulator()
+
+	compositor.Resize(80, 34)
+
+	if compositor.modelRecoveries != 1 {
+		t.Fatalf("expected one contained model recovery, got %d", compositor.modelRecoveries)
+	}
+	if compositor.emulator == nil || compositor.emulator.Width() != 80 || compositor.emulator.Height() != 34 {
+		t.Fatal("expected resize recovery to install a fresh correctly sized model")
+	}
+	if !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected resize recovery to preserve the shell and wait for the next prompt boundary")
+	}
+}
+
+func TestBottomCompositorBackdropFailureDoesNotTerminateOutput(t *testing.T) {
+	var output bytes.Buffer
+	compositor := newTerminalCompositor(&output, "bottom", "test-session", 80, 40)
+	t.Cleanup(compositor.Close)
+	_, _ = compositor.backdrop.Write([]byte("\x1b[1;39r\x1b[1;1H"))
+	compositor.backdrop.Resize(80, 34)
+	compositor.width = 80
+	compositor.height = 34
+
+	compositor.writeTerminal([]byte("\x1bMstill alive"))
+
+	if compositor.backdropRecoveries != 1 {
+		t.Fatalf("expected one contained backdrop recovery, got %d", compositor.backdropRecoveries)
+	}
+	if !strings.Contains(output.String(), "still alive") {
+		t.Fatalf("expected foreground output before backdrop recovery, got %q", output.String())
+	}
+	if compositor.backdrop == nil || compositor.backdrop.Width() != 80 || compositor.backdrop.Height() != 34 {
+		t.Fatal("expected backdrop recovery to install a fresh correctly sized model")
+	}
+}
+
+func TestBottomCompositorContainsUnexpectedVisualPipelineFailure(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 34)
+	t.Cleanup(compositor.Close)
+	compositor.phase = terminalInput
+	compositor.awaitingPrompt = false
+	compositor.renderTransientUI = func() []byte { panic("transient renderer failed") }
+	compositor.transientGeometryDirty = true
+
+	compositor.WritePTY([]byte("typed"))
+
+	if compositor.visualRecoveries != 1 {
+		t.Fatalf("expected one contained visual recovery, got %d", compositor.visualRecoveries)
+	}
+	if compositor.emulator == nil || compositor.backdrop == nil {
+		t.Fatal("expected visual recovery to install fresh disposable models")
+	}
+	if !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected visual recovery to preserve the shell and wait for the next prompt")
+	}
+	if compositor.renderTransientUI != nil || compositor.clearTransientUI != nil {
+		t.Fatal("expected the failing transient UI boundary to remain disabled after recovery")
+	}
+}
+
+func TestBottomCompositorDegradesToMarkerFilteredPassThroughWhenVisualRecoveryFails(t *testing.T) {
+	var output bytes.Buffer
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 80, 34)
+	t.Cleanup(compositor.Close)
+
+	compositor.degradeVisualPipeline()
+	compositor.WritePTY(append(terminalMarkerBytes(marker, "prompt-start"), []byte("shell stays alive")...))
+
+	if compositor.layout || !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected failed visual recovery to leave only marker-filtered pass-through active")
+	}
+	if compositor.emulator != nil || compositor.backdrop != nil {
+		t.Fatal("expected failed disposable terminal models to be abandoned")
+	}
+	if got := output.String(); !strings.Contains(got, "shell stays alive") || strings.Contains(got, marker) {
+		t.Fatalf("expected shell output without internal markers after degradation, got %q", got)
+	}
+}
+
+func TestBottomCompositorContainsUnexpectedResizeRedrawFailure(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 34)
+	t.Cleanup(compositor.Close)
+	compositor.phase = terminalInput
+	compositor.awaitingPrompt = false
+	compositor.surfaceRows = 1
+	compositor.surfaceContentRows = 1
+	compositor.renderTransientUI = func() []byte { panic("resize redraw failed") }
+	compositor.transientGeometryDirty = true
+
+	compositor.Resize(90, 40)
+
+	if compositor.visualRecoveries != 1 {
+		t.Fatalf("expected one contained resize recovery, got %d", compositor.visualRecoveries)
+	}
+	if !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected resize recovery to preserve the shell and wait for the next prompt")
+	}
+}
+
+func TestBottomCompositorContainsUnexpectedUICompositionFailure(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 34)
+	t.Cleanup(compositor.Close)
+	compositor.layout = true
+	compositor.phase = terminalInput
+	compositor.awaitingPrompt = false
+
+	compositor.ComposeUI(func() []byte { panic("overlay renderer failed") })
+
+	if compositor.visualRecoveries != 1 {
+		t.Fatalf("expected one contained UI recovery, got %d", compositor.visualRecoveries)
+	}
+	if !compositor.awaitingPrompt || compositor.phase != terminalOutput {
+		t.Fatal("expected UI recovery to preserve the shell and wait for the next prompt")
+	}
+}
+
 func TestModelMarginSanitizerClampsSplitVerticalAndHorizontalSequences(t *testing.T) {
 	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 80, 34)
 	t.Cleanup(compositor.Close)
@@ -1936,6 +2209,20 @@ func TestModelMarginSanitizerClampsSplitVerticalAndHorizontalSequences(t *testin
 	}
 	if got := string(compositor.sanitizeModelCSI([]byte("\x1b[?69h\x1b[1;120s"))); got != "\x1b[?69h\x1b[1;80s" {
 		t.Fatalf("expected horizontal margin clamp, got %q", got)
+	}
+}
+
+func TestTerminalModelSanitizerBoundsUnterminatedSequences(t *testing.T) {
+	var tail []byte
+	malformed := append([]byte("\x1b["), bytes.Repeat([]byte{'1'}, terminalModelSequenceLimit+1)...)
+	if got := sanitizeTerminalModelCSI(malformed, &tail, 80, 34); len(got) != 0 {
+		t.Fatalf("expected oversized malformed sequence to be discarded from the shadow model, got %q", got)
+	}
+	if len(tail) != 0 {
+		t.Fatalf("expected malformed sequence tail to remain bounded, got %d bytes", len(tail))
+	}
+	if got := string(sanitizeTerminalModelCSI([]byte("still alive"), &tail, 80, 34)); got != "still alive" {
+		t.Fatalf("expected normal shadow-model traffic after malformed input, got %q", got)
 	}
 }
 

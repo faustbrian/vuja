@@ -8,14 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/spec"
 	_ "modernc.org/sqlite"
 )
@@ -92,8 +96,13 @@ type RecentFailure struct {
 }
 
 type FrecencyStore struct {
-	db        *sql.DB
-	writeGate chan struct{}
+	db                      *sql.DB
+	dbPath                  string
+	writeGate               chan struct{}
+	recordSequence          atomic.Uint64
+	historySnapshotSequence atomic.Int64
+	historyOriginMu         sync.RWMutex
+	historyOrigin           string
 }
 
 func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
@@ -122,7 +131,13 @@ func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	databaseURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(dbPath)}
+	parameters := url.Values{}
+	parameters.Add("_pragma", "journal_mode(WAL)")
+	parameters.Add("_pragma", "synchronous(FULL)")
+	parameters.Add("_pragma", "busy_timeout(5000)")
+	databaseURL.RawQuery = parameters.Encode()
+	db, err := sql.Open("sqlite", databaseURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
@@ -131,7 +146,7 @@ func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
 	// another.
 	db.SetMaxOpenConns(4)
 
-	store := &FrecencyStore{db: db, writeGate: make(chan struct{}, 1)}
+	store := &FrecencyStore{db: db, dbPath: dbPath, writeGate: make(chan struct{}, 1)}
 	if err := store.initSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -159,7 +174,7 @@ func (f *FrecencyStore) acquireWrite(ctx context.Context) error {
 func (f *FrecencyStore) releaseWrite() { <-f.writeGate }
 
 func (f *FrecencyStore) configureSQLite(ctx context.Context) error {
-	_, err := f.db.ExecContext(ctx, "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;")
+	_, err := f.db.ExecContext(ctx, "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;")
 	return err
 }
 
@@ -167,7 +182,12 @@ func (f *FrecencyStore) initSchema(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctxTimeout, cancel := context.WithTimeout(ctx, 2000*time.Millisecond)
+	// Concurrent Vuja windows may serialize briefly on WAL/schema setup, and a
+	// one-time lifecycle backup can legitimately exceed an interactive query
+	// budget. Initialization is not a keystroke operation; allow the database
+	// busy timeout and migration boundary to finish instead of permanently
+	// disabling history for the new managed session.
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if err := f.configureSQLite(ctxTimeout); err != nil {
@@ -234,16 +254,23 @@ CREATE INDEX IF NOT EXISTS idx_imported_history_cmd_nocase
 ON imported_history_entries(cmd COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS history_events (
-    event_key     TEXT PRIMARY KEY,
-    command       TEXT NOT NULL,
-    cwd           TEXT NOT NULL DEFAULT '',
-    started_at    TIMESTAMP NOT NULL,
-    duration_ns   INTEGER NOT NULL DEFAULT 0,
-    exit_code     INTEGER,
-    source        TEXT NOT NULL,
-    host          TEXT NOT NULL DEFAULT '',
-    session_id    TEXT NOT NULL DEFAULT '',
-    imported      INTEGER NOT NULL DEFAULT 0
+    event_key         TEXT PRIMARY KEY,
+    command           TEXT NOT NULL,
+    normalized_command TEXT NOT NULL DEFAULT '',
+    cwd               TEXT NOT NULL DEFAULT '',
+    submitted_at      TIMESTAMP NOT NULL DEFAULT '',
+    started_at        TIMESTAMP NOT NULL,
+    completed_at      TIMESTAMP NOT NULL DEFAULT '',
+    duration_ns       INTEGER NOT NULL DEFAULT 0,
+    exit_code         INTEGER,
+    source            TEXT NOT NULL,
+    host              TEXT NOT NULL DEFAULT '',
+    session_id        TEXT NOT NULL DEFAULT '',
+    shell             TEXT NOT NULL DEFAULT '',
+    state             TEXT NOT NULL DEFAULT 'unknown',
+    history_order     INTEGER NOT NULL DEFAULT 0,
+    occurrences       INTEGER NOT NULL DEFAULT 1,
+    imported          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_events_started_at
@@ -345,15 +372,197 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `
 	_, err := f.db.ExecContext(ctxTimeout, schema)
-	return err
+	if err != nil {
+		return err
+	}
+	return f.ensureHistoryEventLifecycleColumns(ctxTimeout)
+}
+
+func (f *FrecencyStore) ensureHistoryEventLifecycleColumns(ctx context.Context) error {
+	migrationRequired, err := f.historyLifecycleMigrationRequired(ctx)
+	if err != nil {
+		return err
+	}
+	if migrationRequired {
+		if err := f.backupHistoryDatabaseBeforeLifecycleMigration(ctx); err != nil {
+			return err
+		}
+	}
+	tx, err := f.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if migrationRequired {
+		// Acquire SQLite's cross-process writer lock before inspecting the
+		// lifecycle schema. Without this, two new terminal windows can both
+		// open deferred read transactions and then race while upgrading them.
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO metadata (key, value)
+VALUES ('history_lifecycle_migration_lock', '1')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(history_events)`)
+	if err != nil {
+		return err
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+			_ = rows.Close()
+			return scanErr
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"normalized_command", `ALTER TABLE history_events ADD COLUMN normalized_command TEXT NOT NULL DEFAULT ''`},
+		{"submitted_at", `ALTER TABLE history_events ADD COLUMN submitted_at TIMESTAMP NOT NULL DEFAULT ''`},
+		{"completed_at", `ALTER TABLE history_events ADD COLUMN completed_at TIMESTAMP NOT NULL DEFAULT ''`},
+		{"shell", `ALTER TABLE history_events ADD COLUMN shell TEXT NOT NULL DEFAULT ''`},
+		{"state", `ALTER TABLE history_events ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'`},
+		{"history_order", `ALTER TABLE history_events ADD COLUMN history_order INTEGER NOT NULL DEFAULT 0`},
+		{"occurrences", `ALTER TABLE history_events ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, addition.sql); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE history_events
+SET normalized_command = TRIM(command)
+WHERE normalized_command = '';
+UPDATE history_events
+SET submitted_at = started_at
+WHERE submitted_at = '';
+UPDATE history_events
+SET completed_at = started_at,
+    state = CASE WHEN exit_code = 0 THEN 'completed' ELSE 'failed' END
+WHERE state = 'unknown' AND exit_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_history_events_normalized_command
+ON history_events(normalized_command COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_history_events_state_session
+ON history_events(state, session_id);
+
+CREATE TABLE IF NOT EXISTS history_changes (
+    sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+    origin     TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL,
+    event_key  TEXT NOT NULL DEFAULT ''
+);
+`); err != nil {
+		return err
+	}
+	var schemaVersion string
+	versionErr := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key = 'history_schema_version'`).Scan(&schemaVersion)
+	if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
+		return versionErr
+	}
+	version, parseErr := strconv.Atoi(schemaVersion)
+	if versionErr != nil || parseErr != nil || version < 2 {
+		if err := migrateLegacyHistoryAggregates(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO metadata (key, value)
+VALUES ('history_schema_version', '2')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+DELETE FROM metadata WHERE key = 'history_lifecycle_migration_lock';
+`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (f *FrecencyStore) historyLifecycleMigrationRequired(ctx context.Context) (bool, error) {
+	var schemaVersion string
+	err := f.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key = 'history_schema_version'`).Scan(&schemaVersion)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	version, parseErr := strconv.Atoi(schemaVersion)
+	return err != nil || parseErr != nil || version < 2, nil
+}
+
+func (f *FrecencyStore) backupHistoryDatabaseBeforeLifecycleMigration(ctx context.Context) error {
+	var historyRows int
+	for _, table := range []string{
+		"history_events", "history_entries", "imported_history_entries", "imported_history",
+		"command_outcomes", "suggestion_feedback", "recent_failures", "exact_command_transitions",
+		"command_transitions", "argument_values",
+	} {
+		var count int
+		if err := f.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			return err
+		}
+		historyRows += count
+	}
+	if historyRows == 0 {
+		return nil
+	}
+	backupPath := f.dbPath + ".pre-lifecycle-v2.bak"
+	if _, err := os.Stat(backupPath); err == nil {
+		return config.RestrictPrivateFiles(backupPath)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	temporaryPath := fmt.Sprintf("%s.tmp-%d", backupPath, os.Getpid())
+	if _, err := os.Stat(temporaryPath); err == nil {
+		return fmt.Errorf("history migration backup temporary file already exists: %s", temporaryPath)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	defer os.Remove(temporaryPath)
+	quotedPath := strings.ReplaceAll(temporaryPath, "'", "''")
+	if _, err := f.db.ExecContext(ctx, "VACUUM INTO '"+quotedPath+"'"); err != nil {
+		return fmt.Errorf("back up history before lifecycle migration: %w", err)
+	}
+	if err := config.RestrictPrivateFiles(temporaryPath); err != nil {
+		return err
+	}
+	if err := publishHistoryMigrationBackup(temporaryPath, backupPath); err != nil {
+		return fmt.Errorf("publish history migration backup: %w", err)
+	}
+	return config.RestrictPrivateFiles(backupPath)
+}
+
+func publishHistoryMigrationBackup(temporaryPath, backupPath string) error {
+	if err := os.Link(temporaryPath, backupPath); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return config.RestrictPrivateFiles(backupPath)
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *FrecencyStore) RecordFeedback(ctx context.Context, cmd, cwd, event string) error {
 	if f == nil {
 		return nil
 	}
-	cmd, cwd = strings.TrimSpace(cmd), strings.TrimSpace(cwd)
-	if cmd == "" || cwd == "" {
+	var recordable bool
+	if cmd, recordable = policy.HistoryCommand(cmd, false); !recordable {
+		return nil
+	}
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
 		return nil
 	}
 	column := map[string]string{
@@ -416,10 +625,14 @@ func (f *FrecencyStore) RecordExactTransition(ctx context.Context, prevCommand, 
 	if f == nil {
 		return nil
 	}
-	prevCommand = strings.TrimSpace(prevCommand)
-	nextCommand = strings.TrimSpace(nextCommand)
+	var previousRecordable, nextRecordable bool
+	prevCommand, previousRecordable = policy.HistoryCommand(prevCommand, false)
+	nextCommand, nextRecordable = policy.HistoryCommand(nextCommand, false)
+	if !previousRecordable || !nextRecordable {
+		return nil
+	}
 	cwd = strings.TrimSpace(cwd)
-	if prevCommand == "" || nextCommand == "" || cwd == "" {
+	if cwd == "" {
 		return nil
 	}
 	if ctx == nil {
@@ -470,7 +683,7 @@ func (f *FrecencyStore) QueryExactTransitionsWithFallback(ctx context.Context, p
 SELECT prev_command, next_command, cwd, count, last_used
 FROM exact_command_transitions
 WHERE prev_command = ? AND cwd = ? AND count > 0
-ORDER BY count DESC
+ORDER BY count DESC, last_used DESC, next_command ASC
 `, prevCommand, cwd)
 		} else {
 			rows, err = f.db.QueryContext(ctxTimeout, `
@@ -478,7 +691,7 @@ SELECT prev_command, next_command, '', SUM(count), MAX(last_used)
 FROM exact_command_transitions
 WHERE prev_command = ? AND count > 0
 GROUP BY next_command
-ORDER BY SUM(count) DESC
+ORDER BY SUM(count) DESC, MAX(last_used) DESC, next_command ASC
 `, prevCommand)
 		}
 		if err != nil {
@@ -509,87 +722,74 @@ func (f *FrecencyStore) ReplaceImportedHistory(ctx context.Context, entries []Im
 	if f == nil {
 		return nil
 	}
-
-	if ctx == nil {
-		ctx = context.Background()
+	type aggregateKey struct {
+		command string
+		cwd     string
+		source  string
 	}
-	if err := f.acquireWrite(ctx); err != nil {
-		return err
-	}
-	defer f.releaseWrite()
-	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	fingerprint := importedHistoryPersistenceFingerprint(entries)
-	var storedFingerprint string
-	err := f.db.QueryRowContext(
-		ctxTimeout,
-		`SELECT value FROM metadata WHERE key = 'imported_history_fingerprint'`,
-	).Scan(&storedFingerprint)
-	if err == nil && storedFingerprint == fingerprint {
-		return nil
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	tx, err := f.db.BeginTx(ctxTimeout, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, execErr := tx.ExecContext(ctxTimeout, `DELETE FROM imported_history_entries`); execErr != nil {
-		return execErr
-	}
-	stmt, err := tx.PrepareContext(ctxTimeout, `
-INSERT INTO imported_history_entries
-    (cmd, cwd, count, last_used, exit_code, duration_ns, source)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
+	aggregates := make(map[aggregateKey]ImportedHistoryEntry, len(entries))
 	for _, entry := range entries {
-		command := strings.TrimSpace(entry.Command)
-		if command == "" || entry.Count <= 0 {
+		command, recordable := policy.HistoryCommand(entry.Command, false)
+		if !recordable || entry.Count <= 0 {
 			continue
-		}
-		lastUsed := entry.LastUsed
-		if lastUsed.IsZero() {
-			lastUsed = time.Unix(0, 0)
 		}
 		source := strings.TrimSpace(entry.Source)
 		if source == "" {
 			source = "shell"
 		}
-		var exitCode any
-		if entry.HasExitCode {
-			exitCode = entry.ExitCode
+		key := aggregateKey{command: command, cwd: strings.TrimSpace(entry.Cwd), source: source}
+		aggregate := aggregates[key]
+		aggregate.Command = command
+		aggregate.Cwd = key.cwd
+		aggregate.Source = source
+		aggregate.Count += entry.Count
+		if aggregate.LastUsed.IsZero() || entry.LastUsed.After(aggregate.LastUsed) {
+			aggregate.LastUsed = entry.LastUsed
+			aggregate.ExitCode = entry.ExitCode
+			aggregate.HasExitCode = entry.HasExitCode
+			aggregate.Duration = entry.Duration
 		}
-		if _, err := stmt.ExecContext(
-			ctxTimeout,
-			command,
-			strings.TrimSpace(entry.Cwd),
-			entry.Count,
-			canonicalTimestamp(lastUsed),
-			exitCode,
-			entry.Duration.Nanoseconds(),
-			source,
-		); err != nil {
-			return err
+		aggregates[key] = aggregate
+	}
+	keys := make([]aggregateKey, 0, len(aggregates))
+	for key := range aggregates {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].source != keys[j].source {
+			return keys[i].source < keys[j].source
 		}
+		if keys[i].command != keys[j].command {
+			return keys[i].command < keys[j].command
+		}
+		return keys[i].cwd < keys[j].cwd
+	})
+	events := make([]HistoryEvent, 0, len(keys))
+	for index, key := range keys {
+		aggregate := aggregates[key]
+		startedAt := aggregate.LastUsed
+		if startedAt.IsZero() {
+			startedAt = time.Unix(0, 0)
+		}
+		state := "unknown"
+		completedAt := time.Time{}
+		if aggregate.HasExitCode {
+			state = "completed"
+			if aggregate.ExitCode != 0 {
+				state = "failed"
+			}
+			completedAt = startedAt.Add(max(aggregate.Duration, 0))
+		}
+		sum := sha256.Sum256([]byte(key.source + "\x00" + key.command + "\x00" + key.cwd))
+		events = append(events, HistoryEvent{
+			EventKey: "imported-aggregate:" + hex.EncodeToString(sum[:16]), Command: key.command,
+			NormalizedCommand: key.command, Cwd: key.cwd, SubmittedAt: startedAt, StartedAt: startedAt,
+			CompletedAt: completedAt, Duration: aggregate.Duration, ExitCode: aggregate.ExitCode,
+			HasExitCode: aggregate.HasExitCode, Source: key.source, State: state, HistoryOrder: index + 1,
+			Occurrences: aggregate.Count, Imported: true,
+		})
 	}
-	if _, err := tx.ExecContext(ctxTimeout, `
-INSERT INTO metadata (key, value)
-VALUES ('imported_history_fingerprint', ?)
-ON CONFLICT(key) DO UPDATE SET value = excluded.value
-`, fingerprint); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return f.ReplaceImportedHistoryEvents(ctx, events)
 }
 
 func importedHistoryFingerprint(entries []ImportedHistoryEntry) string {
@@ -651,9 +851,12 @@ func (f *FrecencyStore) Record(ctx context.Context, cmd, cwd string, exitCode in
 	if f == nil {
 		return nil
 	}
-	cmd = strings.TrimSpace(cmd)
+	var recordable bool
+	if cmd, recordable = policy.HistoryCommand(cmd, false); !recordable {
+		return nil
+	}
 	cwd = strings.TrimSpace(cwd)
-	if cmd == "" || cwd == "" {
+	if cwd == "" {
 		return nil
 	}
 
@@ -666,6 +869,7 @@ func (f *FrecencyStore) Record(ctx context.Context, cmd, cwd string, exitCode in
 	defer f.releaseWrite()
 	ctxTimeout, cancel := context.WithTimeout(ctx, 1000*time.Millisecond)
 	defer cancel()
+	recordedAt := time.Now()
 
 	var query string
 	if exitCode == 0 {
@@ -679,8 +883,9 @@ ON CONFLICT(cmd, cwd) DO UPDATE SET
 	} else {
 		query = `
 INSERT INTO history_entries (cmd, cwd, count, last_used)
-VALUES (?, ?, 0, CURRENT_TIMESTAMP)
+VALUES (?, ?, 1, CURRENT_TIMESTAMP)
 ON CONFLICT(cmd, cwd) DO UPDATE SET
+	count = count + 1,
     last_used = CURRENT_TIMESTAMP;
 `
 	}
@@ -743,6 +948,23 @@ ON CONFLICT(scope, position,value,cwd) DO UPDATE SET
 				return err
 			}
 		}
+	}
+	state := "failed"
+	if exitCode == 0 {
+		state = "completed"
+	}
+	eventKey := fmt.Sprintf("vuja:compat:%d:%d:%d", os.Getpid(), recordedAt.UnixNano(), f.recordSequence.Add(1))
+	if _, err = tx.ExecContext(ctxTimeout, `
+INSERT INTO history_events
+    (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
+     duration_ns, exit_code, source, state, history_order, occurrences, imported)
+VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'vuja', ?, 0, 1, 0)
+`, eventKey, cmd, cmd, cwd, canonicalTimestamp(recordedAt), canonicalTimestamp(recordedAt),
+		canonicalTimestamp(recordedAt), exitCode, state); err != nil {
+		return err
+	}
+	if err := f.recordHistoryChange(ctxTimeout, tx, "upsert", eventKey); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -1130,10 +1352,14 @@ func (f *FrecencyStore) RecordTransition(ctx context.Context, prevSkeleton, next
 	if f == nil {
 		return nil
 	}
-	prevSkeleton = strings.TrimSpace(prevSkeleton)
-	nextSkeleton = strings.TrimSpace(nextSkeleton)
+	var previousRecordable, nextRecordable bool
+	prevSkeleton, previousRecordable = policy.HistoryCommand(prevSkeleton, false)
+	nextSkeleton, nextRecordable = policy.HistoryCommand(nextSkeleton, false)
+	if !previousRecordable || !nextRecordable {
+		return nil
+	}
 	cwd = strings.TrimSpace(cwd)
-	if prevSkeleton == "" || nextSkeleton == "" || cwd == "" {
+	if cwd == "" {
 		return nil
 	}
 	if ctx == nil {
@@ -1193,7 +1419,7 @@ func (f *FrecencyStore) QueryTransitionsWithFallback(ctx context.Context, prevSk
 SELECT prev_skeleton, next_skeleton, cwd, count, last_used
 FROM command_transitions
 WHERE prev_skeleton = ? AND cwd = ? AND count > 0
-ORDER BY count DESC
+ORDER BY count DESC, last_used DESC, next_skeleton ASC
 `, key, cwd)
 			if err == nil {
 				defer rows.Close()
@@ -1231,7 +1457,7 @@ SELECT prev_skeleton, next_skeleton, SUM(count) as total_count, MAX(last_used) a
 FROM command_transitions
 WHERE prev_skeleton = ? AND count > 0
 GROUP BY next_skeleton
-ORDER BY total_count DESC
+ORDER BY total_count DESC, max_last_used DESC, next_skeleton ASC
 `, key)
 			if err == nil {
 				defer rows.Close()
@@ -1262,26 +1488,31 @@ ORDER BY total_count DESC
 }
 
 func (f *FrecencyStore) RawScore(count int, lastUsed time.Time) float64 {
+	return historyRankingScore(count, lastUsed, "balanced", time.Now())
+}
+
+func historyRankingScore(count int, lastUsed time.Time, ranking string, now time.Time) float64 {
 	if count <= 0 {
 		return 0
 	}
-	age := max(time.Since(lastUsed), 0)
-
-	var weight float64
-	switch {
-	case age <= time.Hour:
-		weight = 100.0
-	case age <= 24*time.Hour:
-		weight = 50.0
-	case age <= 7*24*time.Hour:
-		weight = 20.0
-	case age <= 30*24*time.Hour:
-		weight = 5.0
-	default:
-		weight = 1.0
+	if lastUsed.IsZero() {
+		if ranking == "frequent" {
+			return float64(count)
+		}
+		return 0
 	}
-
-	return float64(count) * weight
+	age := max(now.Sub(lastUsed), 0)
+	switch ranking {
+	case "frequent":
+		return float64(count)
+	case "recent":
+		return 1_000_000 / (1 + age.Hours())
+	default:
+		const halfLife = 45 * 24 * time.Hour
+		frequency := math.Log1p(float64(count))
+		decay := math.Exp(-math.Ln2 * float64(age) / float64(halfLife))
+		return frequency * decay
+	}
 }
 
 func (f *FrecencyStore) QueryLocal(ctx context.Context, cwd, prefix string, limit int) ([]FrecencyEntry, error) {
@@ -1301,9 +1532,9 @@ func (f *FrecencyStore) QueryLocal(ctx context.Context, cwd, prefix string, limi
 	var err error
 	query := `
 WITH candidates AS (
-    SELECT cmd, cwd, count, last_used, 'vuja' AS source FROM history_entries WHERE cwd = ?
+    SELECT cmd, cwd, count, last_used FROM history_entries WHERE cwd = ?
     UNION ALL
-    SELECT cmd, cwd, count, last_used, source FROM imported_history_entries WHERE cwd = ?
+    SELECT cmd, cwd, count, last_used FROM imported_history_entries WHERE cwd = ?
 )
 SELECT cmd, cwd, SUM(count), MAX(last_used)
 FROM candidates
@@ -1313,7 +1544,7 @@ FROM candidates
 		query += " WHERE cmd LIKE ?"
 		args = append(args, prefix+"%")
 	}
-	query += " GROUP BY cmd, cwd, source"
+	query += " GROUP BY cmd, cwd"
 	rows, err = f.db.QueryContext(ctxTimeout, query, args...)
 	if err != nil {
 		return nil, err
@@ -1366,18 +1597,17 @@ func (f *FrecencyStore) QueryProject(ctx context.Context, root, prefix string, l
 
 	query := `
 WITH candidates AS (
-    SELECT cmd, cwd, count, last_used, 'vuja' AS source FROM history_entries
+    SELECT cmd, cwd, count, last_used FROM history_entries
     UNION ALL
-    SELECT cmd, cwd, count, last_used, source FROM imported_history_entries
-),
-per_source AS (
-    SELECT cmd, source, SUM(count) AS count, MAX(last_used) AS last_used
+    SELECT cmd, cwd, count, last_used FROM imported_history_entries
+), aggregated AS (
+    SELECT cmd, SUM(count) AS count, MAX(last_used) AS last_used
     FROM candidates
     WHERE (cwd = ? OR substr(cwd, 1, length(?) + 1) = ? || ?)
-    GROUP BY cmd, source
+    GROUP BY cmd
 )
 SELECT cmd, count, last_used
-FROM per_source
+FROM aggregated
 `
 	args := []any{root, root, root, string(os.PathSeparator)}
 	if prefix != "" {
@@ -1434,37 +1664,22 @@ func (f *FrecencyStore) QueryGlobal(ctx context.Context, prefix string, limit in
 	ctxTimeout, cancel := context.WithTimeout(ctx, 1000*time.Millisecond)
 	defer cancel()
 
-	var rows *sql.Rows
-	var err error
+	query := `
+WITH candidates AS (
+    SELECT cmd, count, last_used FROM history_entries
+    UNION ALL
+    SELECT cmd, count, last_used FROM imported_history_entries
+)
+SELECT cmd, SUM(count), MAX(last_used)
+FROM candidates
+`
+	var args []any
 	if prefix != "" {
-		rows, err = f.db.QueryContext(ctxTimeout, `
-WITH recorded AS (
-    SELECT cmd, SUM(count) AS count, MAX(last_used) AS last_used
-    FROM history_entries
-    WHERE cmd LIKE ?
-    GROUP BY cmd
-)
-SELECT cmd, count, last_used FROM recorded
-UNION ALL
-SELECT cmd, SUM(count), MAX(last_used)
-FROM imported_history_entries
-WHERE cmd LIKE ?
-GROUP BY cmd, source
-`, prefix+"%", prefix+"%")
-	} else {
-		rows, err = f.db.QueryContext(ctxTimeout, `
-WITH recorded AS (
-    SELECT cmd, SUM(count) AS count, MAX(last_used) AS last_used
-    FROM history_entries
-    GROUP BY cmd
-)
-SELECT cmd, count, last_used FROM recorded
-UNION ALL
-SELECT cmd, SUM(count), MAX(last_used)
-FROM imported_history_entries
-GROUP BY cmd, source
-`)
+		query += " WHERE cmd LIKE ?"
+		args = append(args, prefix+"%")
 	}
+	query += " GROUP BY cmd"
+	rows, err := f.db.QueryContext(ctxTimeout, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1568,7 +1783,7 @@ const databaseTimestampLayout = "2006-01-02 15:04:05.999999999"
 
 var (
 	globalFrecencyStore *FrecencyStore
-	globalFrecencyMu    sync.Mutex
+	globalFrecencyMu    sync.RWMutex
 )
 
 func GetFrecencyStore() (*FrecencyStore, error) {
@@ -1585,6 +1800,16 @@ func GetFrecencyStore() (*FrecencyStore, error) {
 	}
 	globalFrecencyStore = store
 	return globalFrecencyStore, nil
+}
+
+// LoadedFrecencyStore returns the already initialized process store without
+// performing filesystem or SQLite work. Interactive suggestion paths use this
+// accessor so a transient startup failure cannot turn every keystroke into a
+// database-open retry.
+func LoadedFrecencyStore() *FrecencyStore {
+	globalFrecencyMu.RLock()
+	defer globalFrecencyMu.RUnlock()
+	return globalFrecencyStore
 }
 
 // CloseGlobalFrecencyStore safely closes the singleton database connection.
