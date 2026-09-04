@@ -223,7 +223,7 @@ func TestFrecencyStore_BalancedDirectoryRankingUsesRecentWindowFrequency(t *test
 	}
 }
 
-func TestFrecencyStore_QueryLocalKeepsFrequencyAndRecencyFromTheSameSource(t *testing.T) {
+func TestFrecencyStore_QueryLocalAggregatesCanonicalExecutionsAcrossSources(t *testing.T) {
 	store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -249,13 +249,8 @@ func TestFrecencyStore_QueryLocalKeepsFrequencyAndRecencyFromTheSameSource(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected independent evidence from two sources, got %+v", entries)
-	}
-	for _, entry := range entries {
-		if entry.Count == 1000 && entry.LastUsed.Equal(recent) {
-			t.Fatalf("frequency and recency were combined across sources: %+v", entry)
-		}
+	if len(entries) != 1 || entries[0].Count != 1002 || !entries[0].LastUsed.Equal(recent) {
+		t.Fatalf("expected one canonical aggregate containing every execution, got %+v", entries)
 	}
 }
 
@@ -548,12 +543,12 @@ func TestFrecencyStore_ExitCodeBehavior(t *testing.T) {
 	defer store.Close()
 
 	cwd := "/home/user/test"
-	_ = store.Record(context.Background(), "grep foo", cwd, 0) // count=1
-	_ = store.Record(context.Background(), "grep foo", cwd, 1) // count unchanged (1)
+	_ = store.Record(context.Background(), "grep foo", cwd, 0)
+	_ = store.Record(context.Background(), "grep foo", cwd, 1)
 
 	entries, _ := store.QueryLocal(context.Background(), cwd, "grep", 10)
-	if len(entries) != 1 || entries[0].Count != 1 {
-		t.Errorf("expected grep count to be 1 after non-zero exit code, got %v", entries)
+	if len(entries) != 1 || entries[0].Count != 2 {
+		t.Errorf("expected successful and failed executions to contribute to frequency, got %v", entries)
 	}
 
 	_ = store.RecordTransition(context.Background(), "git checkout", "git status", cwd, 0)
@@ -764,7 +759,7 @@ VALUES ('cd stale', '/repo', 7, 'not-a-timestamp', 'test')
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || !entries[0].LastUsed.IsZero() || entries[0].RawScore != 7 {
+	if len(entries) != 1 || !entries[0].LastUsed.IsZero() || entries[0].RawScore != 0 {
 		t.Fatalf("expected malformed recency to remain unknown, got %+v", entries)
 	}
 }

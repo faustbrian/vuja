@@ -238,13 +238,13 @@ func TestShellFunctionSuggestionsUseDistinctFunctionBadge(t *testing.T) {
 	}
 	theme := ThemeFromConfig(config.DefaultConfig().UI.Colors, true)
 	rendered := renderSuggestionBadge("function", false, theme)
-	if !strings.Contains(rendered, "function") || !strings.Contains(rendered, "48;2;253;125;244") {
+	if !strings.Contains(rendered, "function") || !strings.Contains(rendered, "48;2;253;125;243") {
 		t.Fatalf("expected the function badge in the function color, got %q", rendered)
 	}
 }
 
 func TestLegacySuggestionDescriptionLabelsFunctions(t *testing.T) {
-	theme := NightTheme()
+	theme := ThemeFromConfig(config.DefaultConfig().UI.Colors, true)
 	suggestion := spec.Suggestion{Cmd: "repush", Desc: "Push the current branch", Source: "function"}
 
 	rendered := renderLegacySuggestionDescription(suggestion, false, 40, lipgloss.NewStyle(), theme, false)

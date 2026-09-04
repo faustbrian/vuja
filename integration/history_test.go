@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/faustbrian/vuja/integration/shell"
 )
 
 func TestRecordSessionCommandPreservesEventsAndDeduplicatesInlineCandidates(t *testing.T) {
