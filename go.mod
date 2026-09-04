@@ -15,8 +15,8 @@ require (
 	github.com/versenilvis/fuzzy v0.1.0-rc1.2
 	go.uber.org/goleak v1.3.0
 	golang.org/x/mod v0.37.0
-	golang.org/x/sys v0.44.0
-	golang.org/x/term v0.30.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.53.0
 )
 
