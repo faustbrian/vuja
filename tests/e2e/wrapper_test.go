@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 )
 
@@ -179,7 +180,7 @@ check-interval = "24h"
 	sessionContext, cancelSession := context.WithCancel(t.Context())
 	command := exec.CommandContext(sessionContext, binary, "--shell", shell)
 	command.Dir = workDir
-	command.Env = append(os.Environ(),
+	command.Env = append(cleanEnvironment(),
 		"HOME="+homeDir,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TERM=xterm-256color",
@@ -321,7 +322,7 @@ func waitForOutputAfter(t *testing.T, output *synchronizedBuffer, offset int, ex
 	defer ticker.Stop()
 	for {
 		currentOutput := output.String()
-		if offset <= len(currentOutput) && strings.Contains(currentOutput[offset:], expected) {
+		if offset <= len(currentOutput) && strings.Contains(ansi.Strip(currentOutput[offset:]), expected) {
 			return
 		}
 		select {

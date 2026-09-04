@@ -409,6 +409,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	columns := make(map[string]bool)
 	for rows.Next() {
 		var cid int
@@ -416,7 +417,6 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 		var notNull, primaryKey int
 		var defaultValue any
 		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
-			_ = rows.Close()
 			return scanErr
 		}
 		columns[name] = true

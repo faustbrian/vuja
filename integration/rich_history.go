@@ -225,7 +225,11 @@ func (results richHistoryResultHeap) Less(i, j int) bool {
 func (results richHistoryResultHeap) Swap(i, j int) { results[i], results[j] = results[j], results[i] }
 
 func (results *richHistoryResultHeap) Push(value any) {
-	*results = append(*results, value.(RichHistoryResult))
+	result, ok := value.(RichHistoryResult)
+	if !ok {
+		panic("rich history heap received an unexpected value type")
+	}
+	*results = append(*results, result)
 }
 
 func (results *richHistoryResultHeap) Pop() any {

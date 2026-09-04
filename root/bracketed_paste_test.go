@@ -16,11 +16,12 @@ func TestBracketedPasteActionsKeepMultilinePayloadOutOfNormalInput(t *testing.T)
 			t.Fatal("expected paste action to consume input")
 		}
 		kinds = append(kinds, action.kind)
-		if action.kind == pasteActionStart {
+		switch action.kind {
+		case pasteActionStart:
 			active = true
-		} else if action.kind == pasteActionData {
+		case pasteActionData:
 			pasted = append(pasted, action.data...)
-		} else if action.kind == pasteActionEnd {
+		case pasteActionEnd:
 			active = false
 		}
 		input = input[action.consumed:]

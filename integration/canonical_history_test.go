@@ -255,6 +255,9 @@ func TestCanonicalHistoryPublicationOwnsItsImmutableGeneration(t *testing.T) {
 	PublishCanonicalHistory(entries)
 	entries[0].Command = "mutated by caller"
 	entries = append(entries, HistoryEntry{ID: "late", Command: "echo late", Source: "vuja"})
+	if len(entries) != 2 {
+		t.Fatalf("expected caller-owned fixture to contain two entries, got %d", len(entries))
+	}
 
 	snapshot := RichHistorySnapshot()
 	if len(snapshot) != 1 || snapshot[0].Command != "ssh forge@api" {

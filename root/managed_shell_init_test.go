@@ -36,7 +36,7 @@ func TestPrepareManagedShellInitSourcesZshConfigWithOriginalZDOTDIR(t *testing.T
 
 	t.Setenv("ZDOTDIR", configDir)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	command := exec.Command(zshPath, "-i", "-c", "alias dotdot >/dev/null && whence -w gtm")
+	command := exec.CommandContext(t.Context(), zshPath, "-i", "-c", "alias dotdot >/dev/null && whence -w gtm")
 	command.Env = replaceEnv(os.Environ(), "VUJA_PID", "1")
 	command.Env = replaceEnv(command.Env, "VUJA_FD", "99")
 	cleanup, err := prepareManagedShellInit(command, "zsh")

@@ -132,7 +132,7 @@ func TestConfigDoctorInspectsConfigShellAndGeneratedHook(t *testing.T) {
 	if err := ConfigDoctorCmd.RunE(ConfigDoctorCmd, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"OK config:", "OK shell:", "OK hook:", "truecolor advertised"} {
+	for _, expected := range []string{"OK config:", "OK shell:", "OK optional hook:", "truecolor advertised"} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("expected doctor output to contain %q, got %q", expected, output.String())
 		}

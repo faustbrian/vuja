@@ -148,7 +148,7 @@ func sameSuggestionResults(left, right []spec.Suggestion) bool {
 }
 
 func suggestionsVisibleForQuery(results []spec.Suggestion, query string) bool {
-	return len(results) > 0 && !(len(results) == 1 && strings.TrimSpace(results[0].Cmd) == strings.TrimSpace(query) && !strings.HasSuffix(query, " "))
+	return len(results) > 0 && (len(results) != 1 || strings.TrimSpace(results[0].Cmd) != strings.TrimSpace(query) || strings.HasSuffix(query, " "))
 }
 
 type suggestionUndo struct {

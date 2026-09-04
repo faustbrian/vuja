@@ -79,7 +79,7 @@ emit fish_postexec`,
 			}
 
 			args := append(append([]string(nil), test.args...), test.command, "vuja-marker-test", integrationPath)
-			command := exec.Command(path, args...)
+			command := exec.CommandContext(t.Context(), path, args...)
 			command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=2", "VUJA_MARKER="+marker)
 			output, err := command.Output()
 			if err != nil {
@@ -147,7 +147,7 @@ func TestZshInitPreservesLoadedHistoryHookDecision(t *testing.T) {
 			if err := os.WriteFile(integrationPath, []byte(shellInitScript("zsh", "/unused/vuja")), 0600); err != nil {
 				t.Fatal(err)
 			}
-			command := exec.Command(path, "-f", "-c", setup+`
+			command := exec.CommandContext(t.Context(), path, "-f", "-c", setup+`
 source "$1"
 zshaddhistory $'private command\n'
 _vuja_preexec 'private command'
@@ -173,7 +173,7 @@ func TestZshInitPreservesHistoryPoliciesLoadedBetweenHookSources(t *testing.T) {
 	if err := os.WriteFile(integrationPath, []byte(shellInitScript("zsh", "/unused/vuja")), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(path, "-f", "-c", `
+	command := exec.CommandContext(t.Context(), path, "-f", "-c", `
 source "$1"
 zshaddhistory() { return 0 }
 reject_late_history() { return 1 }
@@ -228,7 +228,7 @@ func TestFishInitReportsLoadedHistoryPolicyDecision(t *testing.T) {
 	if err := os.WriteFile(integrationPath, []byte(shellInitScript("fish", "/unused/vuja")), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(path, "--no-config", "-c", `
+	command := exec.CommandContext(t.Context(), path, "--no-config", "-c", `
 function fish_should_add_to_history
     return 1
 end
@@ -255,7 +255,7 @@ func TestFishInitPreservesHistoryPolicyLoadedBetweenHookSources(t *testing.T) {
 	if err := os.WriteFile(integrationPath, []byte(shellInitScript("fish", "/unused/vuja")), 0600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(path, "--no-config", "-c", `
+	command := exec.CommandContext(t.Context(), path, "--no-config", "-c", `
 source "$argv[1]"
 function fish_should_add_to_history
     return 1

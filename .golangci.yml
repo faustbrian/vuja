@@ -33,6 +33,11 @@ linters:
       enable-all: true
       disable:
         - fieldalignment
+        # The shadow analyzer flags idiomatic, immediately-checked `if err :=`
+        # declarations throughout production and test code. The remaining vet
+        # analyzers stay enabled; error handling is covered by errcheck and
+        # errorlint below.
+        - shadow
   exclusions:
     rules:
       - linters: [errcheck]

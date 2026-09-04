@@ -114,7 +114,7 @@ func TestGeneratedZshHookAppliesManagedPromptWithoutChangingZshEditing(t *testin
 		t.Fatal(err)
 	}
 
-	command := exec.Command(zshPath, "-f", "-c", `
+	command := exec.CommandContext(t.Context(), zshPath, "-f", "-c", `
 source "$1"
 PROMPT=starship
 RPROMPT=right
@@ -144,7 +144,7 @@ func TestGeneratedZshHookLeavesOrdinaryPromptUntouchedOutsideManagedSession(t *t
 	if err := writeShellIntegration(integrationFile, "zsh", "/tmp/vuja"); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(zshPath, "-f", "-c", `
+	command := exec.CommandContext(t.Context(), zshPath, "-f", "-c", `
 source "$1"
 PROMPT=starship
 RPROMPT=right

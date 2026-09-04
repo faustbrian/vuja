@@ -75,7 +75,9 @@ func TestSudoStatusUsesNonInteractiveBoundedProbeAndCache(t *testing.T) {
 		},
 	})
 	t.Cleanup(engine.Close)
-	if !engine.cachedSudoStatus(directory) || !engine.cachedSudoStatus(directory) {
+	first := engine.cachedSudoStatus(directory)
+	second := engine.cachedSudoStatus(directory)
+	if !first || !second {
 		t.Fatal("expected cached sudo authentication to be active")
 	}
 	if calls != 1 {

@@ -14,23 +14,24 @@ func BenchmarkSignalSnapshotFixture(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close() })
-	tx, err := store.db.BeginTx(context.Background(), nil)
+	ctx := b.Context()
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
-	statement, err := tx.Prepare(`INSERT INTO imported_history_entries
+	statement, err := tx.PrepareContext(ctx, `INSERT INTO imported_history_entries
 		(cmd, cwd, count, last_used, source) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer func() { _ = statement.Close() }()
 	for index := range 5_000 {
 		command := fmt.Sprintf("git command-%04d", index%500)
 		directory := fmt.Sprintf("/repo/package-%02d", (index/500)%50)
-		if _, err := statement.Exec(command, directory, index%100+1, canonicalTimestamp(time.Now().Add(-time.Duration(index)*time.Minute)), "fixture"); err != nil {
+		if _, err := statement.ExecContext(ctx, command, directory, index%100+1, canonicalTimestamp(time.Now().Add(-time.Duration(index)*time.Minute)), "fixture"); err != nil {
 			b.Fatal(err)
 		}
 	}
-	_ = statement.Close()
 	if err := tx.Commit(); err != nil {
 		b.Fatal(err)
 	}

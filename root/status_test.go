@@ -870,6 +870,7 @@ func waitForGitBranch(t *testing.T, engine *statusEngine, branch string) {
 
 func BenchmarkChatboxStatusRender(b *testing.B) {
 	compositor := newTerminalCompositor(os.Stdout, "classic", "", 160, 10)
+	defer compositor.Close()
 	compositor.SetInputBoxTheme(testInputBoxTheme())
 	compositor.SetChatboxConfig(terminalChatboxConfig{
 		Separator: " · ",

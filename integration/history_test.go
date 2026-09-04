@@ -272,7 +272,7 @@ func TestLoadAtuinHistoryOrdersEqualTimestampsDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.ExecContext(t.Context(), `
 CREATE TABLE history (
     id TEXT PRIMARY KEY,
     command TEXT NOT NULL,
@@ -309,7 +309,7 @@ func TestLoadAtuinHistoryBoundsTheAdapterToTheNewestExecutions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`
+	if _, err := db.ExecContext(t.Context(), `
 CREATE TABLE history (
     id TEXT PRIMARY KEY,
     command TEXT NOT NULL,

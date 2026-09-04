@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -88,10 +89,10 @@ func readShellMessage(reader *bufio.Reader, limit int) ([]byte, bool, error) {
 		if terminated {
 			return message, oversized, nil
 		}
-		switch err {
-		case nil, bufio.ErrBufferFull:
+		switch {
+		case err == nil, errors.Is(err, bufio.ErrBufferFull):
 			continue
-		case io.EOF:
+		case errors.Is(err, io.EOF):
 			if len(message) > 0 || oversized {
 				return message, oversized, nil
 			}
@@ -532,7 +533,11 @@ func runWrapper() {
 					_ = c.Process.Signal(s)
 				}
 				_ = ptmx.Close()
-				os.Exit(128 + int(s.(syscall.Signal)))
+				systemSignal, ok := s.(syscall.Signal)
+				if !ok {
+					os.Exit(1)
+				}
+				os.Exit(128 + int(systemSignal))
 			}
 		}
 	}()
@@ -635,7 +640,7 @@ func runWrapper() {
 		for {
 			message, oversized, err := readShellMessage(reader, shellMessageByteLimit)
 			if err != nil {
-				if err != io.EOF {
+				if !errors.Is(err, io.EOF) {
 					logger.Errorf("IPC reader error: %v", err)
 				}
 				return

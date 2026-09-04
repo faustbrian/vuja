@@ -296,12 +296,12 @@ func purgeLegacyHistoryPolicyViolations(ctx context.Context, tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
+		defer func() { _ = rows.Close() }()
 		var rejected []int64
 		for rows.Next() {
 			var rowID int64
 			var first, secondValue string
 			if err := rows.Scan(&rowID, &first, &secondValue); err != nil {
-				_ = rows.Close()
 				return err
 			}
 			recordable := true
@@ -1005,6 +1005,7 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 	if err != nil {
 		return 0, err
 	}
+	defer func() { _ = rows.Close() }()
 	remaining := maxEvents
 	var removed int64
 	var deleteKeys []string
@@ -1014,7 +1015,6 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 		var eventKey string
 		var occurrences int
 		if err := rows.Scan(&eventKey, &occurrences); err != nil {
-			_ = rows.Close()
 			return 0, err
 		}
 		occurrences = max(occurrences, 1)
@@ -1138,6 +1138,7 @@ ORDER BY completed_at ASC, event_key ASC
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	type argumentKey struct {
 		scope    string
 		position int
@@ -1160,7 +1161,6 @@ ORDER BY completed_at ASC, event_key ASC
 		var exitCode *int
 		var occurrences int
 		if err := rows.Scan(&command, &cwd, &state, &exitCode, &completedAt, &occurrences); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		if state == "failed" && exitCode != nil {
@@ -1216,6 +1216,7 @@ ORDER BY rowid ASC
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	type transitionKey struct {
 		previous string
 		next     string
@@ -1231,7 +1232,6 @@ ORDER BY rowid ASC
 	for rows.Next() {
 		var command, cwd, sessionID, state, completedAt string
 		if err := rows.Scan(&command, &cwd, &sessionID, &state, &completedAt); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		command = strings.TrimSpace(command)
@@ -1368,11 +1368,11 @@ FROM history_events
 		if err != nil {
 			return stats, err
 		}
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var key string
 			var count int
 			if err := rows.Scan(&key, &count); err != nil {
-				_ = rows.Close()
 				return stats, err
 			}
 			group.target[key] = count
@@ -1390,10 +1390,10 @@ WHERE key LIKE 'history_imported_at:%'
 	if err != nil {
 		return stats, err
 	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
-			_ = rows.Close()
 			return stats, err
 		}
 		switch {

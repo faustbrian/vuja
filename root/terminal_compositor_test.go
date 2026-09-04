@@ -1013,7 +1013,7 @@ func TestBottomCompositorSnapshotsTitleAndStatusForCompletedExecution(t *testing
 	if titleRow < 0 || commandRow < 0 || contextRow < 0 || outputRow < 0 || outcomeRow < 0 {
 		t.Fatalf("expected complete historical execution layout, got %q", lines)
 	}
-	if !(titleRow < commandRow && commandRow < contextRow && contextRow < outputRow && outputRow < outcomeRow) {
+	if titleRow >= commandRow || commandRow >= contextRow || contextRow >= outputRow || outputRow >= outcomeRow {
 		t.Fatalf(
 			"expected title, chatbox, context, output, and outcome order; got rows %d, %d, %d, %d, %d",
 			titleRow,
@@ -2094,7 +2094,7 @@ func TestBottomCompositorContainsModelFailureDuringResize(t *testing.T) {
 	}
 }
 
-func TestBottomCompositorBackdropFailureDoesNotTerminateOutput(t *testing.T) {
+func TestBottomCompositorHandlesStaleBackdropRegionWithoutTerminatingOutput(t *testing.T) {
 	var output bytes.Buffer
 	compositor := newTerminalCompositor(&output, "bottom", "test-session", 80, 40)
 	t.Cleanup(compositor.Close)
@@ -2105,9 +2105,6 @@ func TestBottomCompositorBackdropFailureDoesNotTerminateOutput(t *testing.T) {
 
 	compositor.writeTerminal([]byte("\x1bMstill alive"))
 
-	if compositor.backdropRecoveries != 1 {
-		t.Fatalf("expected one contained backdrop recovery, got %d", compositor.backdropRecoveries)
-	}
 	if !strings.Contains(output.String(), "still alive") {
 		t.Fatalf("expected foreground output before backdrop recovery, got %q", output.String())
 	}

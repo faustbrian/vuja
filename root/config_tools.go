@@ -215,11 +215,11 @@ func writeConfigFile(path string, content []byte) error {
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(config.PrivateFileMode); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(content); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {

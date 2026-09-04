@@ -1267,10 +1267,10 @@ func (c *terminalCompositor) enterCommandOutput() {
 		if c.inputBoxDecorationRows() > 0 {
 			showMetadata := c.completedSnapshotMetadataVisible()
 			if c.inputBoxTitleEnabled() && showMetadata {
-				frame.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[2K%s\x1b[0m", contentTop+1, c.completedExecutionHeaderLine()))
+				fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[2K%s\x1b[0m", contentTop+1, c.completedExecutionHeaderLine())
 				contentTop++
 			}
-			frame.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[0m", contentTop+1, c.completedInputBoxPaddingLine()))
+			fmt.Fprintf(&frame, "\x1b[%d;1H%s\x1b[0m", contentTop+1, c.completedInputBoxPaddingLine())
 			contentTop++
 			for offset, line := range c.surfaceContentLines {
 				completedLine := line
@@ -1830,9 +1830,10 @@ func (c *terminalCompositor) inputBoxStatusRowLimit() int {
 		return 0
 	}
 	limit := 2
-	if c.chatboxConfig.Density == "compact" {
+	switch c.chatboxConfig.Density {
+	case "compact":
 		limit = 1
-	} else if c.chatboxConfig.Density == "rich" {
+	case "rich":
 		limit = 3
 	}
 	if !c.chatboxConfig.Responsive {

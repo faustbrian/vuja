@@ -3,6 +3,7 @@ package root
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -303,7 +304,7 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	}
 	socketPath := filepath.Join(directory, fmt.Sprintf("%d-%s.sock", os.Getpid(), token[:12]))
 	if len(socketPath) >= 100 {
-		return nil, fmt.Errorf("Codex resume action socket path is too long: %s", socketPath)
+		return nil, fmt.Errorf("codex resume action socket path is too long: %s", socketPath)
 	}
 	_ = os.Remove(socketPath)
 	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
@@ -427,13 +428,14 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	}
 	socketPath := filepath.Clean(parsed.Query().Get("socket"))
 	if !pathWithinDirectory(socketPath, actionsDir) {
-		return errors.New("Codex resume socket is outside Vuja's private action directory")
+		return errors.New("codex resume socket is outside Vuja's private action directory")
 	}
 	token := parsed.Query().Get("token")
 	if !isCodexResumeToken(token) {
 		return errors.New("invalid Codex resume action token")
 	}
-	connection, err := net.DialTimeout("unix", socketPath, time.Second)
+	dialer := net.Dialer{Timeout: time.Second}
+	connection, err := dialer.DialContext(context.Background(), "unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("connect to Vuja session: %w", err)
 	}
