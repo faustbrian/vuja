@@ -46,14 +46,17 @@ func prepareManagedShellInit(command *exec.Cmd, shellName string) (func(), error
 	case "zsh":
 		originalDir := shell.GetZshConfigDir()
 		for _, name := range []string{".zshenv", ".zprofile"} {
-			content := sourceIfPresent(filepath.Join(originalDir, name)) + "\nexport ZDOTDIR=" + shellQuote(dir) + "\n"
+			content := "export ZDOTDIR=" + shellQuote(originalDir) + "\n" +
+				sourceIfPresent(filepath.Join(originalDir, name)) + "\n" +
+				"export ZDOTDIR=" + shellQuote(dir) + "\n"
 			if err := config.WritePrivateFile(filepath.Join(dir, name), []byte(content)); err != nil {
 				cleanup()
 				return nil, err
 			}
 		}
-		zshrc := sourceIfPresent(filepath.Join(originalDir, ".zshrc")) +
-			"\nexport ZDOTDIR=" + shellQuote(originalDir) + "\nsource " + shellQuote(hookPath) + "\n"
+		zshrc := "export ZDOTDIR=" + shellQuote(originalDir) + "\n" +
+			sourceIfPresent(filepath.Join(originalDir, ".zshrc")) +
+			"\nsource " + shellQuote(hookPath) + "\n"
 		if err := config.WritePrivateFile(filepath.Join(dir, ".zshrc"), []byte(zshrc)); err != nil {
 			cleanup()
 			return nil, err
