@@ -561,6 +561,20 @@ history-ranking = "random"
 	}
 }
 
+func TestLoadAcceptsReleaseCandidateUpdaterChannel(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	t.Setenv("VUJA_UPDATER_CHANNEL", "rc")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load release-candidate updater channel: %v", err)
+	}
+	if cfg.Updater.Channel != "rc" {
+		t.Fatalf("expected release-candidate updater channel, got %q", cfg.Updater.Channel)
+	}
+}
+
 func TestLoadSave(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vuja-config-test")
 	if err != nil {

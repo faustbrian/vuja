@@ -22,6 +22,10 @@ Vuja supports Linux and macOS. Windows is not supported.
 - [Updates](#updates)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
+- [Release process](RELEASE.md)
+- [Support policy](SUPPORT.md)
+- [Terminal dependency policy](DEPENDENCIES.md)
+- [Changelog](CHANGELOG.md)
 - [Architecture](#architecture)
 - [Command reference](#command-reference)
 - [License](#license)
@@ -31,7 +35,7 @@ Vuja supports Linux and macOS. Windows is not supported.
 - Linux or macOS
 - Zsh, Bash, or Fish
 - A terminal with ANSI color support
-- Go 1.26 or newer when building from source
+- Go 1.26.6 or newer when building from source
 - [`just`](https://github.com/casey/just) when using repository recipes
 
 ## Installation
@@ -47,6 +51,16 @@ checksum, installs `vuja`, configures the detected shell, and creates the
 default configuration when needed. Set `BIN_DIR` to override the default
 `/usr/local/bin` destination. If that directory is not writable, the installer
 falls back to `~/.local/bin`.
+
+Stable is the default and never selects a prerelease. Release candidates and
+nightlies require an explicit finite channel:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/faustbrian/vuja/main/scripts/install.sh | VUJA_CHANNEL=rc sh
+curl -sSL https://raw.githubusercontent.com/faustbrian/vuja/main/scripts/install.sh | VUJA_CHANNEL=nightly sh
+```
+
+Prerelease channels are intended for validation and may contain regressions.
 
 ### Go install
 
@@ -157,8 +171,14 @@ vuja history clear --confirm
 vuja setup [bash|zsh|fish]
 vuja update
 vuja version
-vuja uninstall
+vuja uninstall [--purge]
 ```
+
+`vuja uninstall` removes the executable, shell integration, action handlers,
+and disposable cache while preserving configuration and durable history.
+Use `vuja uninstall --purge` only when those retained files should also be
+deleted. The standalone `scripts/uninstall.sh` follows the same contract and
+accepts the same optional flag.
 
 ## Shortcuts
 
@@ -632,6 +652,18 @@ once per version.
 vuja version
 vuja update
 ```
+
+The updater defaults to stable releases. Select a prerelease channel only when
+you want to participate in release-candidate or nightly validation:
+
+```toml
+[updater]
+channel = "stable" # stable | rc | nightly
+```
+
+The stable channel excludes every prerelease. The `rc` channel accepts release
+candidates and their eventual stable promotion but excludes nightlies. The
+`nightly` channel selects nightly builds.
 
 Updater state is stored under Vuja's user state directory. Development builds
 use the version `dev` and do not display release notifications.

@@ -2,7 +2,9 @@ package root
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,20 +15,22 @@ import (
 )
 
 func init() {
+	uninstallCmd.Flags().BoolVar(&uninstallPurge, "purge", false, "also remove configuration and durable history")
 	rootCmd.AddCommand(uninstallCmd)
 }
+
+var uninstallPurge bool
 
 var uninstallCmd = &cobra.Command{
 	Use:   "uninstall",
 	Short: "Uninstall Vuja and remove shell integrations",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Uninstalling Vuja...")
+	RunE: func(cmd *cobra.Command, args []string) error {
+		output := cmd.OutOrStdout()
+		fmt.Fprintln(output, "Uninstalling Vuja...")
 		home, err := os.UserHomeDir()
 		if err != nil {
-			fmt.Printf("! could not determine home directory: %v\n", err)
-			return
+			return fmt.Errorf("determine home directory: %w", err)
 		}
-		uninstallCodexResumeURLHandler(home)
 
 		zshrcPath := filepath.Join(shell.GetZshConfigDir(), ".zshrc")
 
@@ -36,27 +40,15 @@ var uninstallCmd = &cobra.Command{
 			filepath.Join(shell.GetFishConfigDir(), "config.fish"),
 		}
 
-		for _, file := range configFiles {
-			if cleanShellConfig(file) {
-				fmt.Printf("✓ Removed integration from %s\n", file)
-			}
-		}
-
-		// Remove config, state, and cache directories
+		var configDir, stateDir, cacheDir string
 		if cfgPath, err := config.ConfigPath(); err == nil {
-			if cfgDir := filepath.Dir(cfgPath); os.RemoveAll(cfgDir) == nil {
-				fmt.Printf("✓ Removed config directory: %s\n", cfgDir)
-			}
+			configDir = filepath.Dir(cfgPath)
 		}
 		if statePath, err := config.StatePath(); err == nil {
-			if stateDir := filepath.Dir(statePath); os.RemoveAll(stateDir) == nil {
-				fmt.Printf("✓ Removed state directory: %s\n", stateDir)
-			}
+			stateDir = filepath.Dir(statePath)
 		}
 		if cachePath, err := config.CachePath(); err == nil {
-			if os.RemoveAll(cachePath) == nil {
-				fmt.Printf("✓ Removed cache directory: %s\n", cachePath)
-			}
+			cacheDir = cachePath
 		}
 
 		binLocations := []string{
@@ -66,42 +58,123 @@ var uninstallCmd = &cobra.Command{
 		if exe, err := os.Executable(); err == nil && exe != "" {
 			binLocations = append(binLocations, exe)
 		}
-
-		anyFound := false
-		for _, loc := range binLocations {
-			if _, err := os.Stat(loc); err == nil {
-				anyFound = true
-				if errRemove := os.Remove(loc); errRemove == nil {
-					fmt.Printf("✓ Removed binary: %s\n", loc)
-				} else {
-					fmt.Printf("! Could not remove binary at %s (try with sudo): %v\n", loc, errRemove)
-				}
-			}
-		}
-
-		if !anyFound {
-			fmt.Println("✓ No leftover binary files found")
-		}
-
-		_ = os.Remove("vuja.log")
-
-		fmt.Println("\n✓ Vuja has been successfully uninstalled")
-		if os.Getenv("VUJA_PID") != "" {
-			fmt.Println("\n⚠️  You are currently inside an active Vuja session.")
-			fmt.Println("Vuja runs as the parent process of this terminal - do NOT run 'pkill vuja'")
-			fmt.Println("as it will immediately close this terminal window.")
-			fmt.Println("\nTo fully exit, simply close this terminal window and open a new one.")
-			fmt.Println("Vuja will not start again since the shell config has been cleaned up.")
-		} else {
-			fmt.Println("Please close and reopen your terminal to complete the uninstall.")
-		}
+		return uninstallFromPaths(
+			output,
+			home,
+			configFiles,
+			configDir,
+			stateDir,
+			cacheDir,
+			binLocations,
+			"vuja.log",
+			uninstallPurge,
+		)
 	},
 }
 
+func uninstallFromPaths(
+	output io.Writer,
+	home string,
+	configFiles []string,
+	configDir, stateDir, cacheDir string,
+	binLocations []string,
+	logPath string,
+	purge bool,
+) error {
+	var errs []error
+	if err := uninstallCodexResumeURLHandler(home); err != nil {
+		errs = append(errs, fmt.Errorf("remove action handler: %w", err))
+	}
+	for _, file := range configFiles {
+		modified, err := cleanShellConfigChecked(file)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("clean shell configuration %s: %w", file, err))
+			continue
+		}
+		if modified {
+			fmt.Fprintf(output, "✓ Removed integration from %s\n", file)
+		}
+	}
+	if err := removeUninstallData(configDir, stateDir, cacheDir, purge); err != nil {
+		errs = append(errs, err)
+	} else if purge {
+		fmt.Fprintln(output, "✓ Removed configuration, durable history, state, and cache data")
+	} else {
+		fmt.Fprintln(output, "✓ Removed disposable cache data")
+		fmt.Fprintln(output, "✓ Preserved configuration and durable history; use --purge to remove them")
+	}
+
+	anyFound := false
+	for _, location := range binLocations {
+		_, err := os.Stat(location)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspect binary %s: %w", location, err))
+			continue
+		}
+		anyFound = true
+		if err := os.Remove(location); err != nil {
+			errs = append(errs, fmt.Errorf("remove binary %s: %w", location, err))
+		} else {
+			fmt.Fprintf(output, "✓ Removed binary: %s\n", location)
+		}
+	}
+	if !anyFound {
+		fmt.Fprintln(output, "✓ No leftover binary files found")
+	}
+	if logPath != "" {
+		if err := removeIfPresent(logPath); err != nil {
+			errs = append(errs, fmt.Errorf("remove legacy log: %w", err))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("uninstall incomplete: %w", err)
+	}
+
+	fmt.Fprintln(output, "\n✓ Vuja has been successfully uninstalled")
+	if os.Getenv("VUJA_PID") != "" {
+		fmt.Fprintln(output, "\n⚠️  You are currently inside an active Vuja session.")
+		fmt.Fprintln(output, "Vuja runs as the parent process of this terminal - do NOT run 'pkill vuja'")
+		fmt.Fprintln(output, "as it will immediately close this terminal window.")
+		fmt.Fprintln(output, "\nTo fully exit, simply close this terminal window and open a new one.")
+		fmt.Fprintln(output, "Vuja will not start again since the shell config has been cleaned up.")
+	} else {
+		fmt.Fprintln(output, "Please close and reopen your terminal to complete the uninstall.")
+	}
+	return nil
+}
+
+func removeUninstallData(configDir, stateDir, cacheDir string, purge bool) error {
+	paths := []string{cacheDir}
+	if purge {
+		paths = append(paths, configDir, stateDir)
+	}
+	var errs []error
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func cleanShellConfig(filePath string) bool {
+	modified, _ := cleanShellConfigChecked(filePath)
+	return modified
+}
+
+func cleanShellConfigChecked(filePath string) (bool, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
 
 	var lines []string
@@ -136,11 +209,11 @@ func cleanShellConfig(filePath string) bool {
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {
-		return false
+		return false, scanErr
 	}
 
 	if !modified {
-		return false
+		return false, nil
 	}
 
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
@@ -155,6 +228,8 @@ func cleanShellConfig(filePath string) bool {
 		output += "\n"
 	}
 
-	err = os.WriteFile(filePath, []byte(output), 0644)
-	return err == nil
+	if err = os.WriteFile(filePath, []byte(output), 0644); err != nil {
+		return false, err
+	}
+	return true, nil
 }

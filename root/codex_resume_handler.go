@@ -20,7 +20,7 @@ func codexResumeURLHandlerSupported() bool {
 
 func installCodexResumeURLHandler(binaryPath string) error {
 	if binaryPath == "" {
-		return errors.New("Vuja binary path is empty")
+		return errors.New("vuja binary path is empty")
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -84,12 +84,22 @@ func installLinuxCodexResumeURLHandler(binaryPath string) error {
 	return nil
 }
 
-func uninstallCodexResumeURLHandler(home string) {
+func uninstallCodexResumeURLHandler(home string) error {
 	if home == "" {
-		return
+		return nil
 	}
-	_ = os.RemoveAll(filepath.Join(home, "Applications", codexResumeHandlerName))
-	_ = os.Remove(filepath.Join(home, ".local", "share", "applications", "vuja-url-handler.desktop"))
+	return errors.Join(
+		os.RemoveAll(filepath.Join(home, "Applications", codexResumeHandlerName)),
+		removeIfPresent(filepath.Join(home, ".local", "share", "applications", "vuja-url-handler.desktop")),
+	)
+}
+
+func removeIfPresent(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func codexResumeAppleScript(binaryPath string) string {

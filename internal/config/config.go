@@ -584,9 +584,9 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("core.shell: invalid value %q (want: bash|zsh|fish)", cfg.Core.Shell)
 	}
 
-	validChannels := map[string]bool{"stable": true, "nightly": true}
+	validChannels := map[string]bool{"stable": true, "rc": true, "nightly": true}
 	if !validChannels[cfg.Updater.Channel] {
-		return fmt.Errorf("updater.channel: invalid value %q (want: stable|nightly)", cfg.Updater.Channel)
+		return fmt.Errorf("updater.channel: invalid value %q (want: stable|rc|nightly)", cfg.Updater.Channel)
 	}
 
 	if cfg.UI.MaxSuggestions < 1 || cfg.UI.MaxSuggestions > 500 {

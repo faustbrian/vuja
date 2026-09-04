@@ -22,12 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.6'
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -37,9 +39,12 @@ jobs:
           git diff --exit-code -- go.mod go.sum
 
       - name: Run linter
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.12.2
+
+      - name: Scan reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       - name: Run tests
         run: go test -v ./...
@@ -47,42 +52,160 @@ jobs:
       - name: Build
         run: go build ./...
 
-  release:
-    name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: quality
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  compatibility:
+    name: Compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.6'
           check-latest: true
           cache-dependency-path: go.sum
 
-      - name: Build binaries
+      - name: Install supported shells on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes fish zsh
+
+      - name: Install Fish on macOS
+        if: runner.os == 'macOS'
+        run: brew install fish
+
+      - name: Exercise shell and terminal contracts
+        run: go test ./integration/shell ./root
+
+  distribution:
+    name: Distribution (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          VERSION=dev
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
+            -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${VERSION}" \
+            -trimpath -o dist/vuja ./cmd/vuja
+
+      - name: Preserve release binary
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: vuja-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/vuja
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - quality
+      - compatibility
+      - distribution
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "release tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.NUMBER" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          TAG_COMMIT=$(git rev-list -n 1 "${GITHUB_REF_NAME}")
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "release tag must point to a commit contained in main" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_NAME}" != *-* ]]; then
+            RC_PREFIX="${GITHUB_REF_NAME}-rc."
+            ACCEPTED_RC=false
+            while IFS= read -r candidate; do
+              rc_number=${candidate#"${RC_PREFIX}"}
+              if [[ "${candidate}" == "${RC_PREFIX}"* && "${rc_number}" =~ ^[1-9][0-9]*$ ]]; then
+                ACCEPTED_RC=true
+                break
+              fi
+            done < <(git tag --points-at "${TAG_COMMIT}")
+            if [[ "${ACCEPTED_RC}" != true ]]; then
+              echo "stable release commit must already carry a matching release-candidate tag" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Download release binaries
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: vuja-*
+          path: artifacts
+
+      - name: Package release binaries
+        shell: bash
         run: |
           mkdir -p dist
           platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
           for platform in "${platforms[@]}"; do
             IFS=/ read -r GOOS GOARCH <<< "$platform"
-
-            GOOS=$GOOS GOARCH=$GOARCH go build \
-              -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${{ github.ref_name }}" \
-              -trimpath -o "dist/vuja" ./cmd/vuja
-
-            cd dist
-            tar -czf "vuja_${GOOS}_${GOARCH}.tar.gz" "vuja"
-            rm "vuja"
-            cd ..
+            source="artifacts/vuja-${GOOS}-${GOARCH}/vuja"
+            test -f "$source"
+            chmod 0755 "$source"
+            tar -czf "dist/vuja_${GOOS}_${GOARCH}.tar.gz" -C "$(dirname "$source")" vuja
           done
           cd dist
           sha256sum vuja_*.tar.gz > SHA256SUMS
+
+      - name: Attest release archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/vuja_*.tar.gz
 
       - name: Prepare release notes
         run: |
@@ -101,13 +224,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: ${{ github.ref_name }}
           body_path: release_notes.md
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+          fail_on_unmatched_files: true
           generate_release_notes: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

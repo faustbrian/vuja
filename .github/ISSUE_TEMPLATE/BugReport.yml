@@ -5,7 +5,10 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please fill out the sections below to help everyone identify and fix the bug
+        Please fill out the sections below to help identify and fix the bug.
+        Crash reports and debug logs can contain commands, paths, hostnames,
+        session IDs, and other private terminal content. Redact those values
+        before attaching any file.
   - type: textarea
     id: description
     attributes:
@@ -35,10 +38,20 @@ body:
   - type: textarea
     id: deviceinfo
     attributes:
-      label: Your OS and Browser (optional)
+      label: Environment
       placeholder: |
-        - OS: Windows 10
-        - Browser: Chrome 90.0
+        - Vuja version:
+        - OS and architecture:
+        - Shell and version:
+        - Terminal and version:
+        - Fresh install or upgrade:
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics (optional)
+      description: Do not include commands, credentials, environment values, private paths, hostnames, or session IDs.
   - type: dropdown
     id: assign
     attributes:
@@ -48,4 +61,4 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting this issue! We will get back to you as soon as possible.
+        Thanks for reporting this issue.

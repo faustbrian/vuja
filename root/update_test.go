@@ -44,6 +44,102 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
+func TestReleaseChannelsRespectSemanticPrereleaseBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel string
+		current string
+		latest  string
+		want    bool
+	}{
+		{name: "stable ignores release candidate", channel: "stable", current: "v1.0.0", latest: "v1.1.0-rc.1", want: false},
+		{name: "stable promotes release candidate", channel: "stable", current: "v1.0.0-rc.2", latest: "v1.0.0", want: true},
+		{name: "release candidate advances", channel: "rc", current: "v1.0.0-rc.1", latest: "v1.0.0-rc.2", want: true},
+		{name: "release candidate promotes stable", channel: "rc", current: "v1.0.0-rc.2", latest: "v1.0.0", want: true},
+		{name: "release candidate rejects nightly", channel: "rc", current: "v1.0.0-rc.2", latest: "v1.1.0-nightly.abc", want: false},
+		{name: "nightly advances same base", channel: "nightly", current: "v1.1.0-nightly.abc", latest: "v1.1.0-nightly.def", want: true},
+		{name: "invalid release rejected", channel: "nightly", current: "v1.0.0", latest: "latest", want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isNewerForChannel(test.current, test.latest, test.channel); got != test.want {
+				t.Fatalf("isNewerForChannel(%q, %q, %q) = %v; want %v", test.current, test.latest, test.channel, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSelectReleaseForChannel(t *testing.T) {
+	releases := []releaseInfo{
+		{TagName: "v2.0.0", Draft: true},
+		{TagName: "v1.2.0-nightly.def", Prerelease: true},
+		{TagName: "v1.2.0-rc.2", Prerelease: true},
+		{TagName: "v1.1.0"},
+		{TagName: "not-semver"},
+	}
+
+	for _, test := range []struct {
+		channel string
+		want    string
+	}{
+		{channel: "stable", want: "v1.1.0"},
+		{channel: "rc", want: "v1.2.0-rc.2"},
+		{channel: "nightly", want: "v1.2.0-nightly.def"},
+	} {
+		t.Run(test.channel, func(t *testing.T) {
+			release, err := selectReleaseForChannel(releases, test.channel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if release.TagName != test.want {
+				t.Fatalf("expected %s release %q, got %q", test.channel, test.want, release.TagName)
+			}
+		})
+	}
+}
+
+func TestBackgroundUpdateFailureClosesItsResultChannel(t *testing.T) {
+	results := make(chan updateResult, 1)
+	done := make(chan struct{})
+	go func() {
+		runBackgroundUpdateCheck(results, func(chan<- updateResult) { panic("update failure") })
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("background update failure escaped its containment boundary")
+	}
+	if _, open := <-results; open {
+		t.Fatal("expected failed background update check to close its result channel")
+	}
+}
+
+func TestRunUpdateReturnsFetchFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	t.Setenv("VUJA_UPDATE_URL", server.URL)
+	cfg := config.DefaultConfig()
+	config.Init(cfg)
+
+	var output bytes.Buffer
+	executableCalled := false
+	err := runUpdate(t.Context(), &output, server.Client(), func() (string, error) {
+		executableCalled = true
+		return "", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "update server") {
+		t.Fatalf("expected update server failure, got %v", err)
+	}
+	if executableCalled {
+		t.Fatal("expected update target resolution not to run after a fetch failure")
+	}
+}
+
 func TestUpdateState(t *testing.T) {
 	// Use a temporary directory for the state file
 	tmpDir, err := os.MkdirTemp("", "vuja-test-*")

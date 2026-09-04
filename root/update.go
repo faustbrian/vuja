@@ -13,12 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
 )
 
 // updateResult is passed from the async checker to the main loop
@@ -36,8 +37,10 @@ type releaseAsset struct {
 }
 
 type releaseInfo struct {
-	TagName string         `json:"tag_name"`
-	Assets  []releaseAsset `json:"assets"`
+	TagName    string         `json:"tag_name"`
+	Draft      bool           `json:"draft"`
+	Prerelease bool           `json:"prerelease"`
+	Assets     []releaseAsset `json:"assets"`
 }
 
 // FetchLatestVersion hits the GitHub Releases API and returns the latest tag name
@@ -53,12 +56,13 @@ func FetchLatestVersion() (string, error) {
 }
 
 func fetchLatestRelease(ctx context.Context, client *http.Client) (releaseInfo, error) {
+	channel := config.Get().Updater.Channel
 	endpoint := os.Getenv("VUJA_UPDATE_URL")
 	if endpoint == "" {
-		if config.Get().Updater.Channel == "nightly" {
-			endpoint = "https://api.github.com/repos/faustbrian/vuja/releases"
-		} else {
+		if channel == "stable" {
 			endpoint = "https://api.github.com/repos/faustbrian/vuja/releases/latest"
+		} else {
+			endpoint = "https://api.github.com/repos/faustbrian/vuja/releases?per_page=100"
 		}
 	}
 
@@ -83,15 +87,12 @@ func fetchLatestRelease(ctx context.Context, client *http.Client) (releaseInfo, 
 		return releaseInfo{}, err
 	}
 
-	if config.Get().Updater.Channel == "nightly" && os.Getenv("VUJA_UPDATE_URL") == "" {
+	if len(bytes.TrimSpace(body)) > 0 && bytes.TrimSpace(body)[0] == '[' {
 		var releases []releaseInfo
 		if err := json.Unmarshal(body, &releases); err != nil {
 			return releaseInfo{}, err
 		}
-		if len(releases) == 0 {
-			return releaseInfo{}, fmt.Errorf("no releases found")
-		}
-		return releases[0], nil
+		return selectReleaseForChannel(releases, channel)
 	}
 
 	var result releaseInfo
@@ -101,50 +102,82 @@ func fetchLatestRelease(ctx context.Context, client *http.Client) (releaseInfo, 
 	if result.TagName == "" {
 		return releaseInfo{}, fmt.Errorf("no tag_name in response")
 	}
+	if !releaseMatchesChannel(result, channel) {
+		return releaseInfo{}, fmt.Errorf("release %s is not eligible for the %s channel", result.TagName, channel)
+	}
 	return result, nil
 }
 
 // IsNewer returns true if latest is a newer semantic version than current.
 // it supports basic vX.Y.Z formats.
 func IsNewer(current, latest string) bool {
-	c := strings.TrimPrefix(current, "v")
-	l := strings.TrimPrefix(latest, "v")
+	return isNewerForChannel(current, latest, config.Get().Updater.Channel)
+}
 
-	// dev builds or empty versions never trigger an update
-	if c == "" || c == "dev" || l == "" || l == "dev" {
+func isNewerForChannel(current, latest, channel string) bool {
+	if current == "" || current == "dev" || latest == "" || latest == "dev" {
 		return false
 	}
-
-	// nightly builds are never shown as stable update targets
-	if config.Get().Updater.Channel != "nightly" && strings.Contains(l, "-nightly.") {
+	if !semver.IsValid(current) || !semver.IsValid(latest) || !releaseTagMatchesChannel(latest, channel) {
 		return false
 	}
-
-	if c == l {
+	if current == latest {
 		return false
 	}
+	if channel == "nightly" && isNightlyVersion(current) && isNightlyVersion(latest) {
+		currentBase := strings.SplitN(current, "-", 2)[0]
+		latestBase := strings.SplitN(latest, "-", 2)[0]
+		return semver.Compare(latestBase, currentBase) >= 0
+	}
+	return semver.Compare(latest, current) > 0
+}
 
-	cParts := strings.Split(c, ".")
-	lParts := strings.Split(l, ".")
-
-	// compare major.minor.patch
-	for i := 0; i < len(cParts) && i < len(lParts); i++ {
-		// strip pre-release tags like -beta or -rc for numeric comparison
-		cClean := strings.Split(cParts[i], "-")[0]
-		lClean := strings.Split(lParts[i], "-")[0]
-
-		cv, _ := strconv.Atoi(cClean)
-		lv, _ := strconv.Atoi(lClean)
-		if lv > cv {
-			return true
+func selectReleaseForChannel(releases []releaseInfo, channel string) (releaseInfo, error) {
+	var selected releaseInfo
+	for _, release := range releases {
+		if !releaseMatchesChannel(release, channel) {
+			continue
 		}
-		if lv < cv {
-			return false
+		if channel == "nightly" {
+			return release, nil
+		}
+		if selected.TagName == "" || semver.Compare(release.TagName, selected.TagName) > 0 {
+			selected = release
 		}
 	}
+	if selected.TagName == "" {
+		return releaseInfo{}, fmt.Errorf("no eligible %s releases found", channel)
+	}
+	return selected, nil
+}
 
-	// if all parts are equal, the one with more parts is newer (e.g. 1.0.1 > 1.0)
-	return len(lParts) > len(cParts)
+func releaseMatchesChannel(release releaseInfo, channel string) bool {
+	if release.Draft || !semver.IsValid(release.TagName) || !releaseTagMatchesChannel(release.TagName, channel) {
+		return false
+	}
+	prerelease := semver.Prerelease(release.TagName) != ""
+	return release.Prerelease == prerelease
+}
+
+func releaseTagMatchesChannel(version, channel string) bool {
+	if !semver.IsValid(version) {
+		return false
+	}
+	prerelease := semver.Prerelease(version)
+	switch channel {
+	case "stable":
+		return prerelease == ""
+	case "rc":
+		return prerelease == "" || strings.HasPrefix(prerelease, "-rc.")
+	case "nightly":
+		return strings.HasPrefix(prerelease, "-nightly.")
+	default:
+		return false
+	}
+}
+
+func isNightlyVersion(version string) bool {
+	return strings.HasPrefix(semver.Prerelease(version), "-nightly.")
 }
 
 // startBackgroundUpdateCheck runs a non-blocking goroutine to check for updates.
@@ -159,63 +192,63 @@ func startBackgroundUpdateCheck() chan updateResult {
 		return ch
 	}
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				WriteCrashLog(r)
-				restoreTerminal()
-				printCrashNotice()
-				startRescueShell()
-				os.Exit(2)
-			}
-		}()
-		defer close(ch)
-
-		// debug override: skip network entirely, resolve immediately
-		if mock := os.Getenv("VUJA_MOCK_LATEST_VERSION"); mock != "" {
-			if IsNewer(Version, mock) {
-				ch <- updateResult{latestVersion: mock, hasUpdate: true}
-			}
-			return
-		}
-
-		state := config.LoadState()
-
-		// only check once every configured check-interval to avoid hammering the API
-		if time.Since(state.Updater.LastCheckTime) < time.Duration(config.Get().Updater.CheckInterval) {
-			// already checked recently; still notify if we have a cached pending update
-			if state.Updater.SeenVersion != "" && IsNewer(Version, state.Updater.SeenVersion) {
-				ch <- updateResult{latestVersion: state.Updater.SeenVersion, hasUpdate: true}
-			}
-			return
-		}
-
-		latest, err := FetchLatestVersion()
-		if err != nil {
-			// no network or API error: silently do nothing
-			return
-		}
-
-		// update the last check time regardless of result
-		state.Updater.LastCheckTime = time.Now()
-
-		if IsNewer(Version, latest) {
-			// only notify if user hasn't already seen this specific version notification
-			if state.Updater.SeenVersion != latest {
-				ch <- updateResult{latestVersion: latest, hasUpdate: true}
-			}
-			// save the latest as seen_version so future sessions don't re-notify
-			// unless a NEWER version comes out (different tag)
-			state.Updater.SeenVersion = latest
-		} else {
-			// up to date: clear the seen_version flag so the next update triggers a fresh notification
-			state.Updater.SeenVersion = ""
-		}
-
-		_ = config.SaveState(state)
-	}()
-
+	go runBackgroundUpdateCheck(ch, checkForUpdates)
 	return ch
+}
+
+func runBackgroundUpdateCheck(ch chan updateResult, check func(chan<- updateResult)) {
+	defer close(ch)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.Errorf("background update check failed: %v", recovered)
+		}
+	}()
+	check(ch)
+}
+
+func checkForUpdates(ch chan<- updateResult) {
+	// debug override: skip network entirely, resolve immediately
+	if mock := os.Getenv("VUJA_MOCK_LATEST_VERSION"); mock != "" {
+		if IsNewer(Version, mock) {
+			ch <- updateResult{latestVersion: mock, hasUpdate: true}
+		}
+		return
+	}
+
+	state := config.LoadState()
+
+	// only check once every configured check-interval to avoid hammering the API
+	if time.Since(state.Updater.LastCheckTime) < time.Duration(config.Get().Updater.CheckInterval) {
+		// already checked recently; still notify if we have a cached pending update
+		if state.Updater.SeenVersion != "" && IsNewer(Version, state.Updater.SeenVersion) {
+			ch <- updateResult{latestVersion: state.Updater.SeenVersion, hasUpdate: true}
+		}
+		return
+	}
+
+	latest, err := FetchLatestVersion()
+	if err != nil {
+		// no network or API error: silently do nothing
+		return
+	}
+
+	// update the last check time regardless of result
+	state.Updater.LastCheckTime = time.Now()
+
+	if IsNewer(Version, latest) {
+		// only notify if user hasn't already seen this specific version notification
+		if state.Updater.SeenVersion != latest {
+			ch <- updateResult{latestVersion: latest, hasUpdate: true}
+		}
+		// save the latest as seen_version so future sessions don't re-notify
+		// unless a NEWER version comes out (different tag)
+		state.Updater.SeenVersion = latest
+	} else {
+		// up to date: clear the seen_version flag so the next update triggers a fresh notification
+		state.Updater.SeenVersion = ""
+	}
+
+	_ = config.SaveState(state)
 }
 
 // updateNotice formats the one-time in-session update message for the terminal owner.
@@ -384,44 +417,42 @@ var versionCmd = &cobra.Command{
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update Vuja to the latest release",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("checking for updates (current: %s)...\n", Version)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runUpdate(cmd.Context(), cmd.OutOrStdout(), http.DefaultClient, os.Executable)
+	},
+}
 
-		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
-		defer cancel()
-		release, err := fetchLatestRelease(ctx, http.DefaultClient)
-		if err != nil {
-			fmt.Printf("\033[31m[VUJA] could not reach update server: %v\033[0m\n", err)
-			return
-		}
-		latest := release.TagName
+func runUpdate(ctx context.Context, output io.Writer, client *http.Client, executable func() (string, error)) error {
+	fmt.Fprintf(output, "checking for updates (current: %s)...\n", Version)
 
-		if Version != "dev" && Version != "" && !IsNewer(Version, latest) {
-			fmt.Printf("\033[32m[VUJA] already up to date (%s)\033[0m\n", Version)
-			// clear seen_version so the notification doesn't show again
-			state := config.LoadState()
-			state.Updater.SeenVersion = ""
-			_ = config.SaveState(state)
-			return
-		}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	release, err := fetchLatestRelease(ctx, client)
+	if err != nil {
+		return fmt.Errorf("update server: %w", err)
+	}
+	latest := release.TagName
 
-		fmt.Printf("\033[36m[VUJA] updating %s → %s\033[0m\n", Version, latest)
-
-		target, err := os.Executable()
-		if err != nil {
-			fmt.Printf("\n\033[31m[VUJA] update failed: %v\033[0m\n", err)
-			return
-		}
-		if err := installRelease(ctx, http.DefaultClient, release, target); err != nil {
-			fmt.Printf("\n\033[31m[VUJA] update failed: %v\033[0m\n", err)
-			return
-		}
-
-		// after a successful update, mark as seen so no more notifications
+	if Version != "dev" && Version != "" && !IsNewer(Version, latest) {
+		fmt.Fprintf(output, "\033[32m[VUJA] already up to date (%s)\033[0m\n", Version)
 		state := config.LoadState()
 		state.Updater.SeenVersion = ""
 		_ = config.SaveState(state)
+		return nil
+	}
 
-		fmt.Printf("\n\033[32m[VUJA] restart your terminal to use the new version\033[0m\n")
-	},
+	fmt.Fprintf(output, "\033[36m[VUJA] updating %s → %s\033[0m\n", Version, latest)
+	target, err := executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	if err := installRelease(ctx, client, release, target); err != nil {
+		return fmt.Errorf("install update: %w", err)
+	}
+
+	state := config.LoadState()
+	state.Updater.SeenVersion = ""
+	_ = config.SaveState(state)
+	fmt.Fprintln(output, "\n\033[32m[VUJA] restart your terminal to use the new version\033[0m")
+	return nil
 }
