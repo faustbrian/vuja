@@ -1,0 +1,125 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: true
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  nightly:
+    name: Nightly Release
+    runs-on: ubuntu-latest
+    env:
+      NIGHTLY_RETENTION: 14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'
+          check-latest: true
+          cache-dependency-path: go.sum
+
+      - name: Verify modules
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Scan reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.12.2
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Get version info
+        id: version
+        run: |
+          BASE=$(git describe --tags --abbrev=0 --exclude="*-nightly*" 2>/dev/null || echo "v0.0.0")
+          VERSION_NUM=${BASE#v}
+          VERSION_NUM=${VERSION_NUM%%-*}
+          IFS='.' read -r major minor patch <<< "$VERSION_NUM"
+          if [[ "$BASE" != *-rc.* ]]; then
+            patch=$((patch + 1))
+          fi
+          NEXT_BASE="v${major}.${minor}.${patch}"
+          SHORT=$(git rev-parse --short HEAD)
+          echo "version=${NEXT_BASE}-nightly.${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
+          for platform in "${platforms[@]}"; do
+            IFS=/ read -r GOOS GOARCH <<< "$platform"
+
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
+              -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${{ steps.version.outputs.version }}" \
+              -trimpath -o "dist/vuja" ./cmd/vuja
+
+            cd dist
+            tar -czf "vuja_${GOOS}_${GOARCH}.tar.gz" "vuja"
+            rm "vuja"
+            cd ..
+          done
+          cd dist
+          sha256sum vuja_*.tar.gz > SHA256SUMS
+
+      - name: Attest nightly archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/vuja_*.tar.gz
+
+      - name: Create nightly release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body: |
+            Nightly release from `${{ github.sha }}`.
+
+            Update with `vuja update`.
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          prerelease: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove expired nightly releases
+        run: |
+          mapfile -t NIGHTLIES < <(
+            gh api --paginate \
+              "repos/${{ github.repository }}/releases?per_page=100" \
+              --jq '.[] | select(.prerelease == true and (.tag_name | test("-nightly\\.[0-9a-f]+$"))) | .tag_name'
+          )
+
+          if (( ${#NIGHTLIES[@]} <= NIGHTLY_RETENTION )); then
+            exit 0
+          fi
+
+          for tag in "${NIGHTLIES[@]:NIGHTLY_RETENTION}"; do
+            gh release delete "$tag" --cleanup-tag --yes
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

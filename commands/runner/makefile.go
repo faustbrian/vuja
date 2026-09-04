@@ -1,0 +1,61 @@
+package runner
+
+import (
+	"bufio"
+	"context"
+	"os"
+	"path/filepath"
+	"regexp"
+
+	"github.com/faustbrian/vuja/spec"
+)
+
+func init() {
+	spec.Register(&spec.Spec{
+		Name:        "make",
+		Description: "build automation",
+		Generator: func(ctx context.Context, tokens []string, prefix string, partial string) []spec.Suggestion {
+			// Read the Makefile
+			cwd := spec.GetCWD()
+			file, err := os.Open(filepath.Join(cwd, "Makefile"))
+			if err != nil {
+				// No Makefile, don't pretend we have one
+				return nil
+			}
+			defer func() { _ = file.Close() }()
+
+			var suggestions []spec.Suggestion
+			seen := make(map[string]bool)
+			scanner := bufio.NewScanner(file)
+			// Matches targets like `build:`, `  run :`, etc.
+			// Ignores lines starting with whitespace followed by command (tab)
+			targetRegex := regexp.MustCompile(`^[ \t]*([a-zA-Z0-9_-]+)[ \t]*:`)
+
+			for scanner.Scan() {
+				if ctx.Err() != nil {
+					return nil
+				}
+				line := scanner.Text()
+				if matches := targetRegex.FindStringSubmatch(line); len(matches) > 1 {
+					target := matches[1]
+					// Ignore standard non-target keywords
+					if target == "PHONY" || seen[target] {
+						continue
+					}
+					seen[target] = true
+
+					cmd := target
+					if prefix != "" {
+						cmd = prefix + " " + target
+					}
+					suggestions = append(suggestions, spec.Suggestion{
+						Cmd:  cmd,
+						Desc: "make target",
+					})
+				}
+			}
+			_ = scanner.Err()
+			return suggestions
+		},
+	})
+}

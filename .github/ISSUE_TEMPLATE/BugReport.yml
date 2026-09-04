@@ -1,0 +1,64 @@
+name: Bug Report
+description: Report a bug
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out the sections below to help identify and fix the bug.
+        Crash reports and debug logs can contain commands, paths, hostnames,
+        session IDs, and other private terminal content. Redact those values
+        before attaching any file.
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe your issue
+      placeholder: When I click here this happens
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Enhance this function
+        2. Refactor this
+        3. Refactor that
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What was the expected result?
+      placeholder: I expected this to happen
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Put here any screenshots or videos (optional)
+  - type: textarea
+    id: deviceinfo
+    attributes:
+      label: Environment
+      placeholder: |
+        - Vuja version:
+        - OS and architecture:
+        - Shell and version:
+        - Terminal and version:
+        - Fresh install or upgrade:
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics (optional)
+      description: Do not include commands, credentials, environment values, private paths, hostnames, or session IDs.
+  - type: dropdown
+    id: assign
+    attributes:
+      label: "Would you like to work on this issue?"
+      options:
+        - "Yes"
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this issue.

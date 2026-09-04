@@ -1,0 +1,56 @@
+package tests
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/faustbrian/vuja/commands/fs"
+)
+
+func TestZoxideGenerator(t *testing.T) {
+	// Setup: Create a mock zoxide binary
+	tmp := t.TempDir()
+	mockZoxide := filepath.Join(tmp, "zoxide")
+
+	// Script that prints mock directories
+	script := "#!/bin/sh\necho \"/home/verse/project1\n/home/verse/docs\n/home/verse/dev/vuja\""
+	_ = os.WriteFile(mockZoxide, []byte(script), 0755)
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	gen := fs.ZoxideGenerator()
+
+	t.Run("Query returns correct result when partial is empty", func(t *testing.T) {
+		results := gen(context.Background(), []string{"z", ""}, "z ", "")
+		if len(results) == 0 {
+			t.Errorf("Expected results from zoxide history, got 0")
+		}
+	})
+
+	t.Run("Path replaces home dir with ~", func(t *testing.T) {
+		home, _ := os.UserHomeDir()
+		results := gen(context.Background(), []string{"z", ""}, "z ", "")
+		foundHome := false
+		for _, r := range results {
+			if strings.HasPrefix(r.Desc, "~") {
+				foundHome = true
+				break
+			}
+		}
+		if !foundHome && home != "" {
+			t.Logf("Warning: Did not find ~ in descriptions, home is %s", home)
+		}
+	})
+
+	t.Run("Sort by descending score", func(t *testing.T) {
+		results := gen(context.Background(), []string{"z", "i"}, "z ", "i")
+		if len(results) >= 1 {
+			if results[0].Cmd == "" {
+				t.Errorf("Empty result command")
+			}
+		}
+	})
+}

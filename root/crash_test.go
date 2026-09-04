@@ -1,0 +1,89 @@
+package root
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestWriteCrashLog(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vuja-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, ".cache"))
+
+	testErr := "test panic message"
+	WriteCrashLog(testErr)
+
+	dir := filepath.Join(tmpDir, ".cache", "vuja", "crashes")
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("failed to read crashes dir: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected exactly 1 crash log file, got %d", len(files))
+	}
+
+	logPath := filepath.Join(dir, files[0].Name())
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read crash log: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "=== VUJA CRASH ") {
+		t.Errorf("expected header in log, got: %s", content)
+	}
+	if !strings.Contains(content, "panic: test panic message") {
+		t.Errorf("expected panic message in log, got: %s", content)
+	}
+	if !strings.Contains(content, "version:") {
+		t.Errorf("expected version in log, got: %s", content)
+	}
+}
+
+func TestCrashLogCommand(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vuja-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, ".cache"))
+
+	var buf bytes.Buffer
+	CrashCmd.SetOut(&buf)
+	CrashCmd.SetArgs([]string{})
+	ClearLog = false
+
+	CrashCmd.Run(CrashCmd, []string{})
+	if !strings.Contains(buf.String(), "no crash log found") {
+		t.Errorf("expected 'no crash log found', got: %q", buf.String())
+	}
+
+	WriteCrashLog("mock error")
+	buf.Reset()
+	CrashCmd.Run(CrashCmd, []string{})
+	if !strings.Contains(buf.String(), "crash_") || !strings.Contains(buf.String(), ".log") {
+		t.Errorf("expected crash log path, got: %q", buf.String())
+	}
+
+	buf.Reset()
+	ClearLog = true
+	CrashCmd.Run(CrashCmd, []string{})
+	if !strings.Contains(buf.String(), "crash log cleared") {
+		t.Errorf("expected 'crash log cleared', got: %q", buf.String())
+	}
+
+	dir := filepath.Join(tmpDir, ".cache", "vuja", "crashes")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("expected crashes directory to be deleted, but it exists")
+	}
+}
