@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	codexResumeLinePrefix = "To continue this session, run"
-	codexResumeLineLimit  = 2048
-	codexResumeTTL        = 10 * time.Minute
+	codexResumeLinePrefix    = "To continue this session, run"
+	codexSessionIDLinePrefix = "Session ID:"
+	codexResumeLineLimit     = 2048
+	codexResumeTTL           = 10 * time.Minute
 )
 
 var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
@@ -31,6 +32,7 @@ var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a
 type codexResumeLinkifier struct {
 	linkFor            func(string) string
 	prefixMatch        int
+	sessionPrefixMatch int
 	escapeState        codexResumeEscapeState
 	captureEscapeState codexResumeEscapeState
 	captureEscapeStart int
@@ -57,7 +59,8 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 	if l == nil || l.linkFor == nil || len(data) == 0 {
 		return data
 	}
-	prefix := []byte(codexResumeLinePrefix)
+	resumePrefix := []byte(codexResumeLinePrefix)
+	sessionPrefix := []byte(codexSessionIDLinePrefix)
 	var output bytes.Buffer
 	for _, char := range data {
 		if l.capturing {
@@ -91,20 +94,35 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 		if l.consumeEscape(char) {
 			continue
 		}
-		if char == prefix[l.prefixMatch] {
-			l.prefixMatch++
-			if l.prefixMatch == len(prefix) {
-				l.prefixMatch = 0
-				l.capturing = true
-				l.captureEscapeStart = -1
-			}
-		} else if char == prefix[0] {
-			l.prefixMatch = 1
-		} else {
+		var matched bool
+		l.prefixMatch, matched = advanceCodexLinePrefix(char, resumePrefix, l.prefixMatch)
+		var sessionMatched bool
+		l.sessionPrefixMatch, sessionMatched = advanceCodexLinePrefix(char, sessionPrefix, l.sessionPrefixMatch)
+		if matched || sessionMatched {
 			l.prefixMatch = 0
+			l.sessionPrefixMatch = 0
+			l.capturing = true
+			l.captureEscapeStart = -1
 		}
 	}
 	return output.Bytes()
+}
+
+func advanceCodexLinePrefix(char byte, prefix []byte, matched int) (int, bool) {
+	if len(prefix) == 0 {
+		return 0, false
+	}
+	if char == prefix[matched] {
+		matched++
+		if matched == len(prefix) {
+			return 0, true
+		}
+		return matched, false
+	}
+	if char == prefix[0] {
+		return 1, false
+	}
+	return 0, false
 }
 
 func (l *codexResumeLinkifier) consumeCapturedEscape(char byte) (bool, bool) {
@@ -172,6 +190,7 @@ func (l *codexResumeLinkifier) resetCapture() {
 	l.captureEscapeStart = -1
 	l.awaitingResumeLine = false
 	l.prefixMatch = 0
+	l.sessionPrefixMatch = 0
 }
 
 func isCodexResumeContinuation(line []byte) bool {
