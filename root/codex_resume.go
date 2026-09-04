@@ -15,12 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/spf13/cobra"
 )
 
 const (
-	codexResumeLinePrefix = "To continue this session, run codex resume"
+	codexResumeLinePrefix = "To continue this session, run"
 	codexResumeLineLimit  = 2048
 	codexResumeTTL        = 10 * time.Minute
 )
@@ -34,6 +35,7 @@ type codexResumeLinkifier struct {
 	captureEscapeState codexResumeEscapeState
 	captureEscapeStart int
 	capturing          bool
+	awaitingResumeLine bool
 	line               []byte
 }
 
@@ -70,7 +72,14 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 			}
 			if char == '\n' {
 				output.Write(l.linkLine(l.line))
-				l.resetCapture()
+				if !l.awaitingResumeLine && isCodexResumeContinuation(l.line) {
+					l.line = l.line[:0]
+					l.captureEscapeState = codexResumeEscapeNone
+					l.captureEscapeStart = -1
+					l.awaitingResumeLine = true
+				} else {
+					l.resetCapture()
+				}
 			} else if len(l.line) > codexResumeLineLimit {
 				output.Write(l.line)
 				l.resetCapture()
@@ -161,7 +170,12 @@ func (l *codexResumeLinkifier) resetCapture() {
 	l.capturing = false
 	l.captureEscapeState = codexResumeEscapeNone
 	l.captureEscapeStart = -1
+	l.awaitingResumeLine = false
 	l.prefixMatch = 0
+}
+
+func isCodexResumeContinuation(line []byte) bool {
+	return strings.TrimSpace(ansi.Strip(string(line))) == ":"
 }
 
 func (l *codexResumeLinkifier) consumeEscape(char byte) bool {

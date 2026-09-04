@@ -33,6 +33,29 @@ func TestCodexResumeLinkifierLinksBothInstructionFormatsAcrossChunks(t *testing.
 	}
 }
 
+func TestCodexResumeLinkifierLinksCurrentMultilineInstructionAcrossChunks(t *testing.T) {
+	input := "To continue this session, run:\r\n  codex resume " + testCodexResumeID + "\r\n" +
+		"Or run codex resume and select mono-ci-repair.\r\n"
+	linkifier := newCodexResumeLinkifier(func(id string) string {
+		return "vuja://codex-resume/" + id
+	})
+
+	var rendered strings.Builder
+	for start := 0; start < len(input); start += 5 {
+		end := min(start+5, len(input))
+		rendered.Write(linkifier.Transform([]byte(input[start:end])))
+	}
+	rendered.Write(linkifier.Flush())
+
+	got := rendered.String()
+	if strings.Count(got, "vuja://codex-resume/"+testCodexResumeID) != 1 {
+		t.Fatalf("expected the multiline resume instruction to link the session ID, got %q", got)
+	}
+	if visible := stripCodexResumeLinks(got); visible != input {
+		t.Fatalf("expected the hyperlink to preserve visible output\nwant: %q\n got: %q", input, visible)
+	}
+}
+
 func TestCodexResumeLinkifierRecognizesANSIStyledInstructionAcrossChunks(t *testing.T) {
 	input := "\x1b[2mTo continue this session,\x1b[0m run \x1b[1mcodex resume\x1b[0m " + testCodexResumeID + "\r\n"
 	linkifier := newCodexResumeLinkifier(func(id string) string {
