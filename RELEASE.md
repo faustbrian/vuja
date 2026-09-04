@@ -12,6 +12,8 @@ verification.
       spelling checks pass without skipped required steps.
 - [ ] `main` is protected against direct unverified changes and force pushes.
 - [ ] The final diff has no unresolved review findings.
+- [ ] The protected `release` environment approval is recorded before any
+      candidate or stable assets are published.
 - [ ] `CHANGELOG.md`, `SUPPORT.md`, installation instructions, and migration
       guidance describe the release behavior.
 - [ ] Terminal dependencies are pinned to reviewed revisions and their resize,
