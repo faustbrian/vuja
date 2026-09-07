@@ -1,12 +1,14 @@
 package root
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type processIdentity struct {
@@ -15,7 +17,9 @@ type processIdentity struct {
 }
 
 func lookupProcessIdentity(pid int) (processIdentity, error) {
-	output, err := exec.Command("ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(pid)).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ps", "-o", "ppid=,comm=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return processIdentity{}, err
 	}
