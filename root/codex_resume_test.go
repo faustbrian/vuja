@@ -207,6 +207,41 @@ func TestCodexResumeActionServerAcceptsOnlyObservedSessionIDs(t *testing.T) {
 	}
 }
 
+func TestCodexResumeActionServerFallsBackFromLongPrivateDirectory(t *testing.T) {
+	runtimeDir, err := os.MkdirTemp(os.TempDir(), "v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	actionsDir := filepath.Join(t.TempDir(), strings.Repeat("deep-home-segment", 8), "actions")
+	server, err := newCodexResumeActionServerIn(actionsDir, "0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	if len(server.socketPath) >= codexResumeSocketPathLimit {
+		t.Fatalf("expected a bindable fallback path, got %d bytes: %s", len(server.socketPath), server.socketPath)
+	}
+	if pathWithinDirectory(server.socketPath, actionsDir) {
+		t.Fatalf("expected long action directory to use its runtime fallback, got %s", server.socketPath)
+	}
+
+	actionURL := server.Observe(testCodexResumeID)
+	if err := dispatchCodexResumeURL(actionURL, actionsDir); err != nil {
+		t.Fatalf("dispatch through fallback socket: %v", err)
+	}
+	select {
+	case got := <-server.Actions():
+		if got != testCodexResumeID {
+			t.Fatalf("expected observed ID %q, got %q", testCodexResumeID, got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for fallback resume action")
+	}
+}
+
 func TestDispatchCodexResumeURLRejectsSocketOutsidePrivateActionDirectory(t *testing.T) {
 	actionsDir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "attacker.sock")

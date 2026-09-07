@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/spec"
 	_ "modernc.org/sqlite"
@@ -103,7 +104,13 @@ type FrecencyStore struct {
 	historySnapshotSequence atomic.Int64
 	historyOriginMu         sync.RWMutex
 	historyOrigin           string
+	checkpointCancel        context.CancelFunc
+	checkpointDone          chan struct{}
+	closeOnce               sync.Once
+	closeErr                error
 }
+
+const walCheckpointInterval = 10 * time.Minute
 
 func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
 	if dbPath == "" {
@@ -155,8 +162,58 @@ func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	checkpointContext, checkpointCancel := context.WithCancel(context.Background())
+	store.checkpointCancel = checkpointCancel
+	store.checkpointDone = make(chan struct{})
+	go store.runWALCheckpointLoop(checkpointContext)
 
 	return store, nil
+}
+
+func (f *FrecencyStore) runWALCheckpointLoop(ctx context.Context) {
+	defer close(f.checkpointDone)
+	ticker := time.NewTicker(walCheckpointInterval)
+	defer ticker.Stop()
+
+	checkpoint := func() {
+		checkpointContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		if err := f.checkpointWAL(checkpointContext); err != nil && ctx.Err() == nil {
+			logger.Warnf("history WAL checkpoint failed: %v", err)
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkpoint()
+		}
+	}
+}
+
+func (f *FrecencyStore) checkpointWAL(ctx context.Context) error {
+	if f == nil || f.db == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := f.acquireWrite(ctx); err != nil {
+		return err
+	}
+	defer f.releaseWrite()
+
+	var busy, logFrames, checkpointedFrames int
+	if err := f.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(
+		&busy, &logFrames, &checkpointedFrames,
+	); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("checkpoint refused with %d WAL frames remaining", logFrames)
+	}
+	return nil
 }
 
 func (f *FrecencyStore) acquireWrite(ctx context.Context) error {
@@ -1728,14 +1785,23 @@ func (f *FrecencyStore) Close() error {
 	if f == nil {
 		return nil
 	}
-	if err := f.acquireWrite(context.Background()); err != nil {
-		return err
-	}
-	defer f.releaseWrite()
-	if f.db != nil {
-		return f.db.Close()
-	}
-	return nil
+	f.closeOnce.Do(func() {
+		if f.checkpointCancel != nil {
+			f.checkpointCancel()
+		}
+		if f.checkpointDone != nil {
+			<-f.checkpointDone
+		}
+		if err := f.acquireWrite(context.Background()); err != nil {
+			f.closeErr = err
+			return
+		}
+		defer f.releaseWrite()
+		if f.db != nil {
+			f.closeErr = f.db.Close()
+		}
+	})
+	return f.closeErr
 }
 
 func parseTimestamp(s string) (time.Time, error) {
