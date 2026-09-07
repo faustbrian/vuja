@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -37,16 +36,18 @@ ranking in an inline terminal suggestion menu.`,
 				}
 			}()
 			if pidStr := os.Getenv("VUJA_PID"); pidStr != "" {
-				if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
-					if logDir, err := config.CachePath(); err == nil {
-						if config.EnsurePrivateDir(logDir) == nil {
-							argsFile := filepath.Join(logDir, "reload-args")
-							_ = config.WritePrivateFile(argsFile, []byte(strings.Join(os.Args[1:], "\n")))
-						}
+				if logDir, err := config.CachePath(); err == nil {
+					if config.EnsurePrivateDir(logDir) == nil {
+						argsFile := filepath.Join(logDir, "reload-args")
+						_ = config.WritePrivateFile(argsFile, []byte(strings.Join(os.Args[1:], "\n")))
 					}
-					_ = syscall.Kill(pid, syscall.SIGUSR1)
+				}
+				if signalManagedParent(pidStr, os.Getpid(), lookupProcessIdentity, syscall.Kill) {
 					fmt.Println("\r\033[K\033[36m[VUJA] Sent reload signal to parent session.\033[0m")
 					return
+				}
+				for name := range vujaSessionEnvironmentNames {
+					_ = os.Unsetenv(name)
 				}
 			}
 			runWrapper()

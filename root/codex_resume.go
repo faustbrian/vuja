@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +25,11 @@ import (
 )
 
 const (
-	codexResumeLinePrefix    = "To continue this session, run"
-	codexSessionIDLinePrefix = "Session ID:"
-	codexResumeLineLimit     = 2048
-	codexResumeTTL           = 10 * time.Minute
+	codexResumeLinePrefix      = "To continue this session, run"
+	codexSessionIDLinePrefix   = "Session ID:"
+	codexResumeLineLimit       = 2048
+	codexResumeTTL             = 10 * time.Minute
+	codexResumeSocketPathLimit = 100
 )
 
 var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
@@ -302,9 +306,9 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	if err := config.EnsurePrivateDir(directory); err != nil {
 		return nil, err
 	}
-	socketPath := filepath.Join(directory, fmt.Sprintf("%d-%s.sock", os.Getpid(), token[:12]))
-	if len(socketPath) >= 100 {
-		return nil, fmt.Errorf("codex resume action socket path is too long: %s", socketPath)
+	socketPath, err := codexResumeSocketPath(directory, token)
+	if err != nil {
+		return nil, err
 	}
 	_ = os.Remove(socketPath)
 	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
@@ -323,6 +327,38 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	}
 	go server.serve()
 	return server, nil
+}
+
+func codexResumeSocketPath(actionsDir, token string) (string, error) {
+	name := fmt.Sprintf("%d-%s.sock", os.Getpid(), token[:12])
+	preferred := filepath.Join(actionsDir, name)
+	if len(preferred) < codexResumeSocketPathLimit {
+		return preferred, nil
+	}
+	runtimeDir, err := codexResumeRuntimeActionsDir(actionsDir)
+	if err != nil {
+		return "", fmt.Errorf("codex resume action socket path is too long: %s: %w", preferred, err)
+	}
+	if err := config.EnsurePrivateDir(runtimeDir); err != nil {
+		return "", err
+	}
+	fallback := filepath.Join(runtimeDir, name)
+	if len(fallback) >= codexResumeSocketPathLimit {
+		return "", fmt.Errorf("codex resume action socket fallback is too long: %s", fallback)
+	}
+	return fallback, nil
+}
+
+func codexResumeRuntimeActionsDir(actionsDir string) (string, error) {
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" && runtime.GOOS == "darwin" {
+		base = os.Getenv("TMPDIR")
+	}
+	if base == "" {
+		return "", errors.New("no private runtime directory is available")
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(actionsDir)))
+	return filepath.Join(base, "vja", hex.EncodeToString(sum[:4])), nil
 }
 
 func (s *codexResumeActionServer) Observe(id string) string {
@@ -427,7 +463,11 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 		return errors.New("invalid Codex resume URL")
 	}
 	socketPath := filepath.Clean(parsed.Query().Get("socket"))
-	if !pathWithinDirectory(socketPath, actionsDir) {
+	allowed := pathWithinDirectory(socketPath, actionsDir)
+	if runtimeDir, runtimeErr := codexResumeRuntimeActionsDir(actionsDir); runtimeErr == nil {
+		allowed = allowed || pathWithinDirectory(socketPath, runtimeDir)
+	}
+	if !allowed {
 		return errors.New("codex resume socket is outside Vuja's private action directory")
 	}
 	token := parsed.Query().Get("token")

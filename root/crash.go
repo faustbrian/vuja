@@ -20,7 +20,7 @@ func startRescueShell() {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	_ = syscall.Exec(shell, []string{shell}, os.Environ())
+	_ = syscall.Exec(shell, []string{shell}, withoutVujaSessionEnvironment(os.Environ()))
 }
 
 var (

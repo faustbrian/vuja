@@ -458,6 +458,61 @@ func TestFrecencyStore_Permissions(t *testing.T) {
 	}
 }
 
+func TestFrecencyStoreCheckpointWALTruncatesItsHighWaterMark(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	store, err := NewFrecencyStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	tx, err := store.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 800 {
+		command := fmt.Sprintf("command-%04d-%s", index, strings.Repeat("padding", 16))
+		if _, err := tx.ExecContext(t.Context(), `
+INSERT INTO history_entries (cmd, cwd, count, last_used)
+VALUES (?, '/repo', 1, CURRENT_TIMESTAMP)
+`, command); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	walPath := dbPath + "-wal"
+	before, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() == 0 {
+		t.Fatal("expected writes to establish a WAL high-water mark")
+	}
+
+	if err := store.checkpointWAL(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("expected checkpoint to shrink WAL, got %d -> %d bytes", before.Size(), after.Size())
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(t.Context(), `SELECT count(*) FROM history_entries`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 800 {
+		t.Fatalf("expected checkpoint to preserve all rows, got %d", count)
+	}
+}
+
 func TestFrecencyStore_SQLiteConfigurationAndContext(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "history.db")
