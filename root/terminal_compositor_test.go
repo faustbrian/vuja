@@ -273,6 +273,57 @@ func TestBottomCompositorRendersPaddedBorderlessInputAndStatusSurfaces(t *testin
 	}
 }
 
+func TestBottomCompositorActiveBarsUseTerminalBackground(t *testing.T) {
+	var output bytes.Buffer
+	output.WriteString("\x1b[48;2;1;2;3m\x1b[2J")
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 40, 10)
+	compositor.SetInputBoxTheme(terminalInputBoxTheme{
+		Background:        "#080a0d",
+		SurfaceBackground: "#242528",
+		StatusBackground:  "#334455",
+		StatusText:        "#c6cad7",
+		Accent:            "#61ffcf",
+		Muted:             "#404658",
+	})
+	compositor.SetChatboxConfig(terminalChatboxConfig{
+		Prompt: "› ",
+		Title: terminalChatboxBarConfig{
+			Left: []string{"directory"},
+		},
+		Status: terminalChatboxBarConfig{
+			Right: []string{"exit"},
+		},
+	})
+	compositor.SetInputBoxPath("/tmp/project")
+	t.Cleanup(compositor.Close)
+
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+	compositor.WritePTY([]byte("› "))
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+	compositor.WritePTY([]byte("git status"))
+
+	screen := applyTerminalOutput(t, output.Bytes(), 40, 10)
+	for _, row := range []int{5, 9} {
+		for column := 0; column < 40; column++ {
+			cell := screen.CellAt(column, row)
+			if cell != nil && cell.Style.Bg != nil {
+				t.Fatalf("expected active bar row %d to use terminal background, got %+v at column %d", row, cell, column)
+			}
+		}
+	}
+	for _, row := range []int{6, 7, 8} {
+		cell := screen.CellAt(0, row)
+		if cell == nil || cell.Style.Bg == nil {
+			t.Fatalf("expected chatbox row %d to retain its surface background, got %+v", row, cell)
+		}
+		red, green, blue, _ := cell.Style.Bg.RGBA()
+		if red != 0x2424 || green != 0x2525 || blue != 0x2828 {
+			t.Fatalf("expected chatbox row %d to use #242528, got #%04x%04x%04x", row, red, green, blue)
+		}
+	}
+}
+
 func TestBottomCompositorPlacesTitleAndStatusRegionsIndependently(t *testing.T) {
 	var output bytes.Buffer
 	compositor := newTerminalCompositor(&output, "bottom", "test-session", 80, 10)
@@ -583,6 +634,9 @@ func TestChatboxStatusUsesABoundedSecondRowBeforeDroppingContext(t *testing.T) {
 	for _, line := range lines {
 		if ansi.StringWidth(line) != 62 {
 			t.Fatalf("expected full-width contained status row, got width %d", ansi.StringWidth(line))
+		}
+		if !strings.HasPrefix(line, "\x1b[49m") {
+			t.Fatalf("expected every active status row to reset to the terminal background, got %q", line)
 		}
 	}
 	plain := ansi.Strip(strings.Join(lines, "\n"))

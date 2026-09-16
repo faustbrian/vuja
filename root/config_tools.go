@@ -259,17 +259,20 @@ func renderConfigPreview(cfg *config.Config, preset string, width int, mode stri
 	paint := func(foreground, background, value string) string {
 		return terminalTrueColor("48", background) + terminalTrueColor("38", foreground) + value + "\x1b[0m"
 	}
+	paintBar := func(foreground, value string) string {
+		return terminalDefaultBackground + terminalTrueColor("38", foreground) + value + "\x1b[0m"
+	}
 	pad := func(value string) string {
 		value = clip(value)
 		return value + strings.Repeat(" ", max(inner-ansi.StringWidth(value), 0))
 	}
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n",
 		header,
-		paint(cfg.UI.Chatbox.Colors.Directory, palette.StatusBackground, pad(title)),
+		paintBar(cfg.UI.Chatbox.Colors.Directory, pad(title)),
 		paint(palette.Text, palette.SurfaceBackground, pad("")),
 		paint(palette.Text, palette.SurfaceBackground, pad("  "+cfg.UI.Chatbox.Prompt+"git status")),
 		paint(palette.Text, palette.SurfaceBackground, pad("")),
-		paint(palette.StatusText, palette.StatusBackground, pad(status)),
+		paintBar(palette.StatusText, pad(status)),
 	)
 }
 

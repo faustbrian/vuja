@@ -28,6 +28,27 @@ func TestConfigPreviewIsBoundedAndNamesSelectedMode(t *testing.T) {
 	}
 }
 
+func TestConfigPreviewUsesTerminalBackgroundForActiveBars(t *testing.T) {
+	cfg, err := config.Preset("balanced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", 60, "night"), "\n"), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("expected six preview rows, got %d: %q", len(lines), lines)
+	}
+	for _, row := range []int{1, 5} {
+		if !strings.HasPrefix(lines[row], "\x1b[49m") {
+			t.Fatalf("expected preview bar row %d to use terminal background, got %q", row, lines[row])
+		}
+	}
+	for _, row := range []int{2, 3, 4} {
+		if !strings.Contains(lines[row], "\x1b[48;2;36;37;40m") {
+			t.Fatalf("expected preview chatbox row %d to retain the night surface, got %q", row, lines[row])
+		}
+	}
+}
+
 func TestConfigDiffRequiresExplicitDefaultsTarget(t *testing.T) {
 	configDiffDefaults = false
 	if err := ConfigDiffCmd.RunE(ConfigDiffCmd, nil); err == nil || !strings.Contains(err.Error(), "--defaults") {

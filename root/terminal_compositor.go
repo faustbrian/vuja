@@ -25,6 +25,7 @@ const (
 	terminalSyncEnd               = "\x1b[?2026l"
 	terminalBracketedPasteEnable  = "\x1b[?2004h"
 	terminalBracketedPasteDisable = "\x1b[?2004l"
+	terminalDefaultBackground     = "\x1b[49m"
 
 	terminalModelScrollback        = 256
 	terminalInputHorizontalPadding = 2
@@ -2187,14 +2188,18 @@ func (c *terminalCompositor) inputBoxStatusLine() string {
 func (c *terminalCompositor) inputBoxStatusLines() []string {
 	if c.statusLinesCache == nil {
 		rowLimit := max(c.inputBoxStatusRowLimit(), 1)
-		c.statusLinesCache = c.renderBarLines(c.inputBoxBarSegments(c.chatboxConfig.Status), rowLimit)
+		c.statusLinesCache = c.renderBarLinesWithBackground(
+			c.inputBoxBarSegments(c.chatboxConfig.Status),
+			rowLimit,
+			terminalDefaultBackground,
+		)
 	}
 	return c.statusLinesCache
 }
 
 func (c *terminalCompositor) inputBoxBarLine(bar terminalChatboxBarConfig) string {
 	segments := c.inputBoxBarSegments(bar)
-	return c.renderBarLine(segments)
+	return c.renderBarLinesWithBackground(segments, 1, terminalDefaultBackground)[0]
 }
 
 func (c *terminalCompositor) renderBarLine(segments []terminalStatusSegment) string {

@@ -510,9 +510,10 @@ resize, clear, reload, exit, and failure cleanup restore the scrolling region,
 cursor visibility, and automatic wrapping.
 
 In snapshot scrollback, the chatbox uses the active day or night palette.
-`surface-background` fills
-the editable input, `completed-surface-background` gives completed command
-surfaces lower visual emphasis, and `status-background` fills metadata rows.
+`surface-background` fills the editable input, while active title and status
+bars inherit the terminal background. `completed-surface-background` gives
+completed command surfaces lower visual emphasis, and `status-background`
+fills historical metadata rows.
 Each completed execution mirrors the active chatbox as an immutable snapshot.
 Its title bar freezes the directory, versions, and other configured title
 context from command start alongside the start time. The completed chatbox is
