@@ -16,6 +16,7 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
+	ansiparser "github.com/charmbracelet/x/ansi/parser"
 	"github.com/charmbracelet/x/vt"
 	"golang.org/x/text/unicode/norm"
 )
@@ -32,6 +33,7 @@ const (
 	terminalModelChunkSize         = 8 * 1024
 	terminalModelSequenceLimit     = 4 * 1024
 	terminalWriterMaxPending       = 1 * 1024 * 1024
+	terminalModelWrittenSpaceLink  = "vuja:model-written-space"
 )
 
 var statusVersionOrder = [...]string{
@@ -62,18 +64,19 @@ type terminalCompositor struct {
 	height         int
 	closed         bool
 
-	emulator           *vt.Emulator
-	emulatorDone       <-chan struct{}
-	backdrop           *vt.Emulator
-	backdropDone       <-chan struct{}
-	modelUTF8Tail      []byte
-	modelCSITail       []byte
-	backdropCSITail    []byte
-	modelRecoveries    uint64
-	backdropRecoveries uint64
-	visualRecoveries   uint64
-	stream             terminalMarkerStream
-	phase              terminalPhase
+	emulator            *vt.Emulator
+	emulatorDone        <-chan struct{}
+	backdrop            *vt.Emulator
+	backdropDone        <-chan struct{}
+	modelUTF8Tail       []byte
+	modelCSITail        []byte
+	modelSequenceParser *ansi.Parser
+	backdropCSITail     []byte
+	modelRecoveries     uint64
+	backdropRecoveries  uint64
+	visualRecoveries    uint64
+	stream              terminalMarkerStream
+	phase               terminalPhase
 
 	promptStartAbs          int
 	surfaceBottomAbs        int
@@ -213,6 +216,7 @@ type terminalChatboxConfig struct {
 	Prompt            string
 	Separator         string
 	Scrollback        string
+	SurfaceWidth      string
 	PathColorMode     string
 	PathMaxSegments   int
 	HistorySpacing    int
@@ -719,6 +723,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Prompt:            chatbox.Prompt,
 		Separator:         chatbox.Separator,
 		Scrollback:        chatbox.Scrollback,
+		SurfaceWidth:      chatbox.SurfaceWidth,
 		PathColorMode:     chatbox.PathColorMode,
 		PathMaxSegments:   chatbox.PathMaxSegments,
 		HistorySpacing:    chatbox.HistorySpacing,
@@ -1067,6 +1072,12 @@ func (c *terminalCompositor) resetEmulator(width, height int) {
 	c.emulator.SetScrollbackSize(terminalModelScrollback)
 	c.modelUTF8Tail = c.modelUTF8Tail[:0]
 	c.modelCSITail = c.modelCSITail[:0]
+	if c.modelSequenceParser == nil {
+		c.modelSequenceParser = ansi.NewParser()
+		c.modelSequenceParser.SetDataSize(terminalModelSequenceLimit)
+	} else {
+		c.modelSequenceParser.Reset()
+	}
 	done := make(chan struct{})
 	c.emulatorDone = done
 	go func(emulator *vt.Emulator) {
@@ -1654,6 +1665,7 @@ func (c *terminalCompositor) renderPinned() {
 	outputRows := targetTop
 	contentLines := make([]string, contentRows)
 	contentCells := make([]uv.Line, contentRows)
+	contentSpans := make([]int, contentRows)
 	scrollback := c.emulator.ScrollbackLen()
 	contentWidth := c.width
 	surfaceColor := ansi.XParseColor(c.inputBoxTheme.SurfaceBackground)
@@ -1673,7 +1685,13 @@ func (c *terminalCompositor) renderPinned() {
 				if cell.Width == 0 {
 					continue
 				}
+				if !cell.IsZero() && !cell.Equal(&uv.EmptyCell) {
+					contentSpans[offset] = max(contentSpans[offset], x+cell.Width)
+				}
 				normalized := *cell
+				if normalized.Link.URL == terminalModelWrittenSpaceLink {
+					normalized.Link = uv.Link{}
+				}
 				normalized.Content = norm.NFC.String(normalized.Content)
 				if decorationRows > 0 && surfaceColor != nil {
 					normalized.Style.Bg = surfaceColor
@@ -1688,7 +1706,10 @@ func (c *terminalCompositor) renderPinned() {
 		contentCells[offset] = line
 		contentLines[offset] = line.Render()
 	}
-	lines := c.inputBoxLines(contentLines)
+	if cursorOffset := cursorAbs - sourceStartAbs; cursorOffset >= 0 && cursorOffset < len(contentSpans) {
+		contentSpans[cursorOffset] = max(contentSpans[cursorOffset], cursor.X)
+	}
+	lines := c.inputBoxLines(contentLines, contentSpans)
 
 	var frame strings.Builder
 	frame.Grow(rows * (c.width + 24))
@@ -1792,23 +1813,35 @@ func (c *terminalCompositor) inputBoxTopRows() int {
 	return rows
 }
 
-func (c *terminalCompositor) inputBoxLines(content []string) []string {
+func (c *terminalCompositor) inputBoxLines(content []string, contentSpans []int) []string {
 	if c.inputBoxDecorationRows() == 0 {
 		return content
 	}
+	surfaceWidth := c.inputBoxSurfaceWidth(contentSpans)
 	lines := make([]string, 0, len(content)+c.inputBoxDecorationRows())
 	if c.inputBoxTitleEnabled() {
 		lines = append(lines, c.inputBoxTitleLine())
 	}
-	lines = append(lines, c.inputBoxPaddingLine())
+	lines = append(lines, c.inputBoxPaddingLineWithWidth(surfaceWidth))
 	for _, line := range content {
-		lines = append(lines, c.inputBoxContent(line))
+		lines = append(lines, c.inputBoxContentWithWidth(line, surfaceWidth))
 	}
-	lines = append(lines, c.inputBoxPaddingLine())
+	lines = append(lines, c.inputBoxPaddingLineWithWidth(surfaceWidth))
 	if c.inputBoxStatusEnabled() {
 		lines = append(lines, c.inputBoxStatusLines()...)
 	}
 	return lines
+}
+
+func (c *terminalCompositor) inputBoxSurfaceWidth(contentSpans []int) int {
+	if c.chatboxConfig.SurfaceWidth != "content-width" {
+		return c.width
+	}
+	contentWidth := 0
+	for _, span := range contentSpans {
+		contentWidth = max(contentWidth, span)
+	}
+	return min(c.width, max(contentWidth+2*terminalInputHorizontalPadding, 2*terminalInputHorizontalPadding))
 }
 
 func (c *terminalCompositor) inputBoxTitleEnabled() bool {
@@ -1855,6 +1888,14 @@ func (c *terminalCompositor) inputBoxContent(content string) string {
 	return c.inputBoxContentWithSurface(content, surface)
 }
 
+func (c *terminalCompositor) inputBoxContentWithWidth(content string, width int) string {
+	surface := c.inputBoxSurfaceCode
+	if surface == "" {
+		surface = c.inputBoxBackgroundCode
+	}
+	return c.inputBoxContentWithSurfaceWidth(content, surface, width)
+}
+
 func (c *terminalCompositor) completedInputBoxContent(content string) string {
 	surface := c.completedSurfaceCode
 	if surface == "" {
@@ -1889,7 +1930,12 @@ func (c *terminalCompositor) completedSurfaceContentLine(line uv.Line) string {
 }
 
 func (c *terminalCompositor) inputBoxContentWithSurface(content, surface string) string {
-	inner := c.width - 2*terminalInputHorizontalPadding
+	return c.inputBoxContentWithSurfaceWidth(content, surface, c.width)
+}
+
+func (c *terminalCompositor) inputBoxContentWithSurfaceWidth(content, surface string, width int) string {
+	width = clamp(width, 2*terminalInputHorizontalPadding, c.width)
+	inner := width - 2*terminalInputHorizontalPadding
 	content = norm.NFC.String(content)
 	if ansi.StringWidth(content) > inner {
 		content = ansi.Cut(content, 0, inner)
@@ -1897,7 +1943,11 @@ func (c *terminalCompositor) inputBoxContentWithSurface(content, surface string)
 	padding := max(inner-ansi.StringWidth(content), 0)
 	content = c.replaceInputBoxSurface(content, surface)
 	horizontalPadding := strings.Repeat(" ", terminalInputHorizontalPadding)
-	return surface + horizontalPadding + content + strings.Repeat(" ", padding) + horizontalPadding
+	line := surface + horizontalPadding + content + strings.Repeat(" ", padding) + horizontalPadding
+	if width < c.width {
+		line += terminalDefaultBackground + strings.Repeat(" ", c.width-width)
+	}
+	return line
 }
 
 func (c *terminalCompositor) inputBoxSparseContentWithSurface(content, surface string) string {
@@ -1921,11 +1971,20 @@ func (c *terminalCompositor) replaceInputBoxSurface(content, surface string) str
 }
 
 func (c *terminalCompositor) inputBoxPaddingLine() string {
+	return c.inputBoxPaddingLineWithWidth(c.width)
+}
+
+func (c *terminalCompositor) inputBoxPaddingLineWithWidth(width int) string {
 	surface := c.inputBoxSurfaceCode
 	if surface == "" {
 		surface = c.inputBoxBackgroundCode
 	}
-	return surface + strings.Repeat(" ", c.width)
+	width = clamp(width, 2*terminalInputHorizontalPadding, c.width)
+	line := surface + strings.Repeat(" ", width)
+	if width < c.width {
+		line += terminalDefaultBackground + strings.Repeat(" ", c.width-width)
+	}
+	return line
 }
 
 func (c *terminalCompositor) completedInputBoxPaddingLine() string {
@@ -2842,8 +2901,84 @@ func (c *terminalCompositor) writeModel(data []byte) {
 	c.modelUTF8Tail = trailingIncompleteUTF8(analysis)
 	complete := analysis[:len(analysis)-len(c.modelUTF8Tail)]
 	attachment := c.attachLeadingZeroWidthRun(complete)
-	_, _ = c.emulator.Write(norm.NFC.Bytes(complete))
+	modelData := norm.NFC.Bytes(complete)
+	if c.phase == terminalOutput {
+		_, _ = c.emulator.Write(modelData)
+	} else {
+		c.writeTrackedModelData(modelData)
+	}
 	c.attachTrailingZeroWidthCell(attachment)
+}
+
+func (c *terminalCompositor) writeTrackedModelData(data []byte) {
+	write := func(segment []byte) {
+		if len(segment) == 0 {
+			return
+		}
+		beforeCursor := c.emulator.CursorPosition()
+		beforeScrollback := c.emulator.ScrollbackLen()
+		_, _ = c.emulator.Write(segment)
+		c.markModelWrittenSpaces(segment, beforeCursor, beforeScrollback)
+	}
+
+	start := 0
+	for index := 0; index < len(data); {
+		value := data[index]
+		if value != ansi.ESC && (value >= ' ' || value == '\t') && value != '\x7f' {
+			index++
+			continue
+		}
+		write(data[start:index])
+		if value != ansi.ESC {
+			write(data[index : index+1])
+			index++
+			start = index
+			continue
+		}
+
+		sequence := c.modelSequenceParser
+		sequence.Reset()
+		end := index
+		for end < len(data) {
+			sequence.Advance(data[end])
+			end++
+			if end > index+1 && sequence.State() == ansiparser.GroundState {
+				break
+			}
+		}
+		write(data[index:end])
+		index = end
+		start = index
+	}
+	write(data[start:])
+}
+
+func (c *terminalCompositor) markModelWrittenSpaces(data []byte, before uv.Position, beforeScrollback int) {
+	if c.phase == terminalOutput || !containsTerminalPrintableText(data) {
+		return
+	}
+	after := c.emulator.CursorPosition()
+	if beforeScrollback+before.Y != c.emulator.ScrollbackLen()+after.Y || after.X <= before.X {
+		return
+	}
+	for x := before.X; x < after.X; x++ {
+		cell := c.emulator.CellAt(x, after.Y)
+		if cell == nil || !cell.Equal(&uv.EmptyCell) {
+			continue
+		}
+		marked := *cell
+		marked.Link.URL = terminalModelWrittenSpaceLink
+		c.emulator.SetCell(x, after.Y, &marked)
+	}
+}
+
+func containsTerminalPrintableText(data []byte) bool {
+	for _, value := range ansi.Strip(string(data)) {
+		if value >= ' ' && value != '\x7f' {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *terminalCompositor) resizeModel(width, height int) (ready bool) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/internal/config"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -179,6 +181,203 @@ func TestBottomCompositorRendersThemedPaddingAroundShellOwnedInput(t *testing.T)
 		if !strings.Contains(output.String(), color) {
 			t.Fatalf("expected configured chatbox color %q in rendered output", color)
 		}
+	}
+}
+
+func TestBottomCompositorRendersConfiguredSurfaceWidth(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		mode           string
+		width          int
+		wantSurfaceEnd int
+	}{
+		{name: "default full width at minimum width", width: 12, wantSurfaceEnd: 11},
+		{name: "default full width at ordinary width", width: 40, wantSurfaceEnd: 39},
+		{name: "explicit full width at minimum width", mode: "full-width", width: 12, wantSurfaceEnd: 11},
+		{name: "explicit full width at ordinary width", mode: "full-width", width: 40, wantSurfaceEnd: 39},
+		{name: "content width at minimum width", mode: "content-width", width: 12, wantSurfaceEnd: 7},
+		{name: "content width at ordinary width", mode: "content-width", width: 40, wantSurfaceEnd: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			const marker = "test-session"
+			compositor := newTerminalCompositor(&output, "bottom", marker, test.width, 8)
+			compositor.SetInputBoxTheme(testInputBoxTheme())
+			compositor.SetChatboxConfig(terminalChatboxConfig{
+				Prompt:       "› ",
+				SurfaceWidth: test.mode,
+			})
+			t.Cleanup(compositor.Close)
+
+			compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+			compositor.WritePTY([]byte("› "))
+			compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+			compositor.WritePTY([]byte("g\x1b[0mo"))
+
+			screen := applyTerminalOutput(t, output.Bytes(), test.width, 8)
+			for _, row := range []int{5, 6, 7} {
+				for column := 0; column < test.width; column++ {
+					cell := screen.CellAt(column, row)
+					hasSurface := cell != nil && cell.Style.Bg != nil
+					wantSurface := column <= test.wantSurfaceEnd
+					if hasSurface != wantSurface {
+						t.Fatalf("row %d column %d surface=%v, want %v for %s: %#v", row, column, hasSurface, wantSurface, test.mode, cell)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConfiguredChatboxSurfaceWidthReachesRuntimeCompositor(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.UI.Chatbox.SurfaceWidth = "content-width"
+
+	runtimeConfig := terminalChatboxConfigFromConfig(cfg)
+	if runtimeConfig.SurfaceWidth != "content-width" {
+		t.Fatalf("expected configured surface width to reach the compositor, got %q", runtimeConfig.SurfaceWidth)
+	}
+}
+
+func TestContentWidthSurfaceIncludesTrailingSpacesAndCursorAfterResize(t *testing.T) {
+	var output bytes.Buffer
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 40, 8)
+	compositor.SetInputBoxTheme(testInputBoxTheme())
+	compositor.SetChatboxConfig(terminalChatboxConfig{
+		Prompt:       "› ",
+		SurfaceWidth: "content-width",
+	})
+	t.Cleanup(compositor.Close)
+
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+	compositor.WritePTY([]byte("› "))
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+	compositor.WritePTY([]byte("go   "))
+
+	assertSurface := func(width int) {
+		t.Helper()
+		screen := applyTerminalOutput(t, output.Bytes(), width, 8)
+		cursor := screen.CursorPosition()
+		if cursor.X != 9 || cursor.Y != 6 {
+			t.Fatalf("expected cursor at (9,6), got (%d,%d)", cursor.X, cursor.Y)
+		}
+		for _, column := range []int{cursor.X, cursor.X + 1} {
+			cell := screen.CellAt(column, cursor.Y)
+			if cell == nil || cell.Style.Bg == nil {
+				t.Fatalf("expected cursor and right padding at column %d to retain the surface background, got %#v", column, cell)
+			}
+		}
+		if cell := screen.CellAt(cursor.X+2, cursor.Y); cell != nil && cell.Style.Bg != nil {
+			t.Fatalf("expected the cell after right padding to use the terminal background, got %#v", cell)
+		}
+	}
+
+	assertSurface(40)
+	output.Reset()
+	compositor.Resize(50, 8)
+	assertSurface(50)
+}
+
+func TestContentWidthSurfaceRetainsTrailingSpacesWhenCursorMovesLeft(t *testing.T) {
+	var output bytes.Buffer
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 40, 8)
+	compositor.SetInputBoxTheme(testInputBoxTheme())
+	compositor.SetChatboxConfig(terminalChatboxConfig{
+		Prompt:       "› ",
+		SurfaceWidth: "content-width",
+	})
+	t.Cleanup(compositor.Close)
+
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+	compositor.WritePTY([]byte("› "))
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+	compositor.WritePTY([]byte("go   \x1b[D"))
+
+	assertTrailingSpaces := func(width int) {
+		t.Helper()
+		screen := applyTerminalOutput(t, output.Bytes(), width, 8)
+		cursor := screen.CursorPosition()
+		if cursor.X != 8 || cursor.Y != 6 {
+			t.Fatalf("expected cursor at (8,6) after moving left, got (%d,%d)", cursor.X, cursor.Y)
+		}
+		if cell := screen.CellAt(10, cursor.Y); cell == nil || cell.Style.Bg == nil {
+			t.Fatalf("expected trailing spaces and right padding to retain the surface background, got %#v", cell)
+		}
+		if cell := screen.CellAt(11, cursor.Y); cell != nil && cell.Style.Bg != nil {
+			t.Fatalf("expected the cell after right padding to use the terminal background, got %#v", cell)
+		}
+	}
+
+	assertTrailingSpaces(40)
+	output.Reset()
+	compositor.Resize(50, 8)
+	assertTrailingSpaces(50)
+
+	output.Reset()
+	compositor.WritePTY([]byte("\x1b[K"))
+	screen := applyTerminalOutput(t, output.Bytes(), 50, 8)
+	if cell := screen.CellAt(9, 6); cell == nil || cell.Style.Bg == nil {
+		t.Fatalf("expected right padding after the remaining spaces to retain the surface background, got %#v", cell)
+	}
+	if cell := screen.CellAt(10, 6); cell != nil && cell.Style.Bg != nil {
+		t.Fatalf("expected erased trailing space to shrink the surfaced region, got %#v", cell)
+	}
+}
+
+func TestContentWidthSurfaceIncludesTrailingSpaceAtTerminalCap(t *testing.T) {
+	var output bytes.Buffer
+	const marker = "test-session"
+	compositor := newTerminalCompositor(&output, "bottom", marker, 12, 8)
+	compositor.SetInputBoxTheme(testInputBoxTheme())
+	compositor.SetChatboxConfig(terminalChatboxConfig{
+		Prompt:       "› ",
+		SurfaceWidth: "content-width",
+	})
+	t.Cleanup(compositor.Close)
+
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-start"))
+	compositor.WritePTY([]byte("› "))
+	compositor.WritePTY(terminalMarkerBytes(marker, "prompt-end"))
+	compositor.WritePTY([]byte("go    "))
+
+	screen := applyTerminalOutput(t, output.Bytes(), 12, 8)
+	for _, row := range []int{5, 6, 7} {
+		if cell := screen.CellAt(11, row); cell == nil || cell.Style.Bg == nil {
+			t.Fatalf("expected exact-cap content to surface the final terminal cell on row %d, got %#v", row, cell)
+		}
+	}
+}
+
+func TestTrackedModelDataReusesSequenceParserAcrossEscapeDenseInput(t *testing.T) {
+	compositor := newTerminalCompositor(io.Discard, "bottom", "test-session", 40, 8)
+	t.Cleanup(compositor.Close)
+	compositor.phase = terminalInput
+	parser := compositor.modelSequenceParser
+	if parser == nil {
+		t.Fatal("expected compositor-lifetime model sequence parser")
+	}
+
+	payload := bytes.Repeat([]byte("\x1b[0m"), 256)
+	compositor.writeTrackedModelData(payload)
+
+	if compositor.modelSequenceParser != parser {
+		t.Fatal("expected escape-dense input to reuse the compositor-lifetime parser")
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const runs = 8
+	for range runs {
+		compositor.writeTrackedModelData(payload)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocatedPerRun := (after.TotalAlloc - before.TotalAlloc) / runs
+	if allocatedPerRun > 1<<20 {
+		t.Fatalf("expected escape-dense parsing to stay below 1 MiB per run, allocated %d bytes", allocatedPerRun)
 	}
 }
 

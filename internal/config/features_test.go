@@ -33,6 +33,7 @@ func TestDefaultConfigContentComesFromBalancedPreset(t *testing.T) {
 	text := string(content)
 	for _, expected := range []string{
 		`prompt-position = "bottom"`, `density = "balanced"`, `metrics = "when-high"`,
+		`surface-width = "full-width"`,
 		`retention = "unlimited"`, `max-events = 0`, `[history.integrations.atuin]`,
 		`enabled = false`, `[history.integrations.shell]`, `import = false`, `mirror = false`, `path = ""`,
 		`import-zoxide = false`, `history-ranking = "balanced"`,
@@ -41,6 +42,52 @@ func TestDefaultConfigContentComesFromBalancedPreset(t *testing.T) {
 			t.Fatalf("expected generated config to contain %q", expected)
 		}
 	}
+}
+
+func TestChatboxSurfaceWidthConfiguration(t *testing.T) {
+	t.Run("missing defaults to full width", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[ui.chatbox]\nprompt = \"> \"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadPath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.UI.Chatbox.SurfaceWidth != "full-width" {
+			t.Fatalf("expected omitted surface width to use full-width, got %q", cfg.UI.Chatbox.SurfaceWidth)
+		}
+	})
+
+	t.Run("finite domain and round trip", func(t *testing.T) {
+		for _, mode := range []string{"full-width", "content-width"} {
+			cfg := DefaultConfig()
+			cfg.UI.Chatbox.SurfaceWidth = mode
+			content, err := Render(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.UI.Chatbox.SurfaceWidth != mode {
+				t.Fatalf("expected %q to round trip, got %q", mode, loaded.UI.Chatbox.SurfaceWidth)
+			}
+		}
+	})
+
+	t.Run("unsupported value is rejected", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.UI.Chatbox.SurfaceWidth = "window"
+		if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "full-width|content-width") {
+			t.Fatalf("expected finite surface-width guidance, got %v", err)
+		}
+	})
 }
 
 func TestLoadPathMigratesLegacyAtuinPreferenceToOptionalIntegration(t *testing.T) {

@@ -29,6 +29,7 @@ func DefaultConfig() *Config {
 				Prompt:            "› ",
 				Separator:         " · ",
 				Scrollback:        "output",
+				SurfaceWidth:      "full-width",
 				PathColorMode:     "hierarchy",
 				PathMaxSegments:   6,
 				HistorySpacing:    1,

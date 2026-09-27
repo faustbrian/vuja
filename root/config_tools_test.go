@@ -49,6 +49,71 @@ func TestConfigPreviewUsesTerminalBackgroundForActiveBars(t *testing.T) {
 	}
 }
 
+func TestConfigPreviewMatchesConfiguredSurfaceWidth(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		mode           string
+		width          int
+		wantSurfaceEnd int
+	}{
+		{name: "full width at minimum preview width", mode: "full-width", width: 40, wantSurfaceEnd: 39},
+		{name: "full width at ordinary preview width", mode: "full-width", width: 60, wantSurfaceEnd: 59},
+		{name: "content width at minimum preview width", mode: "content-width", width: 40, wantSurfaceEnd: 15},
+		{name: "content width at ordinary preview width", mode: "content-width", width: 60, wantSurfaceEnd: 15},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := config.Preset("balanced")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.UI.Chatbox.SurfaceWidth = test.mode
+			lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", test.width, "night"), "\n"), "\n")
+			if len(lines) != 6 {
+				t.Fatalf("expected six preview rows, got %d", len(lines))
+			}
+			screen := applyTerminalOutput(t, []byte(strings.Join(lines[1:], "\r\n")), test.width, 5)
+			for column := 0; column < test.width; column++ {
+				cell := screen.CellAt(column, 2)
+				hasSurface := cell != nil && cell.Style.Bg != nil
+				wantSurface := column <= test.wantSurfaceEnd
+				if hasSurface != wantSurface {
+					t.Fatalf("column %d surface=%v, want %v for %s", column, hasSurface, wantSurface, test.mode)
+				}
+			}
+			for _, row := range []int{0, 4} {
+				for column := 0; column < test.width; column++ {
+					if cell := screen.CellAt(column, row); cell != nil && cell.Style.Bg != nil {
+						t.Fatalf("expected active bar row %d to retain terminal background at column %d", row, column)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConfigPreviewClipsWidePromptByTerminalCellWidth(t *testing.T) {
+	cfg, err := config.Preset("balanced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.UI.Chatbox.Prompt = strings.Repeat("界", 20)
+	cfg.UI.Chatbox.SurfaceWidth = "content-width"
+
+	lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", 40, "night"), "\n"), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("expected six preview rows, got %d", len(lines))
+	}
+	if width := ansi.StringWidth(lines[3]); width != 40 {
+		t.Fatalf("expected wide prompt preview row to be capped at 40 terminal cells, got %d", width)
+	}
+	screen := applyTerminalOutput(t, []byte(strings.Join(lines[1:], "\r\n")), 40, 5)
+	for _, column := range []int{0, 39} {
+		if cell := screen.CellAt(column, 2); cell == nil || cell.Style.Bg == nil {
+			t.Fatalf("expected capped content-width surface boundary at column %d, got %#v", column, cell)
+		}
+	}
+}
+
 func TestConfigDiffRequiresExplicitDefaultsTarget(t *testing.T) {
 	configDiffDefaults = false
 	if err := ConfigDiffCmd.RunE(ConfigDiffCmd, nil); err == nil || !strings.Contains(err.Error(), "--defaults") {

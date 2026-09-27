@@ -400,6 +400,9 @@ The shell remains the line editor and source of truth: its prompt, editable
 buffer, cursor movement, completion behavior, and multiline continuation are
 captured from the PTY rather than reimplemented by Vuja. The compositor renders
 that live surface on a padded background with optional title and status rows.
+`surface-width = "full-width"` makes that background span the terminal and is
+the default. Set `surface-width = "content-width"` to keep the background to a
+left-aligned rectangle around the visible prompt and buffer instead.
 Completed commands default to `scrollback = "output"`, which removes the active
 chatbox and leaves only the command's unmodified output in terminal scrollback.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen

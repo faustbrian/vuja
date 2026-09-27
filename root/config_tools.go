@@ -233,9 +233,8 @@ func writeConfigFile(path string, content []byte) error {
 
 func renderConfigPreview(cfg *config.Config, preset string, width int, mode string) string {
 	width = max(width, 40)
-	inner := width - 4
-	clip := func(value string) string {
-		for utf8.RuneCountInString(value) > inner {
+	clip := func(value string, limit int) string {
+		for ansi.StringWidth(value) > limit {
 			_, size := utf8.DecodeLastRuneInString(value)
 			value = value[:len(value)-size]
 		}
@@ -251,7 +250,7 @@ func renderConfigPreview(cfg *config.Config, preset string, width int, mode stri
 	if len(right) > 0 {
 		status += "                                      " + strings.Join(right, cfg.UI.Chatbox.Separator)
 	}
-	header := clip(fmt.Sprintf("preset %s · %s density · %s palette · width %d", preset, cfg.UI.Density, mode, width))
+	header := clip(fmt.Sprintf("preset %s · %s density · %s palette · width %d", preset, cfg.UI.Density, mode, width), width)
 	palette := cfg.UI.Colors.Night
 	if mode == "day" {
 		palette = cfg.UI.Colors.Day
@@ -262,17 +261,43 @@ func renderConfigPreview(cfg *config.Config, preset string, width int, mode stri
 	paintBar := func(foreground, value string) string {
 		return terminalDefaultBackground + terminalTrueColor("38", foreground) + value + "\x1b[0m"
 	}
-	pad := func(value string) string {
-		value = clip(value)
-		return value + strings.Repeat(" ", max(inner-ansi.StringWidth(value), 0))
+	pad := func(value string, span int) string {
+		value = clip(value, span)
+		return value + strings.Repeat(" ", max(span-ansi.StringWidth(value), 0))
 	}
+	paintSurface := func(value string) string {
+		surfaceWidth := width
+		if cfg.UI.Chatbox.SurfaceWidth == "content-width" {
+			surfaceWidth = min(width, ansi.StringWidth(value)+2*terminalInputHorizontalPadding)
+		}
+		inner := max(surfaceWidth-2*terminalInputHorizontalPadding, 1)
+		value = clip(value, inner)
+		row := strings.Repeat(" ", terminalInputHorizontalPadding) + pad(value, inner) + strings.Repeat(" ", terminalInputHorizontalPadding)
+		if surfaceWidth < width {
+			row += terminalDefaultBackground + strings.Repeat(" ", width-surfaceWidth)
+		}
+		return paint(palette.Text, palette.SurfaceBackground, row)
+	}
+	paintPadding := func(contentWidth int) string {
+		surfaceWidth := width
+		if cfg.UI.Chatbox.SurfaceWidth == "content-width" {
+			surfaceWidth = min(width, contentWidth+2*terminalInputHorizontalPadding)
+		}
+		row := strings.Repeat(" ", surfaceWidth)
+		if surfaceWidth < width {
+			row += terminalDefaultBackground + strings.Repeat(" ", width-surfaceWidth)
+		}
+		return paint(palette.Text, palette.SurfaceBackground, row)
+	}
+	input := cfg.UI.Chatbox.Prompt + "git status"
+	inputWidth := ansi.StringWidth(input)
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n",
 		header,
-		paintBar(cfg.UI.Chatbox.Colors.Directory, pad(title)),
-		paint(palette.Text, palette.SurfaceBackground, pad("")),
-		paint(palette.Text, palette.SurfaceBackground, pad("  "+cfg.UI.Chatbox.Prompt+"git status")),
-		paint(palette.Text, palette.SurfaceBackground, pad("")),
-		paintBar(palette.StatusText, pad(status)),
+		paintBar(cfg.UI.Chatbox.Colors.Directory, pad(title, width)),
+		paintPadding(inputWidth),
+		paintSurface(input),
+		paintPadding(inputWidth),
+		paintBar(palette.StatusText, pad(status, width)),
 	)
 }
 

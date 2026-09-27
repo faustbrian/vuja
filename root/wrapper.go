@@ -351,41 +351,7 @@ func runWrapper() {
 		Accent:                     inputBoxPalette.Accent,
 		Muted:                      inputBoxPalette.Muted,
 	})
-	display.SetChatboxConfig(terminalChatboxConfig{
-		Prompt:          config.Get().UI.Chatbox.Prompt,
-		Separator:       config.Get().UI.Chatbox.Separator,
-		Scrollback:      config.Get().UI.Chatbox.Scrollback,
-		PathColorMode:   config.Get().UI.Chatbox.PathColorMode,
-		PathMaxSegments: config.Get().UI.Chatbox.PathMaxSegments,
-		HistorySpacing:  config.Get().UI.Chatbox.HistorySpacing,
-		Title: terminalChatboxBarConfig{
-			Left: config.Get().UI.Chatbox.TitleLeft, Center: config.Get().UI.Chatbox.TitleCenter, Right: config.Get().UI.Chatbox.TitleRight,
-		},
-		Status: terminalChatboxBarConfig{
-			Left: config.Get().UI.Chatbox.StatusLeft, Center: config.Get().UI.Chatbox.StatusCenter, Right: config.Get().UI.Chatbox.StatusRight,
-		},
-		Colors:            terminalChatboxColors(config.Get().UI.Chatbox.Colors),
-		CollapseVersions:  config.Get().UI.Chatbox.CollapseVersions,
-		Density:           config.Get().UI.Density,
-		Responsive:        config.Get().UI.Responsive,
-		SnapshotMetadata:  config.Get().UI.Chatbox.SnapshotMetadata,
-		CompletedCommand:  config.Get().UI.Chatbox.CompletedCommand,
-		Metrics:           config.Get().UI.Chatbox.Metrics,
-		Versions:          config.Get().UI.Chatbox.Versions,
-		VersionAllow:      config.Get().UI.Chatbox.VersionAllow,
-		VersionDeny:       config.Get().UI.Chatbox.VersionDeny,
-		DockerContext:     config.Get().UI.Chatbox.DockerContext,
-		KubernetesContext: config.Get().UI.Chatbox.KubernetesContext,
-		AWSContext:        config.Get().UI.Chatbox.AWSContext,
-		DurationFast:      time.Duration(config.Get().UI.Chatbox.DurationFast),
-		DurationSlow:      time.Duration(config.Get().UI.Chatbox.DurationSlow),
-		CPUAverage:        config.Get().UI.Chatbox.CPUAverage,
-		CPUHigh:           config.Get().UI.Chatbox.CPUHigh,
-		CPUCritical:       config.Get().UI.Chatbox.CPUCritical,
-		MemoryAverage:     config.Get().UI.Chatbox.MemoryAverage,
-		MemoryHigh:        config.Get().UI.Chatbox.MemoryHigh,
-		MemoryCritical:    config.Get().UI.Chatbox.MemoryCritical,
-	})
+	display.SetChatboxConfig(terminalChatboxConfigFromConfig(config.Get()))
 	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 		display.SetInputBoxPath(cwd)
 	}
@@ -1946,6 +1912,46 @@ func newTerminalMarkerIDFrom(reader io.Reader) string {
 		return ""
 	}
 	return hex.EncodeToString(token[:])
+}
+
+func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
+	chatbox := cfg.UI.Chatbox
+	return terminalChatboxConfig{
+		Prompt:          chatbox.Prompt,
+		Separator:       chatbox.Separator,
+		Scrollback:      chatbox.Scrollback,
+		SurfaceWidth:    chatbox.SurfaceWidth,
+		PathColorMode:   chatbox.PathColorMode,
+		PathMaxSegments: chatbox.PathMaxSegments,
+		HistorySpacing:  chatbox.HistorySpacing,
+		Title: terminalChatboxBarConfig{
+			Left: chatbox.TitleLeft, Center: chatbox.TitleCenter, Right: chatbox.TitleRight,
+		},
+		Status: terminalChatboxBarConfig{
+			Left: chatbox.StatusLeft, Center: chatbox.StatusCenter, Right: chatbox.StatusRight,
+		},
+		Colors:            terminalChatboxColors(chatbox.Colors),
+		CollapseVersions:  chatbox.CollapseVersions,
+		Density:           cfg.UI.Density,
+		Responsive:        cfg.UI.Responsive,
+		SnapshotMetadata:  chatbox.SnapshotMetadata,
+		CompletedCommand:  chatbox.CompletedCommand,
+		Metrics:           chatbox.Metrics,
+		Versions:          chatbox.Versions,
+		VersionAllow:      chatbox.VersionAllow,
+		VersionDeny:       chatbox.VersionDeny,
+		DockerContext:     chatbox.DockerContext,
+		KubernetesContext: chatbox.KubernetesContext,
+		AWSContext:        chatbox.AWSContext,
+		DurationFast:      time.Duration(chatbox.DurationFast),
+		DurationSlow:      time.Duration(chatbox.DurationSlow),
+		CPUAverage:        chatbox.CPUAverage,
+		CPUHigh:           chatbox.CPUHigh,
+		CPUCritical:       chatbox.CPUCritical,
+		MemoryAverage:     chatbox.MemoryAverage,
+		MemoryHigh:        chatbox.MemoryHigh,
+		MemoryCritical:    chatbox.MemoryCritical,
+	}
 }
 
 func terminalChatboxColors(colors config.ChatboxColorsConfig) map[string]string {
