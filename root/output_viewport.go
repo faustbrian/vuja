@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,33 +23,15 @@ type outputViewport struct {
 	top       int
 	newOutput bool
 	dirty     bool
+	csiTail   []byte
+}
+
+func (v *outputViewport) write(data []byte) {
+	data = sanitizeTerminalModelCSI(data, &v.csiTail, v.model.Width(), v.model.Height())
+	_, _ = v.model.Write(data)
 }
 
 var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF"}
-
-// Key reports may be split by stdin reads. Hold only a bounded navigation-key
-// prefix, with the wrapper's short timer distinguishing a lone Escape.
-type viewportInputStager struct{ pending []byte }
-
-func (s *viewportInputStager) stage(data []byte) []byte {
-	joined := append(append([]byte(nil), s.pending...), data...)
-	s.pending = nil
-	if bytes.Contains(joined, bracketedPasteStart) {
-		return joined
-	}
-	for index := len(joined) - 1; index >= max(len(joined)-5, 0); index-- {
-		tail := joined[index:]
-		for _, key := range viewportKeys {
-			if len(tail) < len(key) && bytes.HasPrefix([]byte(key), tail) {
-				s.pending = append(s.pending, tail...)
-				return joined[:index]
-			}
-		}
-	}
-	return joined
-}
-
-func (s *viewportInputStager) flush() []byte { result := s.pending; s.pending = nil; return result }
 
 func (c *terminalCompositor) ViewportNavigationActive() bool {
 	c.mu.Lock()
@@ -87,13 +70,66 @@ func (c *terminalCompositor) closeOutputViewport() {
 func (c *terminalCompositor) writeViewportOutput(data []byte) {
 	c.ensureOutputViewport()
 	if len(data) > 0 {
-		c.viewport.dirty = true
-		_, _ = c.viewport.model.Write(data)
-		if c.viewport.frozen != nil {
-			c.viewport.newOutput = true
+		c.recordViewportOutput(data)
+		// Rendering cells must not swallow nonvisual terminal effects. OSC 8
+		// hyperlinks remain in cells; titles, cwd, notifications and other OSC
+		// effects retain their native terminal owner.
+		var controls []byte
+		for index := 0; index < len(data); index++ {
+			if data[index] == '\x1b' && index+1 < len(data) && data[index+1] == ']' {
+				if end, length := oscEnd(data, index+2); end >= 0 {
+					selector, _, _ := bytes.Cut(data[index+2:end], []byte(";"))
+					if !bytes.Equal(selector, []byte("8")) {
+						controls = append(controls, data[index:end+length]...)
+					}
+					index = end + length - 1
+					continue
+				}
+			}
+			if data[index] == '\a' {
+				controls = append(controls, '\a')
+			}
+		}
+		if len(controls) > 0 {
+			c.writeTerminal(controls)
 		}
 	}
 	c.renderOutputViewport()
+}
+
+func (c *terminalCompositor) recordViewportOutput(data []byte) {
+	c.viewport.write(data)
+	c.viewport.dirty = true
+	if c.viewport.frozen != nil {
+		c.viewport.newOutput = true
+	}
+}
+
+// iTerm's initial-prompt marker clears soft alternate-screen mode even when
+// the physical alternate buffer remains active. The managed prompt owns that
+// semantic boundary; other OSC effects and all native prompt marks survive.
+func withoutInitialPromptMarks(data []byte) []byte {
+	var filtered []byte
+	start := 0
+	for index := 0; index+1 < len(data); index++ {
+		if data[index] != '\x1b' || data[index+1] != ']' {
+			continue
+		}
+		end, length := oscEnd(data, index+2)
+		if end < 0 {
+			break
+		}
+		payload := data[index+2 : end]
+		if bytes.Equal(payload, []byte("133;A")) || bytes.HasPrefix(payload, []byte("133;A;")) {
+			filtered = append(filtered, data[start:index]...)
+			start = end + length
+		}
+		index = end + length - 1
+	}
+	if start == 0 {
+		return data
+	}
+	return append(filtered, data[start:]...)
 }
 
 func (c *terminalCompositor) clearViewportOverlay() {
@@ -103,6 +139,7 @@ func (c *terminalCompositor) clearViewportOverlay() {
 }
 
 func (c *terminalCompositor) suspendOutputViewport() {
+	c.setViewportScreen(false)
 	c.viewportPassthrough = true
 	if c.viewport != nil {
 		c.viewport.frozen = nil
@@ -111,6 +148,40 @@ func (c *terminalCompositor) suspendOutputViewport() {
 	c.writeTerminal([]byte("\x1b[r\x1b[?7h"))
 	c.surfaceRows = 0
 	c.renderedLines = nil
+}
+
+// The physical alternate screen belongs to Vuja, not to either shadow model.
+// Native applications get the primary terminal back before their own controls
+// are forwarded, avoiding nested alternate-screen save/restore semantics.
+func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
+	if c.viewportAlternate == enabled {
+		return false
+	}
+	if !enabled {
+		c.setViewportMouse(false)
+	}
+	c.viewportAlternate = enabled
+	if enabled {
+		_, _ = io.WriteString(c.out, "\x1b[?1049h")
+		if c.viewport != nil {
+			c.viewport.dirty = true
+		}
+	} else {
+		_, _ = io.WriteString(c.out, "\x1b[?1049l")
+	}
+	return true
+}
+
+func (c *terminalCompositor) setViewportMouse(enabled bool) {
+	if c.viewportMouse == enabled {
+		return
+	}
+	c.viewportMouse = enabled
+	if enabled {
+		_, _ = io.WriteString(c.out, "\x1b[?1000h\x1b[?1006h")
+	} else {
+		_, _ = io.WriteString(c.out, "\x1b[?1000l\x1b[?1006l")
+	}
 }
 
 func (c *terminalCompositor) appendViewportSnapshot() {
@@ -141,7 +212,19 @@ func (c *terminalCompositor) appendViewportOutcome(exitCode *int) {
 		now = c.now
 	}
 	lines := c.completedExecutionOutcomeLines(max(now().Sub(c.commandStartedAt), 0), *exitCode)
-	c.writeViewportOutput([]byte("\r\n" + strings.Join(lines, "\x1b[0m\r\n") + "\x1b[0m\r\n"))
+	c.writeCompletedViewportOutput([]byte("\r\n" + strings.Join(lines, "\x1b[0m\r\n") + "\x1b[0m\r\n"))
+}
+
+// Native applications retain display ownership until the next prompt. Their
+// completion metadata must reach both that display and the retained history.
+func (c *terminalCompositor) writeCompletedViewportOutput(data []byte) {
+	if c.viewportPassthrough {
+		c.viewport.write(data)
+		c.viewport.dirty = true
+		c.writeTerminal(data)
+		return
+	}
+	c.writeViewportOutput(data)
 }
 
 func viewportLine(model *vt.Emulator, y, width int, history bool) string {
@@ -162,8 +245,11 @@ func viewportLine(model *vt.Emulator, y, width int, history bool) string {
 
 func (c *terminalCompositor) renderOutputViewport() {
 	if !c.outputViewportEnabled() {
+		c.setViewportMouse(false)
 		return
 	}
+	c.setViewportScreen(true)
+	c.setViewportMouse(c.transientUIVisible == nil || !c.transientUIVisible())
 	c.ensureOutputViewport()
 	v := c.viewport
 	if !v.dirty {
@@ -213,6 +299,14 @@ func (c *terminalCompositor) renderOutputViewport() {
 	// Save the visible output for suggestion-overlay restoration, never feed the
 	// frozen view back into the live output model.
 	c.recordBackdrop(data)
+	// Transient UI owns the topmost layer, but never the retained backdrop.
+	// A viewport repaint invalidates even otherwise unchanged overlay rows.
+	if c.transientUIVisible != nil && c.transientUIVisible() && c.renderTransientUI != nil {
+		if c.setTransientUIGeometry != nil {
+			c.setTransientUIGeometry(true, c.surfaceRows)
+		}
+		_, _ = c.out.Write(c.renderTransientUI())
+	}
 }
 
 // HandleViewportInput consumes only complete dedicated navigation events.
@@ -220,13 +314,30 @@ func (c *terminalCompositor) renderOutputViewport() {
 func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || !c.outputViewportEnabled() || suggestions || bytes.Contains(data, bracketedPasteStart) {
+	if c.closed || !c.outputViewportEnabled() || bytes.Contains(data, bracketedPasteStart) {
+		return false
+	}
+	wheel, mouse := viewportWheel(data, c.width, c.height-c.surfaceRows)
+	if mouse && (suggestions || wheel == 0) {
+		// Button reports and wheel over chrome/menu must not become shell input.
+		return true
+	}
+	if suggestions {
 		return false
 	}
 	c.ensureOutputViewport()
 	v := c.viewport
 	page := max(c.height-c.surfaceRows-1, 1)
-	switch string(data) {
+	key := string(data)
+	if wheel != 0 {
+		page = 3
+		if wheel < 0 {
+			key = "\x1b[5~"
+		} else {
+			key = "\x1b[6~"
+		}
+	}
+	switch key {
 	case "\x1b[5~":
 		if v.frozen == nil {
 			for y := 0; y < v.model.ScrollbackLen(); y++ {
@@ -240,7 +351,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		v.top = max(v.top-page, 0)
 	case "\x1b[6~":
 		if v.frozen == nil {
-			return false
+			return mouse
 		}
 		v.top += page
 		if v.top >= max(len(v.frozen)-(c.height-c.surfaceRows), 0) {
@@ -259,6 +370,33 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	v.dirty = true
 	c.renderOutputViewport()
 	return true
+}
+
+// SGR reports are bounded, complete CSI events supplied by the input framer.
+func viewportWheel(data []byte, width, rows int) (int, bool) {
+	if !bytes.HasPrefix(data, []byte("\x1b[<")) || len(data) < 9 || (data[len(data)-1] != 'M' && data[len(data)-1] != 'm') {
+		return 0, false
+	}
+	parts := strings.Split(string(data[3:len(data)-1]), ";")
+	if len(parts) != 3 {
+		return 0, false
+	}
+	button, err := strconv.Atoi(parts[0])
+	x, xerr := strconv.Atoi(parts[1])
+	y, yerr := strconv.Atoi(parts[2])
+	if err != nil || xerr != nil || yerr != nil || button < 0 || x < 1 || y < 1 {
+		return 0, false
+	}
+	if x > width || y > rows || data[len(data)-1] == 'm' {
+		return 0, true
+	}
+	switch button &^ 28 { // Ignore Shift/Alt/Ctrl modifiers.
+	case 64:
+		return -1, true
+	case 65:
+		return 1, true
+	}
+	return 0, true
 }
 
 // Filter complete navigation tokens without dropping adjacent typed bytes or

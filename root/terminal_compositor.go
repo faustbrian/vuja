@@ -129,6 +129,9 @@ type terminalCompositor struct {
 	viewport                *outputViewport
 	viewportCommand         bool
 	viewportPassthrough     bool
+	viewportSuspended       bool
+	viewportMouse           bool
+	viewportAlternate       bool
 	viewportControlTail     []byte
 }
 
@@ -390,6 +393,12 @@ func (c *terminalCompositor) degradeVisualPipeline() {
 		c.mu.Unlock()
 		return
 	}
+	c.setViewportScreen(false)
+	c.closeOutputViewport()
+	c.viewportCommand = false
+	c.viewportPassthrough = false
+	c.viewportSuspended = false
+	c.viewportControlTail = nil
 	emulator, emulatorDone := c.emulator, c.emulatorDone
 	backdrop, backdropDone := c.backdrop, c.backdropDone
 	c.layout = false
@@ -469,6 +478,12 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		if len(text) == 0 {
 			return
 		}
+		// A resize may release layout ownership between arbitrary PTY reads.
+		// Rejoin staged controls before either native or managed dispatch.
+		if c.viewportCommand && len(c.viewportControlTail) > 0 {
+			text = append(append([]byte(nil), c.viewportControlTail...), text...)
+			c.viewportControlTail = nil
+		}
 		completingPromptRedraw := len(c.pendingRedraw) > 0
 		if len(c.pendingRedraw) > 0 {
 			combined := make([]byte, 0, len(c.pendingRedraw)+len(text))
@@ -477,7 +492,21 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.pendingRedraw = c.pendingRedraw[:0]
 			text = combined
 		}
+		// Stage once, before either shadow model consumes an incomplete
+		// sequence. Replaying model-owned prefixes would corrupt its cursor.
+		if c.phase == terminalOutput && c.viewportCommand && !c.viewportPassthrough &&
+			(endsWithIncompleteCSI(text) || bytes.HasSuffix(text, []byte("\x1b"))) && len(text) <= terminalModelSequenceLimit {
+			c.viewportControlTail = append(c.viewportControlTail, text...)
+			return
+		}
 		if !c.layout {
+			if c.viewportSuspended && requiresOutputPassThrough(text, false) {
+				c.suspendOutputViewport()
+				c.viewportSuspended = false
+			}
+			if c.viewportCommand && c.viewport != nil {
+				c.recordViewportOutput(text)
+			}
 			c.writeTerminal(text)
 			return
 		}
@@ -519,22 +548,21 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		switch c.phase {
 		case terminalOutput:
 			if c.viewportCommand && !c.viewportPassthrough {
-				if len(c.viewportControlTail) > 0 {
-					text = append(append([]byte(nil), c.viewportControlTail...), text...)
-					c.viewportControlTail = nil
-				}
-				if endsWithIncompleteCSI(text) || bytes.HasSuffix(text, []byte("\x1b")) || bytes.HasSuffix(text, []byte("\r")) {
-					if len(text) <= terminalModelSequenceLimit {
-						c.viewportControlTail = append(c.viewportControlTail, text...)
-						return
-					}
-				}
-				if c.emulator.IsAltScreen() || requiresCommandPassThrough(text) {
+				// The viewport models CR progress directly, including CRLF split
+				// across reads. Legacy padded output still needs native CR handling.
+				if c.emulator.IsAltScreen() || requiresOutputPassThrough(text, false) {
 					c.suspendOutputViewport()
 				} else {
 					c.writeViewportOutput(text)
 					return
 				}
+			}
+			if c.viewportCommand && c.viewportPassthrough && c.viewport != nil {
+				// Keep the output model current without painting over the native
+				// application. Alternate-screen exit restores its primary buffer,
+				// and subsequent summary/resume text survives the next prompt.
+				c.viewport.write(text)
+				c.viewport.dirty = true
 			}
 			lineOriented := c.commandOutputLineOpen || bytes.IndexByte(text, '\n') >= 0
 			switch {
@@ -554,6 +582,11 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		}
 	}, func(event string) {
 		if !c.layout {
+			if c.viewportSuspended && (strings.HasPrefix(event, "command-end") || event == "prompt-start") {
+				c.viewportSuspended = false
+				c.viewportCommand = false
+				c.surfaceRows = 0
+			}
 			return
 		}
 		switch {
@@ -685,6 +718,7 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 	}
 	oldTop, oldRows := c.currentTransientUIRegion()
 	data := render()
+	c.setViewportMouse(c.outputViewportEnabled() && (c.transientUIVisible == nil || !c.transientUIVisible()))
 	if len(data) == 0 {
 		return
 	}
@@ -797,6 +831,12 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 	c.titleLinesCache = nil
 	c.statusLinesCache = nil
 	c.chatboxConfigured = true
+	if chatbox.OutputViewport != "pinned" {
+		c.setViewportScreen(false)
+		c.viewportCommand = false
+		c.viewportSuspended = false
+		c.viewportPassthrough = false
+	}
 	c.renderedLines = nil
 	c.transientGeometryDirty = true
 	if c.layout && c.phase == terminalInput {
@@ -991,8 +1031,13 @@ func (c *terminalCompositor) Resize(width, height int) {
 			frame.WriteString(terminalSyncEnd)
 			_, _ = io.WriteString(c.out, frame.String())
 		}
+		c.setViewportScreen(false)
 		c.layout = false
 		c.awaitingPrompt = true
+		if c.viewportCommand && !c.viewportPassthrough && c.surfaceRows > 0 {
+			c.viewportSuspended = true
+			return
+		}
 		c.surfaceRows = 0
 		c.surfaceContentRows = 0
 		c.surfaceContentLines = nil
@@ -1013,10 +1058,16 @@ func (c *terminalCompositor) Resize(width, height int) {
 		c.commandStatusSnapshot = statusSnapshot{}
 		return
 	}
-	if !c.layout {
+	if !c.layout && c.viewportSuspended {
+		c.layout = true
+		c.awaitingPrompt = false
+		c.viewportSuspended = false
+	} else if !c.layout {
 		c.closeEmulator()
 		c.closeBackdrop()
-		c.closeOutputViewport()
+		if c.chatboxConfig.OutputViewport != "pinned" {
+			c.closeOutputViewport()
+		}
 		c.resetEmulator(width, height)
 		c.resetBackdrop(width, height)
 		c.layout = true
@@ -1121,6 +1172,7 @@ func (c *terminalCompositor) Close() {
 		return
 	}
 	c.closed = true
+	c.setViewportMouse(false)
 	c.closeOutputViewport()
 	if c.enabled {
 		var frame strings.Builder
@@ -1130,6 +1182,7 @@ func (c *terminalCompositor) Close() {
 		frame.WriteString("\x1b7\x1b[r\x1b8\x1b[?7h\x1b[?25h")
 		frame.WriteString(terminalSyncEnd)
 		_, _ = io.WriteString(c.out, frame.String())
+		c.setViewportScreen(false)
 		c.closeEmulator()
 		c.closeBackdrop()
 	}
@@ -1186,6 +1239,9 @@ func (c *terminalCompositor) closeBackdrop() {
 }
 
 func (c *terminalCompositor) writeTerminal(data []byte) {
+	if c.viewportAlternate {
+		data = withoutInitialPromptMarks(data)
+	}
 	if len(data) == 0 {
 		return
 	}
@@ -1549,18 +1605,24 @@ func (c *terminalCompositor) startCommandExecution() {
 }
 
 func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
-	if c.viewportCommand && !c.viewportPassthrough {
+	if c.viewportCommand && c.viewport != nil {
 		if len(c.viewportControlTail) > 0 {
-			c.writeViewportOutput(c.viewportControlTail)
+			c.writeCompletedViewportOutput(c.viewportControlTail)
 			c.viewportControlTail = nil
 		}
 		c.appendViewportOutcome(exitCode)
-		c.writeViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))
+		c.writeCompletedViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))
 		c.lastCommandSnapshot = cloneStatusSnapshot(c.commandStatusSnapshot)
 		c.hasLastCommandSnapshot = true
 		c.commandStartedAt = time.Time{}
 		c.commandDirectory = ""
 		c.commandStatusSnapshot = statusSnapshot{}
+		c.commandOutputDirect = false
+		c.commandOutputLineOpen = false
+		c.commandOutputPositioned = false
+		c.commandOutputStarted = false
+		c.commandOutputColumn = 0
+		c.rawCommandPending = false
 		return
 	}
 	if c.rawCommandPending {
@@ -1755,6 +1817,11 @@ func (c *terminalCompositor) renderPinned() {
 	rows := contentRows + decorationRows
 	targetTop := c.height - rows
 	outputRows := targetTop
+	if c.setViewportScreen(c.chatboxConfig.OutputViewport == "pinned" && !c.viewportPassthrough && outputRows > 0) {
+		// Entry clears the physical alternate screen, not our shadow model.
+		// Every chrome row must be repainted even if its content is unchanged.
+		c.renderedLines = nil
+	}
 	contentLines := make([]string, contentRows)
 	contentCells := make([]uv.Line, contentRows)
 	contentSpans := make([]int, contentRows)
@@ -1862,7 +1929,7 @@ func (c *terminalCompositor) renderPinned() {
 		if c.setTransientUIGeometry != nil {
 			c.setTransientUIGeometry(true, rows)
 		}
-		if c.renderTransientUI != nil {
+		if c.renderTransientUI != nil && !c.outputViewportEnabled() {
 			frame.Write(c.renderTransientUI())
 		}
 	}
@@ -1879,6 +1946,10 @@ func (c *terminalCompositor) renderPinned() {
 	c.transientGeometryDirty = false
 	c.promptPrelude = ""
 	if c.outputViewportEnabled() {
+		if reflowTransientUI {
+			c.ensureOutputViewport()
+			c.viewport.dirty = true
+		}
 		c.renderOutputViewport()
 	}
 }
@@ -3097,6 +3168,8 @@ func (c *terminalCompositor) resizeModel(width, height int) (ready bool) {
 }
 
 func (c *terminalCompositor) recoverModel() {
+	c.setViewportScreen(false)
+	c.viewportSuspended = false
 	c.closeOutputViewport()
 	c.viewportCommand = false
 	c.viewportPassthrough = false
@@ -3320,12 +3393,24 @@ func trailingIncompleteUTF8(data []byte) []byte {
 }
 
 func requiresCommandPassThrough(data []byte) bool {
+	return requiresOutputPassThrough(data, true)
+}
+
+func requiresOutputPassThrough(data []byte, carriageReturnIsNative bool) bool {
 	for index := 0; index < len(data); index++ {
-		if data[index] == '\r' && (index+1 >= len(data) || data[index+1] != '\n') {
+		if carriageReturnIsNative && data[index] == '\r' && (index+1 >= len(data) || data[index+1] != '\n') {
 			return true
 		}
-		if data[index] == '\x1b' && index+1 < len(data) && strings.ContainsRune("78DEM=>", rune(data[index+1])) {
+		if data[index] == '\x1b' && index+1 < len(data) && strings.ContainsRune("78DEM=>P_^Xc", rune(data[index+1])) {
 			return true
+		}
+		if data[index] == '\x1b' && index+1 < len(data) && data[index+1] == ']' {
+			if end, _ := oscEnd(data, index+2); end < 0 {
+				// Oversized OSCs leave the bounded marker stream in chunks.
+				// Native ownership preserves the complete payload without
+				// growing another unbounded control-sequence buffer.
+				return true
+			}
 		}
 		if data[index] != '\x1b' || index+1 >= len(data) || data[index+1] != '[' {
 			continue

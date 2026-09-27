@@ -1158,9 +1158,9 @@ func runWrapper() {
 	var pastedText strings.Builder
 	var terminalReports terminalInputFilter
 	terminalInput := terminalInputEvents(os.Stdin)
-	var viewportKeysPending viewportInputStager
 	var viewportKeyTimer *time.Timer
 	var viewportKeyTimeout <-chan time.Time
+	var queuedInput []ownedTerminalInput
 	defer func() {
 		if viewportKeyTimer != nil {
 			viewportKeyTimer.Stop()
@@ -1169,37 +1169,46 @@ func runWrapper() {
 inputLoop:
 	for {
 		var inputSlice []byte
-		select {
-		case <-viewportKeyTimeout:
-			viewportKeyTimeout = nil
-			inputSlice = viewportKeysPending.flush()
-		case id, ok := <-codexResumeActions:
-			if !ok {
-				codexResumeActions = nil
+		inputShell := !isExecuting()
+		if len(queuedInput) > 0 {
+			inputSlice, inputShell = queuedInput[0].data, queuedInput[0].shell
+			queuedInput = queuedInput[1:]
+		} else {
+			select {
+			case <-viewportKeyTimeout:
+				viewportKeyTimeout = nil
+				inputShell = terminalReports.pendingOwner.shell
+				inputSlice = terminalReports.FlushEscape(display, overlay.IsVisible())
+			case id, ok := <-codexResumeActions:
+				if !ok {
+					codexResumeActions = nil
+					continue
+				}
+				shellBusy := isExecuting()
+				bufferMu.Lock()
+				payload := codexResumeInput(id, shellBusy, naiveBuffer, cursorOffset)
+				bufferMu.Unlock()
+				if len(payload) == 0 {
+					continue
+				}
+				historyNav.Cancel()
+				historySearch.Close()
+				presentOverlay(overlay.ClearAndDisable)
+				disableGhostText.Store(false)
+				userNavigated.Store(false)
+				_, _ = ptmx.Write(payload)
 				continue
-			}
-			shellBusy := isExecuting()
-			bufferMu.Lock()
-			payload := codexResumeInput(id, shellBusy, naiveBuffer, cursorOffset)
-			bufferMu.Unlock()
-			if len(payload) == 0 {
-				continue
-			}
-			historyNav.Cancel()
-			historySearch.Close()
-			presentOverlay(overlay.ClearAndDisable)
-			disableGhostText.Store(false)
-			userNavigated.Store(false)
-			_, _ = ptmx.Write(payload)
-			continue
-		case next, ok := <-terminalInput:
-			if !ok {
-				break inputLoop
-			}
-			inputSlice = next
-			if !inBracketedPaste && display.ViewportNavigationActive() && !overlay.IsVisible() {
-				inputSlice = viewportKeysPending.stage(inputSlice)
-				if len(viewportKeysPending.pending) > 0 {
+			case next, ok := <-terminalInput:
+				if !ok {
+					break inputLoop
+				}
+				inputShell = !isExecuting()
+				queuedInput = terminalReports.FilterEvents(next, display, overlay.IsVisible(), inputShell)
+				if len(queuedInput) > 0 {
+					inputSlice, inputShell = queuedInput[0].data, queuedInput[0].shell
+					queuedInput = queuedInput[1:]
+				}
+				if terminalReports.EscapePending() {
 					if viewportKeyTimer != nil {
 						viewportKeyTimer.Stop()
 					}
@@ -1211,32 +1220,16 @@ inputLoop:
 						viewportKeyTimer.Stop()
 					}
 				}
-			} else if len(viewportKeysPending.pending) > 0 {
-				inputSlice = append(viewportKeysPending.flush(), inputSlice...)
-				viewportKeyTimeout = nil
 			}
 		}
 		n := len(inputSlice)
 
 		if n > 0 {
-			if !inBracketedPaste {
-				inputSlice = display.FilterViewportInput(inputSlice, overlay.IsVisible())
-				n = len(inputSlice)
-				if n == 0 {
-					continue
-				}
-			}
-			if isExecuting() {
+			if !inputShell {
 				inBracketedPaste = false
 				_, _ = ptmx.Write(inputSlice[:n])
 				continue
 			}
-			inputSlice = terminalReports.Filter(inputSlice[:n])
-			n = len(inputSlice)
-			if n == 0 {
-				continue
-			}
-
 			logger.Debugf("stdin input received: bytes=%d", n)
 
 			shouldOverlayDraw := false

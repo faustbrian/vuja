@@ -404,13 +404,18 @@ that live surface on a padded background with optional title and status rows.
 the default. Set `surface-width = "content-width"` to keep the background to a
 left-aligned rectangle around the visible prompt and buffer instead.
 `output-viewport = "pinned"` keeps ordinary command output in a scrollable
-region above the fixed chatbox. Page Up browses older output; Page Down moves
-toward the latest output, and End or Escape returns to the bottom while browsing.
+alternate screen above the fixed chatbox. In iTerm this also lets the full-width
+input background extend into the terminal's existing side margins. Wheel up or
+Page Up browses older output; wheel down or Page Down moves toward the latest
+output, and End or Escape returns to the bottom while browsing.
 New output does not move your reading position. `output-lines = 2000` bounds the
 offscreen output history (1–10000 lines), in addition to the visible output rows.
 Set `output-viewport = "terminal"` to use native
 terminal scrollback instead. Suggestion menus retain their page-navigation keys;
 full-screen and cursor-addressed applications retain terminal ownership.
+Vuja releases its alternate screen before handing control to native applications
+and restores the original primary screen when it exits. Retained pinned output
+belongs to the current Vuja session, not the primary terminal scrollback.
 Completed commands default to `scrollback = "output"`, which omits the submitted
 chatbox from retained history and leaves only the command's output.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen
