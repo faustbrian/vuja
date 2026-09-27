@@ -24,6 +24,8 @@ type outputViewport struct {
 	newOutput bool
 	dirty     bool
 	csiTail   []byte
+	pointerX  int
+	pointerY  int
 }
 
 func (v *outputViewport) write(data []byte) {
@@ -31,7 +33,7 @@ func (v *outputViewport) write(data []byte) {
 	_, _ = v.model.Write(data)
 }
 
-var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF"}
+var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF", "\x1b[B", "\x1bOB"}
 
 func (c *terminalCompositor) ViewportNavigationActive() bool {
 	c.mu.Lock()
@@ -173,15 +175,56 @@ func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
 }
 
 func (c *terminalCompositor) setViewportMouse(enabled bool) {
+	if !enabled {
+		c.setViewportMotion(false)
+	}
 	if c.viewportMouse == enabled {
+		c.setViewportMotion(enabled && c.viewport != nil && c.viewport.frozen != nil)
 		return
 	}
 	c.viewportMouse = enabled
 	if enabled {
 		_, _ = io.WriteString(c.out, "\x1b[?1000h\x1b[?1006h")
+		c.setViewportMotion(c.viewport != nil && c.viewport.frozen != nil)
 	} else {
 		_, _ = io.WriteString(c.out, "\x1b[?1000l\x1b[?1006l")
 	}
+}
+
+func (c *terminalCompositor) setViewportMotion(enabled bool) {
+	if !enabled && c.viewport != nil && c.viewport.pointerX != 0 {
+		c.viewport.pointerX, c.viewport.pointerY = 0, 0
+		c.viewport.dirty = true
+	}
+	if c.viewportMotion == enabled {
+		return
+	}
+	c.viewportMotion = enabled
+	if enabled {
+		_, _ = io.WriteString(c.out, "\x1b[?1003h")
+	} else {
+		_, _ = io.WriteString(c.out, "\x1b[?1003l")
+		// Tracking protocols are mutually exclusive in terminals such as iTerm.
+		// Leaving all-motion mode must restore normal reporting for wheel input.
+		if c.viewportMouse {
+			_, _ = io.WriteString(c.out, "\x1b[?1000h")
+		}
+	}
+}
+
+func (c *terminalCompositor) viewportBadge() (string, int, int) {
+	label := " ↓ Back to bottom · esc "
+	if c.viewport.newOutput {
+		label = " New activity · ↓ Back to bottom · esc "
+	}
+	label = ansi.Cut(label, 0, c.width)
+	width := ansi.StringWidth(label)
+	return label, (c.width - width) / 2, width
+}
+
+func (c *terminalCompositor) viewportBadgeHovered() bool {
+	_, left, width := c.viewportBadge()
+	return c.viewport.pointerY == c.height-c.surfaceRows && c.viewport.pointerX > left && c.viewport.pointerX <= left+width
 }
 
 func (c *terminalCompositor) appendViewportSnapshot() {
@@ -252,6 +295,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 	c.setViewportMouse(c.transientUIVisible == nil || !c.transientUIVisible())
 	c.ensureOutputViewport()
 	v := c.viewport
+	c.setViewportMotion(c.viewportMouse && v.frozen != nil)
 	if !v.dirty {
 		return
 	}
@@ -272,11 +316,12 @@ func (c *terminalCompositor) renderOutputViewport() {
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row+1, line)
 	}
 	if v.frozen != nil {
-		label := "↓ Back to bottom · End / Esc"
-		if v.newOutput {
-			label = "New output · " + label
+		label, left, _ := c.viewportBadge()
+		foreground, background := terminalTrueColor("38", c.inputBoxTheme.Border), c.inputBoxSurfaceCode
+		if c.viewportBadgeHovered() {
+			foreground, background = terminalTrueColor("38", c.inputBoxTheme.SurfaceBackground), terminalTrueColor("48", c.inputBoxTheme.Border)
 		}
-		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s%s\x1b[0m", rows, c.chatboxColorCodes["directory"], ansi.Cut(label, 0, c.width))
+		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K\x1b[%d;%dH%s%s%s\x1b[0m", rows, rows, left+1, foreground, background, label)
 	}
 	frame.WriteString("\x1b8\x1b[?7h\x1b[?25h" + terminalSyncEnd)
 	data := []byte(frame.String())
@@ -318,6 +363,26 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		return false
 	}
 	wheel, mouse := viewportWheel(data, c.width, c.height-c.surfaceRows)
+	if mouse && !suggestions && wheel == 0 && c.viewport != nil && c.viewport.frozen != nil {
+		button, x, y, pressed, _ := viewportMouseReport(data)
+		_, left, width := c.viewportBadge()
+		hover := y == c.height-c.surfaceRows && x > left && x <= left+width
+		if pressed && button&^28 == 0 && hover {
+			c.viewport.frozen = nil
+			c.viewport.newOutput = false
+			c.viewport.pointerX, c.viewport.pointerY = 0, 0
+			c.viewport.dirty = true
+			c.renderOutputViewport()
+		} else if button&32 != 0 && button&64 == 0 {
+			wasHovered := c.viewportBadgeHovered()
+			c.viewport.pointerX, c.viewport.pointerY = x, y
+			if wasHovered != hover {
+				c.viewport.dirty = true
+				c.renderOutputViewport()
+			}
+		}
+		return true
+	}
 	if mouse && (suggestions || wheel == 0) {
 		// Button reports and wheel over chrome/menu must not become shell input.
 		return true
@@ -358,7 +423,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 			v.frozen = nil
 			v.newOutput = false
 		}
-	case "\x1b", "\x1b[F", "\x1b[4~", "\x1bOF":
+	case "\x1b", "\x1b[F", "\x1b[4~", "\x1bOF", "\x1b[B", "\x1bOB":
 		if v.frozen == nil {
 			return false
 		}
@@ -368,35 +433,47 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		return false
 	}
 	v.dirty = true
+	if v.frozen == nil {
+		v.pointerX, v.pointerY = 0, 0
+	}
 	c.renderOutputViewport()
 	return true
 }
 
 // SGR reports are bounded, complete CSI events supplied by the input framer.
 func viewportWheel(data []byte, width, rows int) (int, bool) {
-	if !bytes.HasPrefix(data, []byte("\x1b[<")) || len(data) < 9 || (data[len(data)-1] != 'M' && data[len(data)-1] != 'm') {
+	button, x, y, pressed, valid := viewportMouseReport(data)
+	if !valid {
 		return 0, false
 	}
-	parts := strings.Split(string(data[3:len(data)-1]), ";")
-	if len(parts) != 3 {
-		return 0, false
-	}
-	button, err := strconv.Atoi(parts[0])
-	x, xerr := strconv.Atoi(parts[1])
-	y, yerr := strconv.Atoi(parts[2])
-	if err != nil || xerr != nil || yerr != nil || button < 0 || x < 1 || y < 1 {
-		return 0, false
-	}
-	if x > width || y > rows || data[len(data)-1] == 'm' {
+	if x > width || y > rows || !pressed {
 		return 0, true
 	}
-	switch button &^ 28 { // Ignore Shift/Alt/Ctrl modifiers.
+	switch button &^ 28 {
 	case 64:
 		return -1, true
 	case 65:
 		return 1, true
 	}
 	return 0, true
+}
+
+func viewportMouseReport(data []byte) (button, x, y int, pressed, valid bool) {
+	if !bytes.HasPrefix(data, []byte("\x1b[<")) || len(data) < 9 || (data[len(data)-1] != 'M' && data[len(data)-1] != 'm') {
+		return
+	}
+	parts := strings.Split(string(data[3:len(data)-1]), ";")
+	if len(parts) != 3 {
+		return
+	}
+	var err, xerr, yerr error
+	button, err = strconv.Atoi(parts[0])
+	x, xerr = strconv.Atoi(parts[1])
+	y, yerr = strconv.Atoi(parts[2])
+	if err != nil || xerr != nil || yerr != nil || button < 0 || x < 1 || y < 1 {
+		return
+	}
+	return button, x, y, data[len(data)-1] == 'M', true
 }
 
 // Filter complete navigation tokens without dropping adjacent typed bytes or

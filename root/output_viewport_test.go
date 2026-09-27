@@ -166,7 +166,7 @@ func TestOutputViewportCollapsedFrozenViewReportsNewOutput(t *testing.T) {
 	c.WritePTY([]byte("new-while-collapsed\r\n"))
 	out.Reset()
 	c.Resize(60, 12)
-	if !strings.Contains(out.String(), "New output") {
+	if !strings.Contains(out.String(), "New activity") {
 		t.Fatalf("missing frozen-view activity indicator: %q", out.String())
 	}
 }
@@ -776,7 +776,7 @@ func TestOutputViewportPinsInputAndPreservesReadingPosition(t *testing.T) {
 	out.Reset()
 	c.WritePTY([]byte("new output\r\n"))
 	screen = applyTerminalOutput(t, out.Bytes(), 60, 12)
-	if screenLine(screen, 0) != readingLine || !strings.Contains(screenLine(screen, 6), "New output") {
+	if screenLine(screen, 0) != readingLine || !strings.Contains(screenLine(screen, 6), "New activity") {
 		t.Fatal("new output did not preserve the reading position and show activity")
 	}
 	if !c.HandleViewportInput([]byte("\x1b"), false) {
@@ -934,7 +934,7 @@ func TestOutputViewportSnapshotBackgroundAndBoundedHistory(t *testing.T) {
 	}
 	out.Reset()
 	c.WriteNotification([]byte("background-note\r\n"))
-	if !strings.Contains(out.String(), "New output") {
+	if !strings.Contains(out.String(), "New activity") {
 		t.Fatal("background output lost while browsing")
 	}
 	c.Resize(40, 10)

@@ -131,6 +131,7 @@ type terminalCompositor struct {
 	viewportPassthrough     bool
 	viewportSuspended       bool
 	viewportMouse           bool
+	viewportMotion          bool
 	viewportAlternate       bool
 	viewportControlTail     []byte
 }
@@ -720,6 +721,7 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 	data := render()
 	c.setViewportMouse(c.outputViewportEnabled() && (c.transientUIVisible == nil || !c.transientUIVisible()))
 	if len(data) == 0 {
+		c.renderOutputViewport()
 		return
 	}
 	if c.enabled {
@@ -735,6 +737,7 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 		}
 		frame.WriteString(terminalSyncEnd)
 		_, _ = io.WriteString(c.out, frame.String())
+		c.renderOutputViewport()
 		return
 	}
 	c.writeTerminal(data)
