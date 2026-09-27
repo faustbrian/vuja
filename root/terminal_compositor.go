@@ -1909,6 +1909,9 @@ func (c *terminalCompositor) renderPinned() {
 		if !layoutChanged && offset < len(c.renderedLines) && line == c.renderedLines[offset] {
 			continue
 		}
+		if offset == 0 && c.inputBoxTitleEnabled() && c.viewport != nil && c.viewport.frozen != nil {
+			c.viewport.dirty = true
+		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H", targetTop+offset+1)
 		if decorationRows > 0 && offset > 0 && offset <= contentRows {
 			frame.WriteString(c.inputBoxBackground())

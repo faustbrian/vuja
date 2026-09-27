@@ -128,3 +128,46 @@ func TestViewportReturnRestoresWheelReporting(t *testing.T) {
 		})
 	}
 }
+
+func TestViewportBadgeSitsFlushWithChatboxWhenTitleIsShown(t *testing.T) {
+	c, out := frozenBadgeFixture(t)
+	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100, SurfaceWidth: "full-width", Title: terminalChatboxBarConfig{Left: []string{"directory"}}})
+	c.SetInputBoxPath("/fixture/project")
+	c.Resize(80, 12)
+	screen := applyTerminalOutput(t, out.Bytes(), 80, 12)
+	badgeRow := -1
+	for row := 0; row < 12; row++ {
+		if strings.Contains(screenLine(screen, row), "↓ Back to bottom") {
+			badgeRow = row
+		}
+	}
+	if badgeRow < 0 || !strings.Contains(screenLine(screen, badgeRow), "/fixture/project") {
+		t.Fatal("badge must share the directory row rather than sit above it")
+	}
+	if !reflect.DeepEqual(screen.CellAt(40, badgeRow).Style.Bg, screen.CellAt(40, badgeRow+1).Style.Bg) {
+		t.Fatal("badge and chatbox must touch with no terminal-background row between them")
+	}
+	normal := screen.CellAt(40, badgeRow).Style
+	c.HandleViewportInput([]byte(fmt.Sprintf("\x1b[<35;40;%dM", badgeRow+1)), false)
+	screen = applyTerminalOutput(t, out.Bytes(), 80, 12)
+	if !reflect.DeepEqual(screen.CellAt(40, badgeRow).Style.Bg, normal.Fg) {
+		t.Fatal("hover target did not move with badge")
+	}
+	c.SetInputBoxPath("/fixture/changed")
+	screen = applyTerminalOutput(t, out.Bytes(), 80, 12)
+	if !strings.Contains(screenLine(screen, badgeRow), "Back to bottom") || !strings.Contains(screenLine(screen, badgeRow), "/fixture/changed") {
+		t.Fatal("title refresh must preserve the frozen badge")
+	}
+	c.Resize(60, 12)
+	c.WriteNotification([]byte("new activity\r\n"))
+	screen = applyTerminalOutput(t, out.Bytes(), 60, 12)
+	line := screenLine(screen, badgeRow)
+	if !strings.Contains(line, "New activity") || !strings.Contains(line, "/fixtur…") {
+		t.Fatalf("narrow activity badge must reserve space and shorten directory: %q", line)
+	}
+	c.HandleViewportInput([]byte(fmt.Sprintf("\x1b[<0;40;%dM", badgeRow+1)), false)
+	screen = applyTerminalOutput(t, out.Bytes(), 60, 12)
+	if c.viewport.frozen != nil || strings.Contains(screenLine(screen, badgeRow), "Back to bottom") || !strings.Contains(screenLine(screen, badgeRow), "/fixture/changed") {
+		t.Fatal("return to latest must restore the title row")
+	}
+}

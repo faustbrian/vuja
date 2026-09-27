@@ -224,7 +224,31 @@ func (c *terminalCompositor) viewportBadge() (string, int, int) {
 
 func (c *terminalCompositor) viewportBadgeHovered() bool {
 	_, left, width := c.viewportBadge()
-	return c.viewport.pointerY == c.height-c.surfaceRows && c.viewport.pointerX > left && c.viewport.pointerX <= left+width
+	return c.viewport.pointerY == c.viewportBadgeRow() && c.viewport.pointerX > left && c.viewport.pointerX <= left+width
+}
+
+// Use the title row when present so the badge touches the input surface.
+func (c *terminalCompositor) viewportBadgeRow() int {
+	row := c.height - c.surfaceRows
+	if c.inputBoxTitleEnabled() && c.inputBoxDecorationRows() > 0 {
+		row++
+	}
+	return row
+}
+
+func (c *terminalCompositor) viewportBadgeTitleLine() string {
+	if c.viewport.frozen == nil {
+		return c.inputBoxTitleLine()
+	}
+	_, start, width := c.viewportBadge()
+	left, _, right := splitStatusSegments(c.inputBoxBarSegments(c.chatboxConfig.Title))
+	leftText := ansi.Truncate(c.renderStatusSegments(left), max(start-terminalInputHorizontalPadding, 0), "…")
+	rightText := ansi.Truncate(c.renderStatusSegments(right), max(c.width-start-width-terminalInputHorizontalPadding, 0), "…")
+	// The temporary navigation badge owns the center; metadata side groups get
+	// bounded space rather than being partially overwritten by the badge.
+	return terminalDefaultBackground + strings.Repeat(" ", terminalInputHorizontalPadding) +
+		leftText + terminalDefaultBackground + strings.Repeat(" ", max(c.width-2*terminalInputHorizontalPadding-ansi.StringWidth(leftText)-ansi.StringWidth(rightText), 0)) +
+		rightText + terminalDefaultBackground + strings.Repeat(" ", terminalInputHorizontalPadding)
 }
 
 func (c *terminalCompositor) appendViewportSnapshot() {
@@ -315,14 +339,6 @@ func (c *terminalCompositor) renderOutputViewport() {
 		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row+1, line)
 	}
-	if v.frozen != nil {
-		label, left, _ := c.viewportBadge()
-		foreground, background := terminalTrueColor("38", c.inputBoxTheme.Border), c.inputBoxSurfaceCode
-		if c.viewportBadgeHovered() {
-			foreground, background = terminalTrueColor("38", c.inputBoxTheme.SurfaceBackground), terminalTrueColor("48", c.inputBoxTheme.Border)
-		}
-		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K\x1b[%d;%dH%s%s%s\x1b[0m", rows, rows, left+1, foreground, background, label)
-	}
 	frame.WriteString("\x1b8\x1b[?7h\x1b[?25h" + terminalSyncEnd)
 	data := []byte(frame.String())
 	if c.viewportCommand {
@@ -340,6 +356,26 @@ func (c *terminalCompositor) renderOutputViewport() {
 		chrome.WriteString("\x1b8\x1b[?7h" + terminalSyncEnd)
 		data = append(data, []byte(chrome.String())...)
 	}
+	// Paint after busy chrome too, and restore the unobstructed title at latest.
+	var badge strings.Builder
+	badge.WriteString(terminalSyncStart + "\x1b7\x1b[?7l")
+	badgeRow := c.viewportBadgeRow()
+	if badgeRow > rows {
+		fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", badgeRow, c.viewportBadgeTitleLine())
+	}
+	if v.frozen != nil {
+		label, left, _ := c.viewportBadge()
+		if badgeRow == rows {
+			fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K", badgeRow)
+		}
+		foreground, background := terminalTrueColor("38", c.inputBoxTheme.Border), c.inputBoxSurfaceCode
+		if c.viewportBadgeHovered() {
+			foreground, background = terminalTrueColor("38", c.inputBoxTheme.SurfaceBackground), terminalTrueColor("48", c.inputBoxTheme.Border)
+		}
+		fmt.Fprintf(&badge, "\x1b[%d;%dH%s%s%s\x1b[0m", badgeRow, left+1, foreground, background, label)
+	}
+	badge.WriteString("\x1b8\x1b[?7h" + terminalSyncEnd)
+	data = append(data, []byte(badge.String())...)
 	_, _ = c.out.Write(data)
 	// Save the visible output for suggestion-overlay restoration, never feed the
 	// frozen view back into the live output model.
@@ -366,7 +402,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	if mouse && !suggestions && wheel == 0 && c.viewport != nil && c.viewport.frozen != nil {
 		button, x, y, pressed, _ := viewportMouseReport(data)
 		_, left, width := c.viewportBadge()
-		hover := y == c.height-c.surfaceRows && x > left && x <= left+width
+		hover := y == c.viewportBadgeRow() && x > left && x <= left+width
 		if pressed && button&^28 == 0 && hover {
 			c.viewport.frozen = nil
 			c.viewport.newOutput = false
