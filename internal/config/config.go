@@ -64,6 +64,8 @@ type ChatboxConfig struct {
 	Separator         string              `toml:"separator"`
 	Scrollback        string              `toml:"scrollback"`
 	SurfaceWidth      string              `toml:"surface-width"`
+	OutputViewport    string              `toml:"output-viewport"`
+	OutputLines       int                 `toml:"output-lines"`
 	PathColorMode     string              `toml:"path-color-mode"`
 	PathMaxSegments   int                 `toml:"path-max-segments"`
 	HistorySpacing    int                 `toml:"history-spacing"`
@@ -704,6 +706,12 @@ func validateChatbox(chatbox ChatboxConfig) error {
 	}
 	if chatbox.SurfaceWidth != "full-width" && chatbox.SurfaceWidth != "content-width" {
 		return fmt.Errorf("ui.chatbox.surface-width: invalid value %q (want: full-width|content-width)", chatbox.SurfaceWidth)
+	}
+	if chatbox.OutputViewport != "pinned" && chatbox.OutputViewport != "terminal" {
+		return fmt.Errorf("ui.chatbox.output-viewport: invalid value %q (want: pinned|terminal)", chatbox.OutputViewport)
+	}
+	if chatbox.OutputLines < 1 || chatbox.OutputLines > 10000 {
+		return fmt.Errorf("ui.chatbox.output-lines: must be between 1 and 10000")
 	}
 	if chatbox.PathColorMode != "single" && chatbox.PathColorMode != "hierarchy" {
 		return fmt.Errorf("ui.chatbox.path-color-mode: invalid value %q (want: single|hierarchy)", chatbox.PathColorMode)

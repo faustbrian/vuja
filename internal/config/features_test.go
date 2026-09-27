@@ -90,6 +90,44 @@ func TestChatboxSurfaceWidthConfiguration(t *testing.T) {
 	})
 }
 
+func TestOutputViewportConfiguration(t *testing.T) {
+	for _, mode := range []string{"pinned", "terminal"} {
+		cfg := DefaultConfig()
+		cfg.UI.Chatbox.OutputViewport = mode
+		cfg.UI.Chatbox.OutputLines = 2000
+		content, err := Render(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadPath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.UI.Chatbox.OutputViewport != mode || loaded.UI.Chatbox.OutputLines != 2000 {
+			t.Fatal("viewport configuration lost during round trip")
+		}
+	}
+	cfg := DefaultConfig()
+	if cfg.UI.Chatbox.OutputViewport != "pinned" {
+		t.Fatal("viewport must default to pinned")
+	}
+	cfg.UI.Chatbox.OutputViewport = "invalid"
+	if Validate(cfg) == nil {
+		t.Fatal("invalid viewport accepted")
+	}
+	cfg.UI.Chatbox.OutputViewport = "pinned"
+	for _, limit := range []int{0, -1, 10001} {
+		cfg.UI.Chatbox.OutputLines = limit
+		if Validate(cfg) == nil {
+			t.Fatalf("unsafe history limit %d accepted", limit)
+		}
+	}
+}
+
 func TestLoadPathMigratesLegacyAtuinPreferenceToOptionalIntegration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[history]\nimport-atuin = true\n"), 0o600); err != nil {

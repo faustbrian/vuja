@@ -30,6 +30,8 @@ func DefaultConfig() *Config {
 				Separator:         " · ",
 				Scrollback:        "output",
 				SurfaceWidth:      "full-width",
+				OutputViewport:    "pinned",
+				OutputLines:       2000,
 				PathColorMode:     "hierarchy",
 				PathMaxSegments:   6,
 				HistorySpacing:    1,

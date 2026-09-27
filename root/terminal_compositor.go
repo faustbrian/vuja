@@ -126,6 +126,10 @@ type terminalCompositor struct {
 	lastCommandSnapshot     statusSnapshot
 	hasLastCommandSnapshot  bool
 	now                     func() time.Time
+	viewport                *outputViewport
+	viewportCommand         bool
+	viewportPassthrough     bool
+	viewportControlTail     []byte
 }
 
 type asyncTerminalWriter struct {
@@ -217,6 +221,8 @@ type terminalChatboxConfig struct {
 	Separator         string
 	Scrollback        string
 	SurfaceWidth      string
+	OutputViewport    string
+	OutputLines       int
 	PathColorMode     string
 	PathMaxSegments   int
 	HistorySpacing    int
@@ -512,6 +518,24 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		}
 		switch c.phase {
 		case terminalOutput:
+			if c.viewportCommand && !c.viewportPassthrough {
+				if len(c.viewportControlTail) > 0 {
+					text = append(append([]byte(nil), c.viewportControlTail...), text...)
+					c.viewportControlTail = nil
+				}
+				if endsWithIncompleteCSI(text) || bytes.HasSuffix(text, []byte("\x1b")) || bytes.HasSuffix(text, []byte("\r")) {
+					if len(text) <= terminalModelSequenceLimit {
+						c.viewportControlTail = append(c.viewportControlTail, text...)
+						return
+					}
+				}
+				if c.emulator.IsAltScreen() || requiresCommandPassThrough(text) {
+					c.suspendOutputViewport()
+				} else {
+					c.writeViewportOutput(text)
+					return
+				}
+			}
 			lineOriented := c.commandOutputLineOpen || bytes.IndexByte(text, '\n') >= 0
 			switch {
 			case !c.commandCardOpen:
@@ -555,6 +579,15 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.multilineInput = false
 			c.writeTerminal([]byte(terminalBracketedPasteDisable))
 			c.startCommandExecution()
+			if c.outputViewportEnabled() && c.surfaceRows > 0 {
+				c.viewportCommand = true
+				c.viewportPassthrough = false
+				c.clearViewportOverlay()
+				c.appendViewportSnapshot()
+				c.phase = terminalOutput
+				dirtyInput = false
+				return
+			}
 			if len(c.pendingRedraw) > 0 {
 				c.writeModel(c.pendingRedraw)
 				c.writeTerminal(c.pendingRedraw)
@@ -595,6 +628,10 @@ func (c *terminalCompositor) flushPendingRedrawToModel() {
 
 func (c *terminalCompositor) renderBackground(data []byte) {
 	if len(data) == 0 || c.surfaceRows == 0 {
+		return
+	}
+	if c.outputViewportEnabled() {
+		c.writeViewportOutput(data)
 		return
 	}
 	outputRows := c.height - c.surfaceRows
@@ -724,6 +761,8 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Separator:         chatbox.Separator,
 		Scrollback:        chatbox.Scrollback,
 		SurfaceWidth:      chatbox.SurfaceWidth,
+		OutputViewport:    chatbox.OutputViewport,
+		OutputLines:       chatbox.OutputLines,
 		PathColorMode:     chatbox.PathColorMode,
 		PathMaxSegments:   chatbox.PathMaxSegments,
 		HistorySpacing:    chatbox.HistorySpacing,
@@ -924,6 +963,10 @@ func (c *terminalCompositor) WriteNotification(data []byte) {
 	if c.closed {
 		return
 	}
+	if c.outputViewportEnabled() {
+		c.writeViewportOutput(data)
+		return
+	}
 	if c.layout && c.phase != terminalOutput && c.surfaceRows > 0 {
 		c.renderBackground(data)
 		return
@@ -973,6 +1016,7 @@ func (c *terminalCompositor) Resize(width, height int) {
 	if !c.layout {
 		c.closeEmulator()
 		c.closeBackdrop()
+		c.closeOutputViewport()
 		c.resetEmulator(width, height)
 		c.resetBackdrop(width, height)
 		c.layout = true
@@ -1006,6 +1050,34 @@ func (c *terminalCompositor) Resize(width, height int) {
 	c.modelCSITail = c.modelCSITail[:0]
 	if c.backdrop != nil {
 		c.resizeBackdrop(width, height)
+	}
+	if c.viewportCommand && !c.viewportPassthrough && !c.outputViewportEnabled() {
+		c.suspendOutputViewport()
+	}
+	if c.viewportCommand && !c.viewportPassthrough && c.outputViewportEnabled() {
+		var content []string
+		for _, line := range c.surfaceContentLines {
+			span := ansi.StringWidth(strings.TrimRight(ansi.Strip(line), " "))
+			line = ansi.Cut(line, 0, span)
+			content = append(content, strings.Split(ansi.Hardwrap(line, max(width-2*terminalInputHorizontalPadding, 1), true), "\n")...)
+		}
+		limit := max(height-1-c.inputBoxDecorationRows(), 1)
+		if len(content) > limit {
+			content = content[len(content)-limit:]
+		}
+		spans := make([]int, len(content))
+		for i := range content {
+			content[i] = ansi.Cut(content[i], 0, max(width-2*terminalInputHorizontalPadding, 1))
+			spans[i] = ansi.StringWidth(content[i])
+		}
+		c.renderedLines = c.inputBoxLines(content, spans)
+		c.surfaceRows = len(c.renderedLines)
+		c.renderedTop = height - c.surfaceRows
+		if c.viewport != nil {
+			c.viewport.dirty = true
+		}
+		c.renderOutputViewport()
+		return
 	}
 	if !modelReady {
 		return
@@ -1049,6 +1121,7 @@ func (c *terminalCompositor) Close() {
 		return
 	}
 	c.closed = true
+	c.closeOutputViewport()
 	if c.enabled {
 		var frame strings.Builder
 		frame.WriteString(terminalSyncStart)
@@ -1225,6 +1298,9 @@ func (c *terminalCompositor) closeEmulator() {
 }
 
 func (c *terminalCompositor) beginPrompt(continuation bool) {
+	if c.viewport != nil {
+		c.viewport.dirty = true
+	}
 	if continuation && c.phase == terminalInput {
 		if c.pendingLineBreak {
 			c.writeModel([]byte("\r\n"))
@@ -1235,6 +1311,8 @@ func (c *terminalCompositor) beginPrompt(continuation bool) {
 		return
 	}
 	if c.phase == terminalOutput {
+		c.viewportCommand = false
+		c.viewportPassthrough = false
 		if c.historySpacingRows > 0 {
 			spacing := strings.Repeat("\r\n", c.historySpacingRows)
 			c.writeModel([]byte(spacing))
@@ -1471,6 +1549,20 @@ func (c *terminalCompositor) startCommandExecution() {
 }
 
 func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
+	if c.viewportCommand && !c.viewportPassthrough {
+		if len(c.viewportControlTail) > 0 {
+			c.writeViewportOutput(c.viewportControlTail)
+			c.viewportControlTail = nil
+		}
+		c.appendViewportOutcome(exitCode)
+		c.writeViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))
+		c.lastCommandSnapshot = cloneStatusSnapshot(c.commandStatusSnapshot)
+		c.hasLastCommandSnapshot = true
+		c.commandStartedAt = time.Time{}
+		c.commandDirectory = ""
+		c.commandStatusSnapshot = statusSnapshot{}
+		return
+	}
 	if c.rawCommandPending {
 		c.enterRawCommandOutput()
 	}
@@ -1786,6 +1878,9 @@ func (c *terminalCompositor) renderPinned() {
 	c.renderedLines = lines
 	c.transientGeometryDirty = false
 	c.promptPrelude = ""
+	if c.outputViewportEnabled() {
+		c.renderOutputViewport()
+	}
 }
 
 func (c *terminalCompositor) inputBoxDecorationRows() int {
@@ -3002,6 +3097,10 @@ func (c *terminalCompositor) resizeModel(width, height int) (ready bool) {
 }
 
 func (c *terminalCompositor) recoverModel() {
+	c.closeOutputViewport()
+	c.viewportCommand = false
+	c.viewportPassthrough = false
+	c.viewportControlTail = nil
 	c.modelRecoveries++
 	c.closeEmulator()
 	c.resetEmulator(c.width, c.height)
@@ -3223,6 +3322,9 @@ func trailingIncompleteUTF8(data []byte) []byte {
 func requiresCommandPassThrough(data []byte) bool {
 	for index := 0; index < len(data); index++ {
 		if data[index] == '\r' && (index+1 >= len(data) || data[index+1] != '\n') {
+			return true
+		}
+		if data[index] == '\x1b' && index+1 < len(data) && strings.ContainsRune("78DEM=>", rune(data[index+1])) {
 			return true
 		}
 		if data[index] != '\x1b' || index+1 >= len(data) || data[index+1] != '[' {

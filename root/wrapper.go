@@ -1158,10 +1158,21 @@ func runWrapper() {
 	var pastedText strings.Builder
 	var terminalReports terminalInputFilter
 	terminalInput := terminalInputEvents(os.Stdin)
+	var viewportKeysPending viewportInputStager
+	var viewportKeyTimer *time.Timer
+	var viewportKeyTimeout <-chan time.Time
+	defer func() {
+		if viewportKeyTimer != nil {
+			viewportKeyTimer.Stop()
+		}
+	}()
 inputLoop:
 	for {
 		var inputSlice []byte
 		select {
+		case <-viewportKeyTimeout:
+			viewportKeyTimeout = nil
+			inputSlice = viewportKeysPending.flush()
 		case id, ok := <-codexResumeActions:
 			if !ok {
 				codexResumeActions = nil
@@ -1186,10 +1197,35 @@ inputLoop:
 				break inputLoop
 			}
 			inputSlice = next
+			if !inBracketedPaste && display.ViewportNavigationActive() && !overlay.IsVisible() {
+				inputSlice = viewportKeysPending.stage(inputSlice)
+				if len(viewportKeysPending.pending) > 0 {
+					if viewportKeyTimer != nil {
+						viewportKeyTimer.Stop()
+					}
+					viewportKeyTimer = time.NewTimer(35 * time.Millisecond)
+					viewportKeyTimeout = viewportKeyTimer.C
+				} else {
+					viewportKeyTimeout = nil
+					if viewportKeyTimer != nil {
+						viewportKeyTimer.Stop()
+					}
+				}
+			} else if len(viewportKeysPending.pending) > 0 {
+				inputSlice = append(viewportKeysPending.flush(), inputSlice...)
+				viewportKeyTimeout = nil
+			}
 		}
 		n := len(inputSlice)
 
 		if n > 0 {
+			if !inBracketedPaste {
+				inputSlice = display.FilterViewportInput(inputSlice, overlay.IsVisible())
+				n = len(inputSlice)
+				if n == 0 {
+					continue
+				}
+			}
 			if isExecuting() {
 				inBracketedPaste = false
 				_, _ = ptmx.Write(inputSlice[:n])
@@ -1921,6 +1957,8 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 		Separator:       chatbox.Separator,
 		Scrollback:      chatbox.Scrollback,
 		SurfaceWidth:    chatbox.SurfaceWidth,
+		OutputViewport:  chatbox.OutputViewport,
+		OutputLines:     chatbox.OutputLines,
 		PathColorMode:   chatbox.PathColorMode,
 		PathMaxSegments: chatbox.PathMaxSegments,
 		HistorySpacing:  chatbox.HistorySpacing,

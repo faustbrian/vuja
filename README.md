@@ -403,8 +403,16 @@ that live surface on a padded background with optional title and status rows.
 `surface-width = "full-width"` makes that background span the terminal and is
 the default. Set `surface-width = "content-width"` to keep the background to a
 left-aligned rectangle around the visible prompt and buffer instead.
-Completed commands default to `scrollback = "output"`, which removes the active
-chatbox and leaves only the command's unmodified output in terminal scrollback.
+`output-viewport = "pinned"` keeps ordinary command output in a scrollable
+region above the fixed chatbox. Page Up browses older output; Page Down moves
+toward the latest output, and End or Escape returns to the bottom while browsing.
+New output does not move your reading position. `output-lines = 2000` bounds the
+offscreen output history (1–10000 lines), in addition to the visible output rows.
+Set `output-viewport = "terminal"` to use native
+terminal scrollback instead. Suggestion menus retain their page-navigation keys;
+full-screen and cursor-addressed applications retain terminal ownership.
+Completed commands default to `scrollback = "output"`, which omits the submitted
+chatbox from retained history and leaves only the command's output.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen
 status context, output, and final outcome described below.
 `completed-command = "command"`, `"outcome"`, or `"snapshot"` selects the
