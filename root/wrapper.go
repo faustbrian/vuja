@@ -1951,6 +1951,7 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 		Scrollback:      chatbox.Scrollback,
 		SurfaceWidth:    chatbox.SurfaceWidth,
 		OutputViewport:  chatbox.OutputViewport,
+		OutputMouse:     chatbox.OutputMouse,
 		OutputLines:     chatbox.OutputLines,
 		PathColorMode:   chatbox.PathColorMode,
 		PathMaxSegments: chatbox.PathMaxSegments,

@@ -94,6 +94,7 @@ func TestOutputViewportConfiguration(t *testing.T) {
 	for _, mode := range []string{"pinned", "terminal"} {
 		cfg := DefaultConfig()
 		cfg.UI.Chatbox.OutputViewport = mode
+		cfg.UI.Chatbox.OutputMouse = "navigate"
 		cfg.UI.Chatbox.OutputLines = 2000
 		content, err := Render(cfg)
 		if err != nil {
@@ -107,14 +108,19 @@ func TestOutputViewportConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if loaded.UI.Chatbox.OutputViewport != mode || loaded.UI.Chatbox.OutputLines != 2000 {
+		if loaded.UI.Chatbox.OutputViewport != mode || loaded.UI.Chatbox.OutputMouse != "navigate" || loaded.UI.Chatbox.OutputLines != 2000 {
 			t.Fatal("viewport configuration lost during round trip")
 		}
 	}
 	cfg := DefaultConfig()
-	if cfg.UI.Chatbox.OutputViewport != "pinned" {
-		t.Fatal("viewport must default to pinned")
+	if cfg.UI.Chatbox.OutputViewport != "pinned" || cfg.UI.Chatbox.OutputMouse != "select" {
+		t.Fatal("viewport must default to pinned with native mouse selection")
 	}
+	cfg.UI.Chatbox.OutputMouse = "invalid"
+	if Validate(cfg) == nil {
+		t.Fatal("invalid output mouse mode accepted")
+	}
+	cfg.UI.Chatbox.OutputMouse = "select"
 	cfg.UI.Chatbox.OutputViewport = "invalid"
 	if Validate(cfg) == nil {
 		t.Fatal("invalid viewport accepted")

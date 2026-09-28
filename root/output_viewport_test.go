@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/faustbrian/vuja/internal/config"
 )
 
 func TestOutputViewportBusyResizeAndApplicationOwnership(t *testing.T) {
@@ -218,7 +220,7 @@ func TestOutputViewportWheelScrollsWithoutMovingChatbox(t *testing.T) {
 	c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
 	t.Cleanup(c.Close)
 	c.SetInputBoxTheme(testInputBoxTheme())
-	c.SetChatboxConfig(terminalChatboxConfig{SurfaceWidth: "full-width", OutputViewport: "pinned", OutputLines: 100})
+	c.SetChatboxConfig(terminalChatboxConfig{SurfaceWidth: "full-width", OutputViewport: "pinned", OutputMouse: "navigate", OutputLines: 100})
 	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
 	c.WritePTY([]byte("› running"))
 	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
@@ -254,6 +256,28 @@ func TestOutputViewportWheelScrollsWithoutMovingChatbox(t *testing.T) {
 	}
 }
 
+func TestConfiguredMouseNavigationReachesPinnedViewport(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.UI.Chatbox.OutputMouse = "navigate"
+	var out bytes.Buffer
+	c := newTerminalCompositor(&out, "bottom", "configured-mouse", 60, 12)
+	t.Cleanup(c.Close)
+	c.SetInputBoxTheme(testInputBoxTheme())
+	c.SetChatboxConfig(terminalChatboxConfigFromConfig(cfg))
+	c.WritePTY(terminalMarkerBytes("configured-mouse", "prompt-start"))
+	c.WritePTY([]byte("› input"))
+	c.WritePTY(terminalMarkerBytes("configured-mouse", "prompt-end"))
+	for i := 0; i < 30; i++ {
+		c.WriteNotification([]byte(fmt.Sprintf("line-%02d\r\n", i)))
+	}
+	if !strings.Contains(out.String(), "\x1b[?1000h\x1b[?1006h") {
+		t.Fatal("configured navigation did not enable viewport mouse reporting")
+	}
+	if !c.HandleViewportInput([]byte("\x1b[<64;2;2M"), false) || c.viewport.frozen == nil {
+		t.Fatal("configured navigation did not browse output with the wheel")
+	}
+}
+
 func TestOutputViewportAlternateScreenRestoresPrimaryOnClose(t *testing.T) {
 	var out bytes.Buffer
 	c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
@@ -285,31 +309,43 @@ func TestOutputViewportAlternateScreenRestoresPrimaryOnClose(t *testing.T) {
 }
 
 func TestOutputViewportAlternateScreenYieldsToNativeApplication(t *testing.T) {
-	var out bytes.Buffer
-	c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
-	t.Cleanup(c.Close)
-	c.SetInputBoxTheme(testInputBoxTheme())
-	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
-	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
-	c.WritePTY([]byte("› app"))
-	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
-	c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
-	out.Reset()
-	c.WritePTY([]byte("\x1b[?1049happlication-screen"))
-	if !strings.Contains(out.String(), "\x1b[?1049l") {
-		t.Fatal("managed alternate screen was not released before native application")
-	}
-	if c.HandleViewportInput([]byte("\x1b[<64;2;2M"), false) {
-		t.Fatal("native application's wheel input was stolen")
-	}
-	c.WritePTY([]byte("\x1b[?1049l\r\nresume-output\r\n"))
-	c.WritePTY(terminalMarkerBytes("viewport", "command-end:0"))
-	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
-	c.WritePTY([]byte("› next"))
-	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
-	screen := applyTerminalOutput(t, out.Bytes(), 60, 12)
-	if !screen.IsAltScreen() || terminalLineIndex(terminalScreenLines(screen), "resume-output", 0) < 0 || terminalLineIndex(terminalScreenLines(screen), "› next", 0) < 0 {
-		t.Fatal("pinned alternate screen did not reacquire output and prompt after native app")
+	for _, mode := range []string{"9", "1000", "1001", "1002", "1003"} {
+		t.Run(mode, func(t *testing.T) {
+			var out bytes.Buffer
+			c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
+			t.Cleanup(c.Close)
+			c.SetInputBoxTheme(testInputBoxTheme())
+			c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
+			c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+			c.WritePTY([]byte("› app"))
+			c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+			c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
+			out.Reset()
+			mouseEnable := "\x1b[?" + mode + "h"
+			mouseDisable := "\x1b[?" + mode + "l"
+			c.WritePTY([]byte("\x1b[?1049h" + mouseEnable + "application-screen"))
+			if !strings.Contains(out.String(), "\x1b[?1049l") {
+				t.Fatal("managed alternate screen was not released before native application")
+			}
+			if !strings.Contains(out.String(), mouseEnable+"application-screen") {
+				t.Fatal("native application's mouse control was not forwarded")
+			}
+			if c.HandleViewportInput([]byte("\x1b[<64;2;2M"), false) {
+				t.Fatal("native application's wheel input was stolen")
+			}
+			c.WritePTY([]byte("\x1b[?1049l\r\nresume-output\r\n"))
+			c.WritePTY(terminalMarkerBytes("viewport", "command-end:0"))
+			c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+			c.WritePTY([]byte("› next"))
+			c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+			if strings.LastIndex(out.String(), mouseDisable) < strings.LastIndex(out.String(), mouseEnable) {
+				t.Fatal("managed prompt retained mouse tracking from native application")
+			}
+			screen := applyTerminalOutput(t, out.Bytes(), 60, 12)
+			if !screen.IsAltScreen() || terminalLineIndex(terminalScreenLines(screen), "resume-output", 0) < 0 || terminalLineIndex(terminalScreenLines(screen), "› next", 0) < 0 {
+				t.Fatal("pinned alternate screen did not reacquire output and prompt after native app")
+			}
+		})
 	}
 }
 
@@ -321,7 +357,7 @@ func TestOutputViewportWheelFramingAndOwnership(t *testing.T) {
 			c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
 			t.Cleanup(c.Close)
 			c.SetInputBoxTheme(testInputBoxTheme())
-			c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
+			c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputMouse: "navigate", OutputLines: 100})
 			c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
 			c.WritePTY([]byte("› input"))
 			c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
@@ -354,7 +390,7 @@ func TestOutputViewportMouseModeFollowsOverlayOwner(t *testing.T) {
 	c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
 	t.Cleanup(c.Close)
 	c.SetInputBoxTheme(testInputBoxTheme())
-	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
+	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputMouse: "navigate", OutputLines: 100})
 	visible := false
 	c.SetTransientUIReflow(nil, nil, nil, nil, nil, func() bool { return visible })
 	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
@@ -377,6 +413,37 @@ func TestOutputViewportMouseModeFollowsOverlayOwner(t *testing.T) {
 	c.Close()
 	if !strings.Contains(out.String(), "\x1b[?1000l\x1b[?1006l") {
 		t.Fatal("close leaked mouse mode")
+	}
+}
+
+func TestPinnedViewportLeavesNativeMouseSelectionAvailable(t *testing.T) {
+	var out bytes.Buffer
+	c := newTerminalCompositor(&out, "bottom", "selection", 60, 12)
+	t.Cleanup(c.Close)
+	c.SetInputBoxTheme(testInputBoxTheme())
+	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
+	c.WritePTY(terminalMarkerBytes("selection", "prompt-start"))
+	c.WritePTY([]byte("› input"))
+	c.WritePTY(terminalMarkerBytes("selection", "prompt-end"))
+	for i := 0; i < 30; i++ {
+		c.WriteNotification([]byte(fmt.Sprintf("line-%02d\r\n", i)))
+	}
+	if !c.HandleViewportInput([]byte("\x1b[5~"), false) || c.viewport.frozen == nil {
+		t.Fatal("Page Up did not enter older output")
+	}
+	visible := false
+	c.SetTransientUIReflow(nil, nil, nil, nil, nil, func() bool { return visible })
+	c.ComposeUI(func() []byte { visible = true; return []byte("\x1b7\x1b8") })
+	c.ComposeUI(func() []byte { visible = false; return []byte("\x1b7\x1b8") })
+	c.Resize(70, 12)
+	if !c.HandleViewportInput([]byte("\x1b[F"), false) || c.viewport.frozen != nil {
+		t.Fatal("End did not return to latest output")
+	}
+	c.Close()
+	for _, mode := range []string{"9", "1000", "1001", "1002", "1003"} {
+		if strings.Contains(out.String(), "\x1b[?"+mode+"h") {
+			t.Fatalf("viewport enabled mouse tracking mode %s, preventing native drag selection", mode)
+		}
 	}
 }
 

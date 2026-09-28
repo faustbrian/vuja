@@ -226,6 +226,7 @@ type terminalChatboxConfig struct {
 	Scrollback        string
 	SurfaceWidth      string
 	OutputViewport    string
+	OutputMouse       string
 	OutputLines       int
 	PathColorMode     string
 	PathMaxSegments   int
@@ -799,6 +800,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Scrollback:        chatbox.Scrollback,
 		SurfaceWidth:      chatbox.SurfaceWidth,
 		OutputViewport:    chatbox.OutputViewport,
+		OutputMouse:       chatbox.OutputMouse,
 		OutputLines:       chatbox.OutputLines,
 		PathColorMode:     chatbox.PathColorMode,
 		PathMaxSegments:   chatbox.PathMaxSegments,

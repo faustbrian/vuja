@@ -165,6 +165,10 @@ func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
 	c.viewportAlternate = enabled
 	if enabled {
 		_, _ = io.WriteString(c.out, "\x1b[?1049h")
+		// A native application may have left tracking enabled when it exited.
+		// The managed screen starts with a selection-safe pointer state; the
+		// optional navigation mode re-enables its own tracking on render.
+		_, _ = io.WriteString(c.out, "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
 		if c.viewport != nil {
 			c.viewport.dirty = true
 		}
@@ -175,6 +179,10 @@ func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
 }
 
 func (c *terminalCompositor) setViewportMouse(enabled bool) {
+	// Xterm mouse tracking reports clicks as well as wheel input. With native
+	// selection preferred, leave the pointer to the terminal even while the
+	// pinned output viewport owns the screen.
+	enabled = enabled && c.chatboxConfig.OutputMouse == "navigate"
 	if !enabled {
 		c.setViewportMotion(false)
 	}

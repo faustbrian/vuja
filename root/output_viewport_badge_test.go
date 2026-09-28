@@ -14,7 +14,7 @@ func frozenBadgeFixture(t *testing.T) (*terminalCompositor, *bytes.Buffer) {
 	c := newTerminalCompositor(out, "bottom", "badge", 80, 12)
 	t.Cleanup(c.Close)
 	c.SetInputBoxTheme(testInputBoxTheme())
-	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100, SurfaceWidth: "full-width"})
+	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputMouse: "navigate", OutputLines: 100, SurfaceWidth: "full-width"})
 	c.WritePTY(terminalMarkerBytes("badge", "prompt-start"))
 	c.WritePTY([]byte("› input"))
 	c.WritePTY(terminalMarkerBytes("badge", "prompt-end"))
@@ -131,7 +131,7 @@ func TestViewportReturnRestoresWheelReporting(t *testing.T) {
 
 func TestViewportBadgeSitsFlushWithChatboxWhenTitleIsShown(t *testing.T) {
 	c, out := frozenBadgeFixture(t)
-	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100, SurfaceWidth: "full-width", Title: terminalChatboxBarConfig{Left: []string{"directory"}}})
+	c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputMouse: "navigate", OutputLines: 100, SurfaceWidth: "full-width", Title: terminalChatboxBarConfig{Left: []string{"directory"}}})
 	c.SetInputBoxPath("/fixture/project")
 	c.Resize(80, 12)
 	screen := applyTerminalOutput(t, out.Bytes(), 80, 12)

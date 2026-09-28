@@ -31,6 +31,7 @@ func DefaultConfig() *Config {
 				Scrollback:        "output",
 				SurfaceWidth:      "full-width",
 				OutputViewport:    "pinned",
+				OutputMouse:       "select",
 				OutputLines:       2000,
 				PathColorMode:     "hierarchy",
 				PathMaxSegments:   6,

@@ -65,6 +65,7 @@ type ChatboxConfig struct {
 	Scrollback        string              `toml:"scrollback"`
 	SurfaceWidth      string              `toml:"surface-width"`
 	OutputViewport    string              `toml:"output-viewport"`
+	OutputMouse       string              `toml:"output-mouse"`
 	OutputLines       int                 `toml:"output-lines"`
 	PathColorMode     string              `toml:"path-color-mode"`
 	PathMaxSegments   int                 `toml:"path-max-segments"`
@@ -709,6 +710,9 @@ func validateChatbox(chatbox ChatboxConfig) error {
 	}
 	if chatbox.OutputViewport != "pinned" && chatbox.OutputViewport != "terminal" {
 		return fmt.Errorf("ui.chatbox.output-viewport: invalid value %q (want: pinned|terminal)", chatbox.OutputViewport)
+	}
+	if chatbox.OutputMouse != "select" && chatbox.OutputMouse != "navigate" {
+		return fmt.Errorf("ui.chatbox.output-mouse: invalid value %q (want: select|navigate)", chatbox.OutputMouse)
 	}
 	if chatbox.OutputLines < 1 || chatbox.OutputLines > 10000 {
 		return fmt.Errorf("ui.chatbox.output-lines: must be between 1 and 10000")
