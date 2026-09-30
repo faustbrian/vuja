@@ -3427,7 +3427,7 @@ func requiresOutputPassThrough(data []byte, carriageReturnIsNative bool) bool {
 			if data[end] < 0x40 || data[end] > 0x7e {
 				continue
 			}
-			if data[end] != 'm' {
+			if data[end] != 'm' && (carriageReturnIsNative || !isViewportLineEraseCSI(data[index+2:end], data[end])) {
 				return true
 			}
 			index = end
@@ -3435,6 +3435,26 @@ func requiresOutputPassThrough(data []byte, carriageReturnIsNative bool) bool {
 		}
 	}
 	return false
+}
+
+// Line erasure is ordinary progress formatting, like CR and SGR. Cursor
+// movement, visibility, modes and queries still surrender terminal ownership
+// so cursor-driven applications retain their display and input semantics.
+// Legacy padded output deliberately retains its stricter handoff semantics.
+func isViewportLineEraseCSI(params []byte, final byte) bool {
+	if final != 'K' {
+		return false
+	}
+	for _, param := range params {
+		if param < '0' || param > '9' {
+			return false
+		}
+	}
+	if len(params) == 0 {
+		return true
+	}
+	value, err := strconv.Atoi(string(params))
+	return err == nil && value <= 2
 }
 
 func (c *terminalCompositor) cellAtAbsolute(x, absoluteY, scrollback int) *uv.Cell {

@@ -10,6 +10,120 @@ import (
 	"github.com/faustbrian/vuja/internal/config"
 )
 
+func TestOutputViewportKeepsBusyChromeDuringLineProgress(t *testing.T) {
+	for _, mode := range []string{"output", "snapshot"} {
+		for _, update := range []string{"\rOK\x1b[K", "\r\x1b[2KOK", "\rOK\x1b[0K"} {
+			for split := 0; split <= len(update); split++ {
+				t.Run(fmt.Sprintf("%s/%q/split-%d", mode, update, split), func(t *testing.T) {
+					var out bytes.Buffer
+					c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
+					t.Cleanup(c.Close)
+					c.SetInputBoxTheme(testInputBoxTheme())
+					c.SetChatboxConfig(terminalChatboxConfig{Prompt: "› ", Scrollback: mode, OutputViewport: "pinned", OutputLines: 100, Title: terminalChatboxBarConfig{Left: []string{"directory"}}, Status: terminalChatboxBarConfig{Right: []string{"exit"}}})
+					c.SetInputBoxPath("/project")
+					c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+					c.WritePTY([]byte("› git push"))
+					c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+					c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
+					assertBusy := func() {
+						t.Helper()
+						physical := applyTerminalOutput(t, out.Bytes(), 60, 12)
+						if !physical.IsAltScreen() || !strings.Contains(screenLine(physical, 7), "/project") || !strings.Contains(screenLine(physical, 9), "git push") || !strings.Contains(screenLine(physical, 11), "exit") {
+							t.Fatalf("busy command lost its pinned display: %q", terminalScreenLines(physical))
+						}
+					}
+					// No output is needed to keep the submitted command visible.
+					assertBusy()
+					c.WritePTY([]byte("long-progress"))
+					c.WritePTY([]byte(update[:split]))
+					c.WritePTY([]byte(update[split:]))
+					// Inspect before command-end: this is the silent wait after progress.
+					assertBusy()
+					physical := applyTerminalOutput(t, out.Bytes(), 60, 12)
+					if !terminalContainsLine(physical, "OK") || terminalContainsLine(physical, "long-progress") || c.viewportPassthrough {
+						t.Fatalf("line progress was not rendered in the retained output: %q", terminalScreenLines(physical))
+					}
+					if !c.HandleViewportInput([]byte("\x1b[5~"), false) {
+						t.Fatal("progress released managed navigation")
+					}
+					c.HandleViewportInput([]byte("\x1b[F"), false)
+					c.WritePTY(terminalMarkerBytes("viewport", "command-end:0"))
+					c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+					c.WritePTY([]byte("› next"))
+					c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+					physical = applyTerminalOutput(t, out.Bytes(), 60, 12)
+					if !terminalContainsLine(physical, "OK") || !terminalContainsLine(physical, "› next") {
+						t.Fatal("completion lost progress output or the next prompt")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOutputViewportLineProgressStillYieldsToNativeApplications(t *testing.T) {
+	for _, control := range []string{"\x1b[?1049h", "\x1b[2;2H", "\x1b[2A", "\x1b[10D", "\x1b[1G", "\x1b[?25l", "\x1b[6n", "\x1b[?1000h", "\x1b[?2K", "\x1b[1 K"} {
+		for split := 0; split <= len(control); split++ {
+			t.Run(fmt.Sprintf("%q/split-%d", control, split), func(t *testing.T) {
+				var out bytes.Buffer
+				c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
+				t.Cleanup(c.Close)
+				c.SetInputBoxTheme(testInputBoxTheme())
+				c.SetChatboxConfig(terminalChatboxConfig{OutputViewport: "pinned", OutputLines: 100})
+				c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+				c.WritePTY([]byte("› application"))
+				c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+				c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
+				c.WritePTY([]byte("progress\rOK\x1b[K"))
+				out.Reset()
+				c.WritePTY([]byte(control[:split]))
+				if split < len(control) && !c.ViewportNavigationActive() {
+					t.Fatal("incomplete native control prematurely released the viewport")
+				}
+				c.WritePTY([]byte(control[split:]))
+				if bytes.Count(out.Bytes(), []byte(control)) != 1 || c.HandleViewportInput([]byte("\x1b[5~"), false) {
+					t.Fatal("native control was altered or native navigation was intercepted")
+				}
+				out.Reset()
+				c.WritePTY([]byte("native-content"))
+				if out.String() != "native-content" {
+					t.Fatal("managed repaint overwrote native application output")
+				}
+				c.WritePTY([]byte("\x1b[?1049l\r\napplication-result\r\n"))
+				c.WritePTY(terminalMarkerBytes("viewport", "command-end:0"))
+				c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+				c.WritePTY([]byte("› next"))
+				c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+				physical := applyTerminalOutput(t, out.Bytes(), 60, 12)
+				if !terminalContainsLine(physical, "application-result") || !terminalContainsLine(physical, "› next") || !c.ViewportNavigationActive() {
+					t.Fatal("native completion did not restore retained output and prompt ownership")
+				}
+			})
+		}
+	}
+}
+
+func TestOutputViewportTerminalModePreservesProgressAndNativeBytes(t *testing.T) {
+	var out bytes.Buffer
+	c := newTerminalCompositor(&out, "bottom", "viewport", 60, 12)
+	t.Cleanup(c.Close)
+	c.SetInputBoxTheme(testInputBoxTheme())
+	c.SetChatboxConfig(terminalChatboxConfig{Scrollback: "output", OutputViewport: "terminal"})
+	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+	c.WritePTY([]byte("› running"))
+	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+	c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
+	// The legacy surface transition is emitted with the first output chunk.
+	c.WritePTY([]byte("first-output\r\n"))
+	for _, text := range []string{"progress\rOK\x1b[K", "\x1b[1A\x1b[2Kupdated", "\x1b[?25l\rOK\x1b[?25h", "\x1b[?1049hnative\x1b[?1049l"} {
+		out.Reset()
+		c.WritePTY([]byte(text))
+		if out.String() != text || c.HandleViewportInput([]byte("\x1b[5~"), false) {
+			t.Fatalf("terminal mode changed native output/input semantics: %q", out.String())
+		}
+	}
+}
+
 func TestOutputViewportBusyResizeAndApplicationOwnership(t *testing.T) {
 	for _, control := range []string{"", "\x1bM", "\x1b7", "\x1bP$qm\x1b\\", "\x1b_Ga=q;\x1b\\"} {
 		t.Run(fmt.Sprintf("control-%q", control), func(t *testing.T) {
