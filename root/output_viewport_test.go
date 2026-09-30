@@ -28,7 +28,7 @@ func TestOutputViewportKeepsBusyChromeDuringLineProgress(t *testing.T) {
 					assertBusy := func() {
 						t.Helper()
 						physical := applyTerminalOutput(t, out.Bytes(), 60, 12)
-						if !physical.IsAltScreen() || !strings.Contains(screenLine(physical, 7), "/project") || !strings.Contains(screenLine(physical, 9), "git push") || !strings.Contains(screenLine(physical, 11), "exit") {
+						if !physical.IsAltScreen() || !strings.Contains(screenLine(physical, 7), "/project") || !strings.Contains(screenLine(physical, 9), "git push") || !strings.Contains(screenLine(physical, 11), "Running") {
 							t.Fatalf("busy command lost its pinned display: %q", terminalScreenLines(physical))
 						}
 					}
@@ -147,7 +147,7 @@ func TestOutputViewportBusyResizeAndApplicationOwnership(t *testing.T) {
 			out.Reset()
 			c.Resize(40, 10)
 			screen := applyTerminalOutput(t, out.Bytes(), 40, 10)
-			if !strings.Contains(screenLine(screen, 9), "exit") {
+			if !strings.Contains(screenLine(screen, 9), "Running") {
 				t.Fatalf("resized status missing: %q", screenLine(screen, 9))
 			}
 			var visible strings.Builder
@@ -943,7 +943,7 @@ func TestOutputViewportPinsInputAndPreservesReadingPosition(t *testing.T) {
 	}
 	c.WritePTY([]byte(lines.String()))
 	screen := applyTerminalOutput(t, out.Bytes(), 60, 12)
-	if !strings.Contains(screenLine(screen, 9), "printf lines") || !strings.Contains(screenLine(screen, 7), "/example/project") || !strings.Contains(screenLine(screen, 11), "exit") {
+	if !strings.Contains(screenLine(screen, 9), "printf lines") || !strings.Contains(screenLine(screen, 7), "/example/project") || !strings.Contains(screenLine(screen, 11), "Running") {
 		t.Fatal("running output displaced the pinned chatbox")
 	}
 	if !c.HandleViewportInput([]byte("\x1b[5~"), false) {

@@ -350,6 +350,8 @@ func (c *terminalCompositor) renderOutputViewport() {
 	frame.WriteString("\x1b8\x1b[?7h\x1b[?25h" + terminalSyncEnd)
 	data := []byte(frame.String())
 	if c.viewportCommand {
+		start, statusLines := c.commandStatusLines()
+		copy(c.renderedLines[start:], statusLines)
 		// The shell is busy: keep its submitted command and metadata visible,
 		// rather than treating command output as a new editable prompt.
 		var chrome strings.Builder

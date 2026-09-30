@@ -1158,6 +1158,23 @@ func runWrapper() {
 	var pastedText strings.Builder
 	var terminalReports terminalInputFilter
 	terminalInput := terminalInputEvents(os.Stdin)
+	runningStatusTimer := time.NewTimer(time.Hour)
+	runningStatusTimer.Stop()
+	defer runningStatusTimer.Stop()
+	var runningStatusTimeout <-chan time.Time
+	resetRunningStatusTimer := func() {
+		if !runningStatusTimer.Stop() {
+			select {
+			case <-runningStatusTimer.C:
+			default:
+			}
+		}
+		runningStatusTimeout = nil
+		if delay := display.NextRunningStatusDelay(); delay > 0 {
+			runningStatusTimer.Reset(delay)
+			runningStatusTimeout = runningStatusTimer.C
+		}
+	}
 	var viewportKeyTimer *time.Timer
 	var viewportKeyTimeout <-chan time.Time
 	var queuedInput []ownedTerminalInput
@@ -1175,6 +1192,13 @@ inputLoop:
 			queuedInput = queuedInput[1:]
 		} else {
 			select {
+			case <-display.runningStatusWake:
+				resetRunningStatusTimer()
+				continue
+			case <-runningStatusTimeout:
+				display.RefreshRunningStatus()
+				resetRunningStatusTimer()
+				continue
 			case <-viewportKeyTimeout:
 				viewportKeyTimeout = nil
 				inputShell = terminalReports.pendingOwner.shell

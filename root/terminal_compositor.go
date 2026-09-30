@@ -82,6 +82,8 @@ type terminalCompositor struct {
 	surfaceBottomAbs        int
 	surfaceRows             int
 	surfaceContentRows      int
+	surfaceStatusRows       int
+	runningStatusWake       chan struct{}
 	surfaceContentLines     []string
 	surfaceContentCells     []uv.Line
 	renderedTop             int
@@ -325,16 +327,17 @@ func newTerminalCompositor(out io.Writer, promptPosition, marker string, width, 
 		out = asyncOut
 	}
 	c := &terminalCompositor{
-		out:            out,
-		asyncOut:       asyncOut,
-		enabled:        bottomLayout,
-		layout:         bottomLayout,
-		awaitingPrompt: bottomLayout,
-		marker:         marker,
-		width:          width,
-		height:         height,
-		phase:          terminalOutput,
-		now:            time.Now,
+		runningStatusWake: make(chan struct{}, 1),
+		out:               out,
+		asyncOut:          asyncOut,
+		enabled:           bottomLayout,
+		layout:            bottomLayout,
+		awaitingPrompt:    bottomLayout,
+		marker:            marker,
+		width:             width,
+		height:            height,
+		phase:             terminalOutput,
+		now:               time.Now,
 	}
 	if c.enabled {
 		c.resetEmulator(width, height)
@@ -584,6 +587,13 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		}
 	}, func(event string) {
 		if !c.layout {
+			if strings.HasPrefix(event, "command-end") {
+				c.commandStartedAt = time.Time{}
+				select {
+				case c.runningStatusWake <- struct{}{}:
+				default:
+				}
+			}
 			if c.viewportSuspended && (strings.HasPrefix(event, "command-end") || event == "prompt-start") {
 				c.viewportSuspended = false
 				c.viewportCommand = false
@@ -620,6 +630,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				c.clearViewportOverlay()
 				c.appendViewportSnapshot()
 				c.phase = terminalOutput
+				c.renderCommandStatus()
 				dirtyInput = false
 				return
 			}
@@ -638,12 +649,23 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			if value, ok := strings.CutPrefix(event, "command-end:"); ok && !c.commandStartedAt.IsZero() {
 				if status, err := strconv.Atoi(value); err == nil {
 					c.lastExitStatus = &status
+					c.statusSnapshot.ExitCode = &status
+					now := time.Now
+					if c.now != nil {
+						now = c.now
+					}
+					c.statusSnapshot.Duration = max(now().Sub(c.commandStartedAt), 0)
 					exitCode = &status
 					c.titleLinesCache = nil
 					c.statusLinesCache = nil
 				}
 			}
 			c.finishCommandOutput(exitCode)
+			select {
+			case c.runningStatusWake <- struct{}{}:
+			default:
+			}
+			c.renderCommandStatus()
 			c.phase = terminalOutput
 		}
 	})
@@ -1127,6 +1149,10 @@ func (c *terminalCompositor) Resize(width, height int) {
 			spans[i] = ansi.StringWidth(content[i])
 		}
 		c.renderedLines = c.inputBoxLines(content, spans)
+		c.surfaceStatusRows = 0
+		if c.inputBoxDecorationRows() > 0 && c.inputBoxStatusEnabled() {
+			c.surfaceStatusRows = len(c.inputBoxStatusLines())
+		}
 		c.surfaceRows = len(c.renderedLines)
 		c.renderedTop = height - c.surfaceRows
 		if c.viewport != nil {
@@ -1601,6 +1627,10 @@ func (c *terminalCompositor) startCommandExecution() {
 		now = c.now
 	}
 	c.commandStartedAt = now()
+	select {
+	case c.runningStatusWake <- struct{}{}:
+	default:
+	}
 	c.commandDirectory = c.inputBoxPath
 	c.commandStatusSnapshot = cloneStatusSnapshot(c.statusSnapshot)
 	c.commandStatusSnapshot.CommandContext = c.commandContext
@@ -1947,6 +1977,10 @@ func (c *terminalCompositor) renderPinned() {
 	c.recordBackdrop([]byte(contents[baseStart:baseEnd]))
 	c.surfaceRows = rows
 	c.surfaceContentRows = contentRows
+	c.surfaceStatusRows = 0
+	if decorationRows > 0 && c.inputBoxStatusEnabled() {
+		c.surfaceStatusRows = len(c.inputBoxStatusLines())
+	}
 	c.surfaceContentLines = contentLines
 	c.surfaceContentCells = contentCells
 	c.renderedTop = targetTop
@@ -2653,6 +2687,8 @@ func (c *terminalCompositor) statusColorCode(name string) string {
 		return color
 	}
 	switch {
+	case name == "running":
+		return terminalTrueColor("38", c.inputBoxTheme.Accent)
 	case name == "execution-time":
 		return terminalTrueColor("38", c.inputBoxTheme.Muted)
 	case strings.HasPrefix(name, "git-"):
