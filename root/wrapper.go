@@ -1186,7 +1186,7 @@ func runWrapper() {
 inputLoop:
 	for {
 		var inputSlice []byte
-		inputShell := !isExecuting()
+		var inputShell bool
 		if len(queuedInput) > 0 {
 			inputSlice, inputShell = queuedInput[0].data, queuedInput[0].shell
 			queuedInput = queuedInput[1:]
