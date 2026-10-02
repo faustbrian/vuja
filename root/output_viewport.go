@@ -313,6 +313,7 @@ func viewportLine(model *vt.Emulator, y, width int, history bool) string {
 		}
 		if cell != nil {
 			line.Set(x, cell)
+			line[x].Link = terminalModelHyperlink(cell.Link)
 		}
 	}
 	return line.Render()

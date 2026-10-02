@@ -1360,6 +1360,7 @@ func (c *terminalCompositor) restoreBackdropRows(top, rows int) (result []byte) 
 		for column := 0; column < c.width; column++ {
 			if cell := c.backdrop.CellAt(column, row); cell != nil {
 				line.Set(column, cell)
+				line[column].Link = terminalModelHyperlink(cell.Link)
 			}
 		}
 		fmt.Fprintf(&restored, "\x1b[%d;1H\x1b[2K%s\x1b[0m", row+1, line.Render())
@@ -1885,6 +1886,8 @@ func (c *terminalCompositor) renderPinned() {
 				normalized := *cell
 				if normalized.Link.URL == terminalModelWrittenSpaceLink {
 					normalized.Link = uv.Link{}
+				} else {
+					normalized.Link = terminalModelHyperlink(normalized.Link)
 				}
 				normalized.Content = norm.NFC.String(normalized.Content)
 				if decorationRows > 0 && surfaceColor != nil {
@@ -3491,6 +3494,13 @@ func isViewportLineEraseCSI(params []byte, final byte) bool {
 	}
 	value, err := strconv.Atoi(string(params))
 	return err == nil && value <= 2
+}
+
+// The pinned x/vt version stores OSC 8 URI and parameters in reversed fields.
+// Normalize only model-owned links when copying cells into render-owned lines;
+// do not mutate the model or swap already-normalized snapshot cells again.
+func terminalModelHyperlink(link uv.Link) uv.Link {
+	return uv.Link{URL: link.Params, Params: link.URL}
 }
 
 func (c *terminalCompositor) cellAtAbsolute(x, absoluteY, scrollback int) *uv.Cell {

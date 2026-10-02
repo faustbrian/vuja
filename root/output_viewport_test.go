@@ -915,15 +915,30 @@ func TestOutputViewportRetainsHyperlinkCells(t *testing.T) {
 	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
 	c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
 	c.WritePTY([]byte("\x1b]8;;https://example.com\x1b\\linked\x1b]8;;\x1b\\"))
-	screen := applyTerminalOutput(t, out.Bytes(), 60, 12)
-	for y := 0; y < 12; y++ {
-		for x := 0; x < 60; x++ {
-			if cell := screen.CellAt(x, y); cell != nil && cell.Content == "l" && cell.Link.URL == "https://example.com" {
-				return
-			}
-		}
+	// Inspect the native wire protocol, not the same VT parser used by the
+	// output model: parsing twice can conceal swapped URL/parameter fields.
+	if !strings.Contains(out.String(), "\x1b]8;;https://example.com\a") {
+		t.Fatal("viewport rendering lost the native output hyperlink target")
 	}
-	t.Fatal("viewport rendering lost the output hyperlink")
+}
+
+func TestOutputViewportPreservesCodexReconnectWireTarget(t *testing.T) {
+	var out bytes.Buffer
+	c := newTerminalCompositor(&out, "bottom", "viewport", 100, 12)
+	t.Cleanup(c.Close)
+	c.SetInputBoxTheme(testInputBoxTheme())
+	c.SetChatboxConfig(terminalChatboxConfig{Prompt: "› ", OutputViewport: "pinned", OutputLines: 100})
+	c.WritePTY(terminalMarkerBytes("viewport", "prompt-start"))
+	c.WritePTY([]byte("› codex"))
+	c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
+	c.WritePTY(terminalMarkerBytes("viewport", "command-start"))
+	const id = "01a0fac4-73ff-7592-9184-47b8bea04ed5"
+	const actionURL = "vuja://codex-resume/" + id + "?token=fixture&socket=fixture.sock"
+	linkifier := newCodexResumeLinkifier(func(string) string { return actionURL })
+	c.WritePTY(linkifier.Transform([]byte("To reconnect, run:\r\n  codex resume " + id + "\r\n")))
+	if !strings.Contains(out.String(), "\x1b]8;id=vuja-codex-"+id+";"+actionURL+"\a") {
+		t.Fatalf("expected the native terminal to receive the resume URL as its target, got %q", out.String())
+	}
 }
 
 func TestOutputViewportPinsInputAndPreservesReadingPosition(t *testing.T) {

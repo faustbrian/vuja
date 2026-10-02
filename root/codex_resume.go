@@ -26,6 +26,7 @@ import (
 
 const (
 	codexResumeLinePrefix      = "To continue this session, run"
+	codexReconnectLinePrefix   = "To reconnect, run"
 	codexSessionIDLinePrefix   = "Session ID:"
 	codexResumeLineLimit       = 2048
 	codexResumeTTL             = 10 * time.Minute
@@ -35,15 +36,16 @@ const (
 var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
 type codexResumeLinkifier struct {
-	linkFor            func(string) string
-	prefixMatch        int
-	sessionPrefixMatch int
-	escapeState        codexResumeEscapeState
-	captureEscapeState codexResumeEscapeState
-	captureEscapeStart int
-	capturing          bool
-	awaitingResumeLine bool
-	line               []byte
+	linkFor              func(string) string
+	prefixMatch          int
+	reconnectPrefixMatch int
+	sessionPrefixMatch   int
+	escapeState          codexResumeEscapeState
+	captureEscapeState   codexResumeEscapeState
+	captureEscapeStart   int
+	capturing            bool
+	awaitingResumeLine   bool
+	line                 []byte
 }
 
 type codexResumeEscapeState uint8
@@ -65,6 +67,7 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 		return data
 	}
 	resumePrefix := []byte(codexResumeLinePrefix)
+	reconnectPrefix := []byte(codexReconnectLinePrefix)
 	sessionPrefix := []byte(codexSessionIDLinePrefix)
 	var output bytes.Buffer
 	for _, char := range data {
@@ -101,10 +104,13 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 		}
 		var matched bool
 		l.prefixMatch, matched = advanceCodexLinePrefix(char, resumePrefix, l.prefixMatch)
+		var reconnectMatched bool
+		l.reconnectPrefixMatch, reconnectMatched = advanceCodexLinePrefix(char, reconnectPrefix, l.reconnectPrefixMatch)
 		var sessionMatched bool
 		l.sessionPrefixMatch, sessionMatched = advanceCodexLinePrefix(char, sessionPrefix, l.sessionPrefixMatch)
-		if matched || sessionMatched {
+		if matched || reconnectMatched || sessionMatched {
 			l.prefixMatch = 0
+			l.reconnectPrefixMatch = 0
 			l.sessionPrefixMatch = 0
 			l.capturing = true
 			l.captureEscapeStart = -1
@@ -195,6 +201,7 @@ func (l *codexResumeLinkifier) resetCapture() {
 	l.captureEscapeStart = -1
 	l.awaitingResumeLine = false
 	l.prefixMatch = 0
+	l.reconnectPrefixMatch = 0
 	l.sessionPrefixMatch = 0
 }
 

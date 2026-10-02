@@ -78,6 +78,51 @@ func TestCodexResumeLinkifierLinksStandaloneSessionIDAcrossChunks(t *testing.T) 
 	}
 }
 
+func TestCodexResumeLinkifierLinksReconnectInstructionsAcrossChunks(t *testing.T) {
+	const id = "01a0fac4-73ff-7592-9184-47b8bea04ed5"
+	for name, input := range map[string]string{
+		"disconnect notice": "Disconnected from this task. Any running work continues.\r\nTo reconnect, run:\r\n  codex resume " + id + "\r\nStop the current turn: run codex agents, select this task, and press x.\r\nToken usage so far: total=537,830\r\nbuild " + testCodexResumeID + " complete\r\n",
+		"inline":            "To reconnect, run codex resume " + id + "\n",
+		"styled":            "\x1b[2mTo reconnect,\x1b[0m run:\r\n  \x1b[1mcodex resume\x1b[0m " + id + "\r\n",
+		"control boundary":  "To reconnect, run:\r\n  codex resume " + id + "\x1b]777;vuja;prompt-start\a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for split := 0; split <= len(input); split++ {
+				var observed []string
+				linkifier := newCodexResumeLinkifier(func(sessionID string) string {
+					observed = append(observed, sessionID)
+					return "vuja://codex-resume/" + sessionID
+				})
+				got := string(linkifier.Transform([]byte(input[:split]))) +
+					string(linkifier.Transform([]byte(input[split:]))) + string(linkifier.Flush())
+				if len(observed) != 1 || observed[0] != id || strings.Count(got, "vuja://codex-resume/"+id) != 1 {
+					t.Fatalf("split %d: expected exactly the reconnect session to be linked; observed %v, output %q", split, observed, got)
+				}
+				wantLink := "\x1b]8;id=vuja-codex-" + id + ";vuja://codex-resume/" + id + "\x1b\\" + id + "\x1b]8;;\x1b\\"
+				if !strings.Contains(got, wantLink) {
+					t.Fatalf("split %d: expected hyperlink to enclose only the session ID, got %q", split, got)
+				}
+				if visible := stripCodexResumeLinks(got); visible != input {
+					t.Fatalf("split %d: hyperlinks changed output\nwant: %q\n got: %q", split, input, visible)
+				}
+			}
+			linkifier := newCodexResumeLinkifier(func(sessionID string) string {
+				return "vuja://codex-resume/" + sessionID
+			})
+			var streamed strings.Builder
+			for i := range input {
+				streamed.Write(linkifier.Transform([]byte(input[i : i+1])))
+			}
+			if pending := linkifier.Flush(); len(pending) != 0 {
+				t.Fatalf("expected completed instruction/control traffic to leave no pending output, got %q", pending)
+			}
+			if got := streamed.String(); strings.Count(got, "vuja://codex-resume/"+id) != 1 || stripCodexResumeLinks(got) != input {
+				t.Fatalf("expected one-byte streaming to preserve and link the instruction, got %q", got)
+			}
+		})
+	}
+}
+
 func TestCodexResumeLinkifierRecognizesANSIStyledInstructionAcrossChunks(t *testing.T) {
 	input := "\x1b[2mTo continue this session,\x1b[0m run \x1b[1mcodex resume\x1b[0m " + testCodexResumeID + "\r\n"
 	linkifier := newCodexResumeLinkifier(func(id string) string {

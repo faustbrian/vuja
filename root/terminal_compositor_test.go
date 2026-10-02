@@ -3205,6 +3205,56 @@ func screenLine(screen *vt.Emulator, row int) string {
 	return norm.NFD.String(strings.TrimRight(line.String(), " "))
 }
 
+func TestTerminalModelHyperlinksPreserveWireFieldsAcrossSurfaces(t *testing.T) {
+	for _, fixture := range []struct {
+		uri, params string
+	}{
+		{uri: "https://example.com"},
+		{uri: "file:///tmp/example", params: "id=file"},
+		{uri: "vuja://codex-resume/" + testCodexResumeID, params: "id=session"},
+	} {
+		t.Run(fixture.uri, func(t *testing.T) {
+			input := "\x1b]8;" + fixture.params + ";" + fixture.uri + "\x1b\\linked\x1b]8;;\x1b\\ plain"
+			want := "\x1b]8;" + fixture.params + ";" + fixture.uri + "\alinked\x1b]8;;\a plain"
+			assertWire := func(surface, got string) {
+				t.Helper()
+				if !strings.Contains(got, want) {
+					t.Fatalf("%s lost the native link target, parameters, or closing boundary: %q", surface, got)
+				}
+			}
+			var out bytes.Buffer
+			c := newTerminalCompositor(&out, "bottom", "links", 80, 8)
+			t.Cleanup(c.Close)
+			c.SetInputBoxTheme(testInputBoxTheme())
+			c.WritePTY(terminalMarkerBytes("links", "prompt-start"))
+			c.WritePTY([]byte("› " + input))
+			c.WritePTY(terminalMarkerBytes("links", "prompt-end"))
+			assertWire("input surface", out.String())
+			assertWire("completed snapshot", c.completedSurfaceContentLine(c.surfaceContentCells[0]))
+			if _, err := c.backdrop.Write([]byte("\x1b[H" + input)); err != nil {
+				t.Fatal(err)
+			}
+			assertWire("restored backdrop", string(c.restoreBackdropRows(0, 1)))
+			model := vt.NewEmulator(80, 2)
+			t.Cleanup(func() { _ = model.Close() })
+			model.SetScrollbackSize(10)
+			for i := range input {
+				if _, err := model.Write([]byte(input[i : i+1])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertWire("live viewport", viewportLine(model, 0, 80, false))
+			if _, err := model.Write([]byte("\r\nsecond\r\nthird")); err != nil {
+				t.Fatal(err)
+			}
+			if model.ScrollbackLen() == 0 {
+				t.Fatal("expected linked row in retained history")
+			}
+			assertWire("retained viewport", viewportLine(model, 0, 80, true))
+		})
+	}
+}
+
 func applyTerminalOutput(t *testing.T, output []byte, width, height int) *vt.Emulator {
 	t.Helper()
 	screen := vt.NewEmulator(width, height)
