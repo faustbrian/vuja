@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const runningAnimationInterval = 80 * time.Millisecond
+
 // Zero disables the timer when no command is active. The next deadline is
 // relative to command start, never the lifetime of the wrapper process.
 func (c *terminalCompositor) NextRunningStatusDelay() time.Duration {
@@ -19,7 +21,7 @@ func (c *terminalCompositor) NextRunningStatusDelay() time.Duration {
 		now = c.now
 	}
 	elapsed := max(now().Sub(c.commandStartedAt), 0)
-	return time.Second - elapsed%time.Second
+	return min(runningAnimationInterval-elapsed%runningAnimationInterval, time.Second-elapsed%time.Second)
 }
 
 // RefreshRunningStatus is driven by the wrapper's input loop, independently of
@@ -47,9 +49,11 @@ func (c *terminalCompositor) commandStatusLines() (int, []string) {
 		if c.now != nil {
 			now = c.now
 		}
-		seconds := int64(max(now().Sub(c.commandStartedAt), 0) / time.Second)
+		elapsed := max(now().Sub(c.commandStartedAt), 0)
+		seconds := int64(elapsed / time.Second)
 		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		segments = append(segments, terminalStatusSegment{name: "running", text: fmt.Sprintf("%s Running · %ds", frames[seconds%int64(len(frames))], seconds), priority: 110, alignment: terminalStatusRight})
+		frame := int64(elapsed/runningAnimationInterval) % int64(len(frames))
+		segments = append(segments, terminalStatusSegment{name: "running", text: fmt.Sprintf("%s Running · %ds", frames[frame], seconds), priority: 110, alignment: terminalStatusRight})
 	}
 	lines := c.renderBarLinesWithBackground(segments, c.surfaceStatusRows, terminalDefaultBackground)
 	for len(lines) < c.surfaceStatusRows {
