@@ -528,14 +528,21 @@ func runWrapper() {
 		return pgrp != shellPGID
 	}
 	var codexResumeActions <-chan string
+	var resumeLinkFor func(string) string
 	codexResumeLinks := newCodexResumeLinkifier(nil)
 	if codexResumeURLHandlerSupported() {
 		if server, serverErr := newCodexResumeActionServer(); serverErr == nil {
 			codexResumeActions = server.Actions()
+			resumeLinkFor = server.Observe
 			codexResumeLinks = newCodexResumeLinkifier(server.Observe)
 			defer server.Close()
 		} else {
 			logger.Debugf("Clickable Codex resume actions unavailable: %v", serverErr)
+		}
+	}
+	if statePath, err := config.StatePath(); err == nil {
+		if err := display.ConfigureOutputRecovery(filepath.Join(filepath.Dir(statePath), "terminal-output"), outputRecoveryPaneID(os.Getenv), resumeLinkFor); err != nil {
+			writeNotification([]byte("[VUJA] output recovery unavailable; live output is unaffected"))
 		}
 	}
 

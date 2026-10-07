@@ -419,7 +419,18 @@ terminal scrollback instead. Suggestion menus retain their page-navigation keys;
 full-screen and cursor-addressed applications retain terminal ownership.
 Vuja releases its alternate screen before handing control to native applications
 and restores the original primary screen when it exits. Retained pinned output
-belongs to the current Vuja session, not the primary terminal scrollback.
+is separate from the primary terminal scrollback. For terminals exporting a
+stable `ITERM_SESSION_ID` or UUID `TERM_SESSION_ID`, completed command output
+is checkpointed before the next prompt and restored in the same pane after a
+process restart or reboot. iTerm pane moves do not change this identity.
+Checkpoints are owner-only files under Vuja's data directory (`terminal-output`),
+bounded to 1 MiB and 10000 rows per pane and the 64 most recently saved panes.
+They contain terminal text (which may include sensitive command output), not
+old resume-action tokens; restored Codex links receive fresh authorization.
+Live, unfinished command output is not checkpointed. Terminals without a stable
+session identifier do not guess ownership from the working directory. Native
+scrollback mode does not create these checkpoints. Recovery is disabled inside
+tmux because its panes inherit the outer terminal's session identifier.
 Completed commands default to `scrollback = "output"`, which omits the submitted
 chatbox from retained history and leaves only the command's output.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen

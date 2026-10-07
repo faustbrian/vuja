@@ -129,6 +129,7 @@ type terminalCompositor struct {
 	hasLastCommandSnapshot  bool
 	now                     func() time.Time
 	viewport                *outputViewport
+	outputRecovery          *outputRecovery
 	viewportCommand         bool
 	viewportPassthrough     bool
 	viewportSuspended       bool
@@ -588,6 +589,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 	}, func(event string) {
 		if !c.layout {
 			if strings.HasPrefix(event, "command-end") {
+				c.checkpointOutputRecovery()
 				c.commandStartedAt = time.Time{}
 				select {
 				case c.runningStatusWake <- struct{}{}:
@@ -661,6 +663,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				}
 			}
 			c.finishCommandOutput(exitCode)
+			c.checkpointOutputRecovery()
 			select {
 			case c.runningStatusWake <- struct{}{}:
 			default:

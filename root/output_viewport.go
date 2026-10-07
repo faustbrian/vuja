@@ -53,6 +53,7 @@ func (c *terminalCompositor) ensureOutputViewport() {
 		v := &outputViewport{model: model, done: make(chan struct{}), dirty: true}
 		c.viewport = v
 		go func() { _, _ = io.Copy(io.Discard, model); close(v.done) }()
+		c.restoreOutputRecovery()
 	} else if c.viewport.model.Width() != c.width || c.viewport.model.Height() != rows {
 		c.viewport.model.Resize(c.width, rows)
 		_, _ = c.viewport.model.Write([]byte("\x1b[r"))
