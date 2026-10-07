@@ -334,13 +334,7 @@ func prepareHistoryEntries(entries []HistoryEntry) {
 
 func sortHistoryEntries(entries []HistoryEntry) {
 	sort.SliceStable(entries, func(i, j int) bool {
-		if !entries[i].StartedAt.Equal(entries[j].StartedAt) {
-			return entries[i].StartedAt.After(entries[j].StartedAt)
-		}
-		if entries[i].HistoryOrder != entries[j].HistoryOrder {
-			return entries[i].HistoryOrder > entries[j].HistoryOrder
-		}
-		return entries[i].ID > entries[j].ID
+		return historyEntryNewer(entries[i], entries[j])
 	})
 }
 

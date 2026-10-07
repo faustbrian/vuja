@@ -65,15 +65,27 @@ func PublishCanonicalHistory(entries []HistoryEntry) {
 	commandIndex := buildHistoryCommandIndex(commands)
 	statIndex := buildHistoryStatIndex(stats)
 	entryIndex := make(map[string]int, len(entries))
+	commandEntryIndex := make(map[string]int, len(commands))
+	statEntryIndex := make(map[string]int, len(stats))
 	for index := range entries {
 		entryIndex[entries[index].ID] = index
+		command := entries[index].NormalizedCommand
+		if _, exists := commandEntryIndex[command]; !exists {
+			commandEntryIndex[command] = index
+		}
+		key := historyStatKey(command, entries[index].Cwd)
+		if _, exists := statEntryIndex[key]; !exists {
+			statEntryIndex[key] = index
+		}
 	}
 	mu.Lock()
 	richHistoryEntries = entries
 	historyCache = commands
 	historyCommandIndex = commandIndex
+	historyCommandEntryIndex = commandEntryIndex
 	historyStatsCache = stats
 	historyStatIndex = statIndex
+	historyStatEntryIndex = statEntryIndex
 	historyEventCount = canonicalHistoryOccurrenceCount(entries)
 	historyEntryIndex = entryIndex
 	idMapCache = ids
@@ -103,7 +115,10 @@ func publishCanonicalHistoryEntry(entry HistoryEntry) bool {
 	mu.Lock()
 	index, existed := historyEntryIndex[entry.ID]
 	oldCommand := ""
+	orderChanged := false
 	if existed {
+		oldEntry := richHistoryEntries[index]
+		orderChanged = !oldEntry.StartedAt.Equal(entry.StartedAt) || oldEntry.HistoryOrder != entry.HistoryOrder
 		oldCommand = strings.TrimSpace(richHistoryEntries[index].NormalizedCommand)
 		if oldCommand == "" {
 			oldCommand = strings.TrimSpace(richHistoryEntries[index].Command)
@@ -111,10 +126,26 @@ func publishCanonicalHistoryEntry(entry HistoryEntry) bool {
 		richHistoryEntries[index] = entry
 	}
 	if !existed {
-		historyEntryIndex[entry.ID] = len(richHistoryEntries)
+		index = len(richHistoryEntries)
+		historyEntryIndex[entry.ID] = index
 		richHistoryEntries = append(richHistoryEntries, entry)
 	}
-	if existed && oldCommand != command {
+	if existed && (oldCommand != command || orderChanged) {
+		// Identity/recency corrections are rare. Rebuild their complete
+		// generation, since another occurrence may now be the newest one.
+		sortHistoryEntries(richHistoryEntries)
+		historyCommandEntryIndex = make(map[string]int)
+		historyStatEntryIndex = make(map[string]int)
+		for position, current := range richHistoryEntries {
+			historyEntryIndex[current.ID] = position
+			if _, exists := historyCommandEntryIndex[current.NormalizedCommand]; !exists {
+				historyCommandEntryIndex[current.NormalizedCommand] = position
+			}
+			key := historyStatKey(current.NormalizedCommand, current.Cwd)
+			if _, exists := historyStatEntryIndex[key]; !exists {
+				historyStatEntryIndex[key] = position
+			}
+		}
 		commands, stats, ids := buildCanonicalSearchCache(richHistoryEntries)
 		historyCache = commands
 		historyCommandIndex = buildHistoryCommandIndex(commands)
@@ -131,13 +162,23 @@ func publishCanonicalHistoryEntry(entry HistoryEntry) bool {
 	if !hasCommand {
 		commandIndex = -1
 	}
-	candidateOrderChanged := commandIndex < 0 || (!existed && commandIndex > 0)
+	newestIndex, hasNewest := historyCommandEntryIndex[command]
+	candidateOrderChanged := !hasNewest || historyEntryNewer(entry, richHistoryEntries[newestIndex])
 	if candidateOrderChanged {
+		historyCommandEntryIndex[command] = index
 		commands = append([]string(nil), historyCache...)
 		if commandIndex >= 0 {
 			commands = append(commands[:commandIndex], commands[commandIndex+1:]...)
 		}
-		commands = append([]string{command}, commands...)
+		// Use execution time, not arrival time: journal replay and cross-window
+		// updates can arrive after newer executions. Existing repeated commands
+		// retain their newest occurrence, including deterministic tie-breaks.
+		position := sort.Search(len(commands), func(i int) bool {
+			return historyEntryNewer(entry, richHistoryEntries[historyCommandEntryIndex[commands[i]]])
+		})
+		commands = append(commands, "")
+		copy(commands[position+1:], commands[position:])
+		commands[position] = command
 	}
 	ids := idMapCache
 	if candidateOrderChanged {
@@ -161,7 +202,9 @@ func publishCanonicalHistoryEntry(entry HistoryEntry) bool {
 	} else if !existed {
 		stats[statIndex].Count += max(entry.Occurrences, 1)
 	}
-	if !entry.StartedAt.Before(stats[statIndex].LastUsed) {
+	newestStatIndex, hasNewestStat := historyStatEntryIndex[statKey]
+	if !hasNewestStat || newestStatIndex == index || historyEntryNewer(entry, richHistoryEntries[newestStatIndex]) {
+		historyStatEntryIndex[statKey] = index
 		stats[statIndex].LastUsed = entry.StartedAt
 		stats[statIndex].ExitCode = entry.ExitCode
 		stats[statIndex].HasExitCode = entry.HasExitCode
@@ -235,12 +278,13 @@ func buildCanonicalSearchCache(entries []HistoryEntry) ([]string, []HistoryStat,
 
 		key := command + "\x00" + strings.TrimSpace(entry.Cwd)
 		stat := byCommandAndDirectory[key]
-		if stat == nil {
+		newStat := stat == nil
+		if newStat {
 			stat = &HistoryStat{Command: command, Cwd: strings.TrimSpace(entry.Cwd), Source: entry.Source}
 			byCommandAndDirectory[key] = stat
 		}
 		stat.Count += max(entry.Occurrences, 1)
-		if entry.StartedAt.After(stat.LastUsed) || stat.LastUsed.IsZero() {
+		if newStat || entry.StartedAt.After(stat.LastUsed) {
 			stat.LastUsed = entry.StartedAt
 			stat.ExitCode = entry.ExitCode
 			stat.HasExitCode = entry.HasExitCode

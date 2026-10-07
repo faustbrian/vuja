@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/faustbrian/vuja/spec"
 )
 
 func TestFrecencyStore_RecordAndQueryLocal(t *testing.T) {
@@ -1587,6 +1589,266 @@ func TestFrecencyStoreCompletionCountsFailedExecutionsInCanonicalFrequency(t *te
 	}
 	if len(entries) != 1 || entries[0].Count != 1 {
 		t.Fatalf("expected failed execution to contribute one frequency event, got %+v", entries)
+	}
+}
+
+func TestFrecencyStoreLateCompletionReconcilesInterruptedEventExactlyOnce(t *testing.T) {
+	for _, exitCode := range []int{0, 255} {
+		t.Run(fmt.Sprint(exitCode), func(t *testing.T) {
+			store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+			submission := HistoryEvent{
+				EventKey: "vuja:late", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api",
+				Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja", SessionID: "old-session",
+			}
+			if err := store.RecordHistorySubmission(t.Context(), submission); err != nil {
+				t.Fatal(err)
+			}
+			abandoned := submission
+			abandoned.EventKey = "vuja:abandoned"
+			if err := store.RecordHistorySubmission(t.Context(), abandoned); err != nil {
+				t.Fatal(err)
+			}
+			if count, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil || count != 2 {
+				t.Fatalf("reconcile: count=%d err=%v", count, err)
+			}
+			completion := submission
+			completion.Command, completion.NormalizedCommand, completion.Cwd = "echo changed", "echo changed", "/wrong"
+			completion.HasExitCode, completion.ExitCode = true, exitCode
+			completion.CompletedAt, completion.Duration = started.Add(3*time.Second), 3*time.Second
+			if changed, err := store.CompleteHistoryEvent(t.Context(), completion); err != nil || !changed {
+				t.Fatalf("late completion rejected: changed=%t err=%v", changed, err)
+			}
+			completion.ExitCode = 127 // A repeat must preserve the first durable outcome.
+			if changed, err := store.CompleteHistoryEvent(t.Context(), completion); err != nil || changed {
+				t.Fatalf("duplicate completion was not a no-op: changed=%t err=%v", changed, err)
+			}
+			var cmd, cwd string
+			var count, successes, failures int
+			if err := store.db.QueryRowContext(t.Context(), `SELECT cmd, cwd, count FROM history_entries`).Scan(&cmd, &cwd, &count); err != nil {
+				t.Fatal(err)
+			}
+			if cmd != submission.Command || cwd != submission.Cwd || count != 1 {
+				t.Fatalf("late completion rewrote identity or inflated frequency: cmd=%q cwd=%q count=%d", cmd, cwd, count)
+			}
+			if err := store.db.QueryRowContext(t.Context(), `SELECT successes, failures FROM command_outcomes`).Scan(&successes, &failures); err != nil {
+				t.Fatal(err)
+			}
+			if successes+failures != 1 || (exitCode == 0 && successes != 1) || (exitCode != 0 && failures != 1) {
+				t.Fatalf("late completion inflated or changed outcomes: success=%d failure=%d", successes, failures)
+			}
+			events, err := store.QueryHistoryEventsByKeys(t.Context(), []string{submission.EventKey, abandoned.EventKey})
+			if err != nil || len(events) != 2 {
+				t.Fatalf("query recovered events: count=%d err=%v", len(events), err)
+			}
+			for _, event := range events {
+				if event.EventKey == abandoned.EventKey && (event.State != "interrupted" || event.HasExitCode) {
+					t.Fatal("invented an outcome for an abandoned command")
+				}
+				if event.EventKey == submission.EventKey && (!event.HasExitCode || event.ExitCode != exitCode || event.Duration != 3*time.Second) {
+					t.Fatal("duplicate completion rewrote durable outcome")
+				}
+			}
+		})
+	}
+}
+
+func TestFrecencyStoreLateCompletionPreservesNewerSignals(t *testing.T) {
+	for _, oldExit := range []int{0, 255} {
+		t.Run(fmt.Sprint(oldExit), func(t *testing.T) {
+			store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+			old := HistoryEvent{EventKey: "vuja:old", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api", Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja", SessionID: "old-session"}
+			completePredecessor := func(event HistoryEvent) {
+				t.Helper()
+				event.EventKey += ":previous"
+				event.Command, event.NormalizedCommand = "go env", "go env"
+				event.StartedAt, event.SubmittedAt = event.StartedAt.Add(-time.Minute), event.StartedAt.Add(-time.Minute)
+				if err := store.RecordHistorySubmission(t.Context(), event); err != nil {
+					t.Fatal(err)
+				}
+				event.CompletedAt, event.HasExitCode, event.ExitCode = event.StartedAt.Add(time.Second), true, 0
+				if _, err := store.CompleteHistoryEvent(t.Context(), event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			completePredecessor(old)
+			if err := store.RecordHistorySubmission(t.Context(), old); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil {
+				t.Fatal(err)
+			}
+			newer := old
+			newer.EventKey, newer.SessionID = "vuja:newer", "new-session"
+			newer.StartedAt, newer.SubmittedAt = started.Add(time.Hour), started.Add(time.Hour)
+			newer.CompletedAt, newer.HasExitCode = newer.StartedAt.Add(time.Second), true
+			completePredecessor(newer)
+			if err := store.RecordHistorySubmission(t.Context(), newer); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CompleteHistoryEvent(t.Context(), newer); err != nil {
+				t.Fatal(err)
+			}
+			latest := newer
+			latest.EventKey, latest.Command, latest.NormalizedCommand = "vuja:latest", "echo latest", "echo latest"
+			latest.StartedAt, latest.SubmittedAt = newer.StartedAt.Add(time.Minute), newer.StartedAt.Add(time.Minute)
+			latest.CompletedAt = latest.StartedAt.Add(time.Second)
+			if oldExit == 0 {
+				latest.ExitCode = 1
+			}
+			if err := store.RecordHistorySubmission(t.Context(), latest); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CompleteHistoryEvent(t.Context(), latest); err != nil {
+				t.Fatal(err)
+			}
+			old.CompletedAt, old.HasExitCode, old.ExitCode = started.Add(time.Second), true, oldExit
+			if _, err := store.CompleteHistoryEvent(t.Context(), old); err != nil {
+				t.Fatal(err)
+			}
+			for _, table := range []string{"history_entries", "command_outcomes"} {
+				var lastUsed string
+				if err := store.db.QueryRowContext(t.Context(), "SELECT last_used FROM "+table+" WHERE cmd = ? AND cwd = ?", old.Command, old.Cwd).Scan(&lastUsed); err != nil {
+					t.Fatal(err)
+				}
+				if !parseKnownTimestamp(lastUsed).Equal(newer.CompletedAt) {
+					t.Errorf("%s recency rolled back to %s", table, lastUsed)
+				}
+			}
+			values, err := store.QueryArgumentValues(t.Context(), "/repo", "/repo", "ssh", 1, "forge@", 10)
+			if err != nil || len(values) != 1 || !values[0].LastUsed.Equal(newer.CompletedAt) {
+				t.Errorf("argument recency rolled back: values=%+v err=%v", values, err)
+			}
+			failure, present := store.QueryRecentFailure(t.Context(), "/repo", 0)
+			if oldExit == 0 && (!present || failure.Command != latest.Command || !failure.FailedAt.Equal(latest.CompletedAt)) {
+				t.Errorf("old success erased newer failure: %+v present=%t", failure, present)
+			}
+			if oldExit != 0 && present {
+				t.Errorf("old failure resurrected after newer success: %+v", failure)
+			}
+			exact, _ := store.QueryExactTransitionsWithFallback(t.Context(), "go env", "/repo")
+			if len(exact) != 1 || !exact[0].LastUsed.Equal(newer.CompletedAt) {
+				t.Errorf("exact transition recency rolled back: %+v", exact)
+			}
+			skeletons, _ := store.QueryTransitionsWithFallback(t.Context(), ExtractSkeleton("go env"), "/repo")
+			if len(skeletons) != 1 || !skeletons[0].LastUsed.Equal(newer.CompletedAt) {
+				t.Errorf("skeleton transition recency rolled back: %+v", skeletons)
+			}
+		})
+	}
+}
+
+func TestFrecencyStoreLateCompletionRepairsSuccessorTransitions(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "history.db")
+	store, err := NewFrecencyStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+	commands := []string{"git status", "go test ./...", "npm run build"}
+	events := make([]HistoryEvent, 3)
+	for i, command := range commands {
+		events[i] = HistoryEvent{EventKey: fmt.Sprintf("vuja:middle:%d", i), Command: command, NormalizedCommand: command, Cwd: "/repo", SubmittedAt: started.Add(time.Duration(i) * time.Minute), StartedAt: started.Add(time.Duration(i) * time.Minute), Source: "vuja", SessionID: "old-session"}
+		if err := store.RecordHistorySubmission(t.Context(), events[i]); err != nil {
+			t.Fatal(err)
+		}
+		events[i].CompletedAt, events[i].HasExitCode = events[i].StartedAt.Add(time.Second), true
+	}
+	if _, err := store.CompleteHistoryEvent(t.Context(), events[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteHistoryEvent(t.Context(), events[2]); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := store.CompleteHistoryEvent(t.Context(), events[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewFrecencyStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for i := range 2 {
+		exact, _ := store.QueryExactTransitionsWithFallback(t.Context(), commands[i], "/repo")
+		if len(exact) != 1 || exact[0].NextCommand != commands[i+1] || exact[0].Count != 1 {
+			t.Errorf("incorrect exact adjacency from %q: %+v", commands[i], exact)
+		}
+		skeletons, _ := store.QueryTransitionsWithFallback(t.Context(), ExtractSkeleton(commands[i]), "/repo")
+		if len(skeletons) != 1 || skeletons[0].NextSkeleton != ExtractSkeleton(commands[i+1]) || skeletons[0].Count != 1 {
+			t.Errorf("incorrect skeleton adjacency from %q: %+v", commands[i], skeletons)
+		}
+	}
+}
+
+func TestFrecencyStoreLateTransitionRepairKeepsAliasAndQuotedCommands(t *testing.T) {
+	previousSpec, existed := spec.Registry["git"]
+	previousAliases := spec.GetAliasesCopy()
+	spec.Register(&spec.Spec{Name: "git", Subcommands: []spec.Subcommand{{Name: "status"}}})
+	spec.ShellAliases = map[string]string{"gs": "git status"}
+	t.Cleanup(func() {
+		if existed {
+			spec.Registry["git"] = previousSpec
+		} else {
+			delete(spec.Registry, "git")
+		}
+		spec.ShellAliases = previousAliases
+	})
+	for _, successor := range []string{"gs", `"git" status`} {
+		t.Run(successor, func(t *testing.T) {
+			store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+			commands := []string{"echo one", "pwd", successor}
+			events := make([]HistoryEvent, 3)
+			for i, command := range commands {
+				events[i] = HistoryEvent{EventKey: fmt.Sprintf("vuja:alias:%d", i), Command: command, NormalizedCommand: command, Cwd: "/repo", SubmittedAt: started.Add(time.Duration(i) * time.Minute), StartedAt: started.Add(time.Duration(i) * time.Minute), Source: "vuja", SessionID: "old-session"}
+				if err := store.RecordHistorySubmission(t.Context(), events[i]); err != nil {
+					t.Fatal(err)
+				}
+				events[i].CompletedAt, events[i].HasExitCode = events[i].StartedAt.Add(time.Second), true
+			}
+			if _, err := store.CompleteHistoryEvent(t.Context(), events[0]); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CompleteHistoryEvent(t.Context(), events[2]); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CompleteHistoryEvent(t.Context(), events[1]); err != nil {
+				t.Fatal(err)
+			}
+			first, _ := store.QueryTransitionsWithFallback(t.Context(), "echo", "/repo")
+			if len(first) != 1 || first[0].NextSkeleton != "pwd" || first[0].Count != 1 {
+				t.Errorf("obsolete bypass remains: %+v", first)
+			}
+			next, _ := store.QueryTransitionsWithFallback(t.Context(), "pwd", "/repo")
+			if len(next) != 1 || next[0].NextSkeleton != "git status" || next[0].Count != 1 {
+				t.Errorf("normalized successor lost during repair: %+v", next)
+			}
+		})
 	}
 }
 

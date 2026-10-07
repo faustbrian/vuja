@@ -12,20 +12,22 @@ import (
 )
 
 var (
-	historyCache        []string
-	historyCommandIndex map[string]int
-	historyStatsCache   []HistoryStat
-	historyStatIndex    map[string]int
-	historyEventCount   int
-	historyEntryIndex   map[string]int
-	idMapCache          map[string]int
-	searcherCache       *fuzzy.Searcher
-	mu                  sync.RWMutex
-	historySearchMu     sync.Mutex
-	lastSearchQuery     string
-	lastSearchAliases   string
-	lastSearchResults   []HistResult
-	lastSearchTruncated bool
+	historyCache             []string
+	historyCommandIndex      map[string]int
+	historyCommandEntryIndex map[string]int
+	historyStatsCache        []HistoryStat
+	historyStatIndex         map[string]int
+	historyStatEntryIndex    map[string]int
+	historyEventCount        int
+	historyEntryIndex        map[string]int
+	idMapCache               map[string]int
+	searcherCache            *fuzzy.Searcher
+	mu                       sync.RWMutex
+	historySearchMu          sync.Mutex
+	lastSearchQuery          string
+	lastSearchAliases        string
+	lastSearchResults        []HistResult
+	lastSearchTruncated      bool
 )
 
 func RecordSessionCommand(cmd string) {
@@ -212,7 +214,9 @@ func historyCommandEligible(command, query string, requireSubcommand bool) bool 
 func init() {
 	historyEntryIndex = make(map[string]int)
 	historyCommandIndex = make(map[string]int)
+	historyCommandEntryIndex = make(map[string]int)
 	historyStatIndex = make(map[string]int)
+	historyStatEntryIndex = make(map[string]int)
 	idMapCache = make(map[string]int)
 	searcherCache = fuzzy.NewPlainSearcher(nil)
 }

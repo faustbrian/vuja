@@ -264,3 +264,94 @@ func TestCanonicalHistoryPublicationOwnsItsImmutableGeneration(t *testing.T) {
 		t.Fatalf("expected publication to own an immutable generation, got %+v", snapshot)
 	}
 }
+
+func TestCanonicalHistoryIncrementalPublicationPreservesExecutionRecency(t *testing.T) {
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	now := time.Date(2026, time.October, 7, 11, 0, 0, 0, time.UTC)
+	entries := []HistoryEntry{{ID: "newer", Command: "ssh forge@new", StartedAt: now, Source: "vuja"}}
+	PublishCanonicalHistory(entries)
+	// Prime the incremental query cache before a historical event arrives.
+	if _, err := SearchHistory("ssh", nil); err != nil {
+		t.Fatal(err)
+	}
+	updates := []HistoryEntry{
+		{ID: "older", Command: "ssh forge@old", StartedAt: now.Add(-time.Hour), Source: "vuja"},
+		{ID: "old-repeat", Command: "ssh forge@old", StartedAt: now.Add(-2 * time.Hour), Cwd: "/other", Source: "vuja"},
+		{ID: "tie-a", Command: "ssh forge@tie-a", StartedAt: now, HistoryOrder: 1, Source: "vuja"},
+		{ID: "tie-b", Command: "ssh forge@tie-b", StartedAt: now, HistoryOrder: 1, Source: "vuja"},
+		{ID: "newest", Command: "ssh forge@old", StartedAt: now.Add(time.Hour), Source: "vuja"},
+		{ID: "newest", Command: "ssh forge@old", StartedAt: now.Add(-3 * time.Hour), Source: "vuja", State: HistoryStateCompleted},
+		{ID: "newest", Command: "ssh forge@corrected", StartedAt: now.Add(2 * time.Hour), Source: "vuja"},
+	}
+	want := [][]string{
+		{"ssh forge@new", "ssh forge@old"},
+		{"ssh forge@new", "ssh forge@old"},
+		{"ssh forge@tie-a", "ssh forge@new", "ssh forge@old"},
+		{"ssh forge@tie-b", "ssh forge@tie-a", "ssh forge@new", "ssh forge@old"},
+		{"ssh forge@old", "ssh forge@tie-b", "ssh forge@tie-a", "ssh forge@new"},
+		{"ssh forge@tie-b", "ssh forge@tie-a", "ssh forge@new", "ssh forge@old"},
+		{"ssh forge@corrected", "ssh forge@tie-b", "ssh forge@tie-a", "ssh forge@new", "ssh forge@old"},
+	}
+	for i, entry := range updates {
+		PublishCanonicalHistoryEntry(entry)
+		for _, query := range []string{"", "ssh", "ssh forge@"} {
+			results, err := SearchHistory(query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commands := make([]string, len(results))
+			for j, result := range results {
+				commands[j] = result.Cmd
+			}
+			if !reflect.DeepEqual(commands, want[i]) {
+				t.Fatalf("update %s query %q: execution order=%v want=%v", entry.ID, query, commands, want[i])
+			}
+		}
+	}
+}
+
+func TestCanonicalHistoryRecoveredTieCannotReplaceNewerOutcome(t *testing.T) {
+	original := RichHistorySnapshot()
+	t.Cleanup(func() { PublishCanonicalHistory(original) })
+	for _, testCase := range []struct{ higherOrder, unknownTime bool }{{}, {true, false}, {false, true}, {true, true}} {
+		t.Run(fmt.Sprint(testCase), func(t *testing.T) {
+			now := time.Date(2026, time.October, 7, 11, 0, 0, 0, time.UTC)
+			if testCase.unknownTime {
+				now = time.Time{}
+			}
+			newer := HistoryEntry{ID: "z-newer", Command: "ssh forge@same", Cwd: "/repo", StartedAt: now, Source: "vuja", HasExitCode: true, ExitCode: 1, Duration: time.Second}
+			older := newer
+			older.ID, older.ExitCode = "a-older", 0
+			older.Duration, older.Source = 2*time.Second, "zsh"
+			if testCase.higherOrder {
+				newer.ID, older.ID = "a-newer", "z-older"
+				newer.HistoryOrder = 2
+				older.HistoryOrder = 1
+			}
+			PublishCanonicalHistory([]HistoryEntry{newer})
+			PublishCanonicalHistoryEntry(older)
+			stats := HistorySnapshot()
+			if len(stats) != 1 || stats[0].Count != 2 || !stats[0].HasExitCode || stats[0].ExitCode != 1 || stats[0].Duration != time.Second || stats[0].Source != "vuja" {
+				t.Fatalf("older recovered outcome replaced newer failure: %+v", stats)
+			}
+			results, err := SearchHistoryWithOptions("ssh", nil, HistorySearchOptions{SuccessfulOnly: true})
+			if err != nil || len(results) != 0 {
+				t.Fatalf("failed command leaked into successful recall: %+v err=%v", results, err)
+			}
+			PublishCanonicalHistory([]HistoryEntry{older, newer})
+			stats = HistorySnapshot()
+			if len(stats) != 1 || stats[0].Count != 2 || stats[0].ExitCode != 1 || stats[0].Duration != time.Second || stats[0].Source != "vuja" {
+				t.Fatalf("full publication lost newer outcome: %+v", stats)
+			}
+			// The real newest event may subsequently receive a known outcome.
+			newer.ExitCode = 0
+			newer.Duration = 3 * time.Second
+			PublishCanonicalHistoryEntry(newer)
+			stats = HistorySnapshot()
+			if len(stats) != 1 || stats[0].Count != 2 || stats[0].ExitCode != 0 || stats[0].Duration != 3*time.Second {
+				t.Fatalf("newest completion did not replace its own outcome: %+v", stats)
+			}
+		})
+	}
+}

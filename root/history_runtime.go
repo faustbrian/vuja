@@ -293,6 +293,10 @@ func replayHistoryRecoveryJournal(store *scoring.FrecencyStore) error {
 }
 
 func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.FrecencyStore, maxRecords int) (bool, error) {
+	return replayHistoryRecoveryJournalBatchObserved(ctx, store, maxRecords, nil)
+}
+
+func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scoring.FrecencyStore, maxRecords int, publish func(context.Context, *scoring.FrecencyStore, []string) error) (bool, error) {
 	if store == nil {
 		return true, nil
 	}
@@ -338,6 +342,7 @@ func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.Frece
 	malformed := 0
 	processedOffset := offset
 	processedRecords := 0
+	var recoveredKeys []string
 	reportMalformed := func() {
 		if malformed == 0 {
 			return
@@ -347,6 +352,12 @@ func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.Frece
 		malformed = 0
 	}
 	checkpoint := func() error {
+		if publish != nil && len(recoveredKeys) > 0 {
+			if err := publish(ctx, store, recoveredKeys); err != nil {
+				return err
+			}
+			recoveredKeys = nil
+		}
 		if err := writeHistoryRecoveryOffset(processedOffset); err != nil {
 			return err
 		}
@@ -372,6 +383,8 @@ func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.Frece
 			} else if err := replayHistoryRecoveryRecord(ctx, store, record); err != nil {
 				checkpointErr := checkpoint()
 				return false, errors.Join(err, checkpointErr)
+			} else if publish != nil {
+				recoveredKeys = append(recoveredKeys, record.Entry.ID)
 			}
 		}
 		processedOffset = nextOffset
@@ -392,6 +405,11 @@ func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.Frece
 		}
 	}
 	reportMalformed()
+	if publish != nil && len(recoveredKeys) > 0 {
+		if err := publish(ctx, store, recoveredKeys); err != nil {
+			return false, err
+		}
+	}
 	// Reset the checkpoint durably before truncation. If the process exits
 	// between these writes, a later replay can only repeat idempotent records;
 	// it can never skip newly appended records based on a stale offset.
@@ -606,9 +624,16 @@ func initializeCanonicalHistory(sessionID string) (*scoring.FrecencyStore, error
 	if err != nil {
 		return nil, err
 	}
+	return prepareCanonicalHistory(store, sessionID)
+}
+
+func prepareCanonicalHistory(store *scoring.FrecencyStore, sessionID string) (*scoring.FrecencyStore, error) {
 	store.SetHistoryChangeOrigin(sessionID)
 	if err := replayHistoryRecoveryJournal(store); err != nil {
-		return nil, err
+		// Retain the journal for retry without making a healthy database
+		// unavailable to new submissions and existing-history reads.
+		recordHistoryPersistenceFailure()
+		logger.Errorf("failed to replay history recovery during initialization: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

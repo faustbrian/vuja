@@ -516,6 +516,11 @@ CREATE INDEX IF NOT EXISTS idx_history_events_normalized_command
 ON history_events(normalized_command COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_history_events_state_session
 ON history_events(state, session_id);
+CREATE INDEX IF NOT EXISTS idx_history_events_session
+ON history_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_history_events_cwd_completion
+ON history_events(cwd, completed_at)
+WHERE imported = 0 AND state IN ('completed', 'failed');
 
 CREATE TABLE IF NOT EXISTS history_changes (
     sequence   INTEGER PRIMARY KEY AUTOINCREMENT,

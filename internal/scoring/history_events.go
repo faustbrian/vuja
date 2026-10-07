@@ -715,7 +715,9 @@ WHERE event_key = ? AND imported = 0
 	if state == "completed" || state == "failed" {
 		return false, tx.Commit()
 	}
-	if state != "submitted" && state != "running" {
+	// Interrupted is inferred when a session disappears, not a known outcome.
+	// A delayed durable completion can still resolve it exactly once.
+	if state != "submitted" && state != "running" && state != "interrupted" {
 		return false, fmt.Errorf("history event %q cannot complete from state %q", event.EventKey, state)
 	}
 	normalizedCommand = strings.TrimSpace(normalizedCommand)
@@ -739,7 +741,7 @@ WHERE event_key = ? AND imported = 0
 	result, err := tx.ExecContext(ctx, `
 UPDATE history_events
 SET completed_at = ?, duration_ns = ?, exit_code = ?, state = ?
-WHERE event_key = ? AND imported = 0 AND state IN ('submitted', 'running')
+WHERE event_key = ? AND imported = 0 AND state IN ('submitted', 'running', 'interrupted')
 `, canonicalTimestamp(event.CompletedAt), event.Duration.Nanoseconds(), event.ExitCode, event.State, event.EventKey)
 	if err != nil {
 		return false, err
@@ -755,7 +757,7 @@ INSERT INTO history_entries (cmd, cwd, count, last_used)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(cmd, cwd) DO UPDATE SET
     count = count + excluded.count,
-    last_used = excluded.last_used
+    last_used = MAX(history_entries.last_used, excluded.last_used)
 	`, normalizedCommand, cwd, 1, canonicalTimestamp(event.CompletedAt)); err != nil {
 		return false, err
 	}
@@ -769,15 +771,26 @@ VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(cmd, cwd) DO UPDATE SET
     successes = successes + excluded.successes,
     failures = failures + excluded.failures,
-    last_used = excluded.last_used
+    last_used = MAX(command_outcomes.last_used, excluded.last_used)
 	`, normalizedCommand, cwd, successes, failures, canonicalTimestamp(event.CompletedAt)); err != nil {
 		return false, err
 	}
-	if event.ExitCode == 0 {
+	var newerCompletion bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM history_events
+    WHERE cwd = ? AND imported = 0 AND state IN ('completed', 'failed')
+      AND completed_at >= ? AND (completed_at > ? OR rowid > ?)
+)
+`, cwd, canonicalTimestamp(event.CompletedAt), canonicalTimestamp(event.CompletedAt), currentRowID).Scan(&newerCompletion); err != nil {
+		return false, err
+	}
+	if !newerCompletion && event.ExitCode == 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recent_failures WHERE cwd = ?`, cwd); err != nil {
 			return false, err
 		}
-	} else if _, err := tx.ExecContext(ctx, `
+	} else if !newerCompletion {
+		if _, err := tx.ExecContext(ctx, `
 INSERT INTO recent_failures (cwd, cmd, exit_code, failed_at)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(cwd) DO UPDATE SET
@@ -785,7 +798,8 @@ ON CONFLICT(cwd) DO UPDATE SET
     exit_code = excluded.exit_code,
     failed_at = excluded.failed_at
 	`, cwd, normalizedCommand, event.ExitCode, canonicalTimestamp(event.CompletedAt)); err != nil {
-		return false, err
+			return false, err
+		}
 	}
 	if event.ExitCode == 0 {
 		tokens := spec.Tokenize(normalizedCommand)
@@ -803,7 +817,7 @@ INSERT INTO argument_values (scope, position, value, cwd, last_used)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(scope, position, value, cwd) DO UPDATE SET
     count = count + 1,
-    last_used = excluded.last_used
+    last_used = MAX(argument_values.last_used, excluded.last_used)
 			`, scope, position, value, cwd, canonicalTimestamp(event.CompletedAt)); err != nil {
 				return false, err
 			}
@@ -862,7 +876,7 @@ ORDER BY rowid DESC
 LIMIT 1
 `, currentRowID, sessionID).Scan(&previousCommand)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return repairCanonicalSuccessorTransitions(ctx, tx, currentRowID, sessionID, "", strings.TrimSpace(nextCommand), cwd)
 	}
 	if err != nil {
 		return err
@@ -882,7 +896,7 @@ INSERT INTO exact_command_transitions (prev_command, next_command, cwd, count, l
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(prev_command, next_command, cwd) DO UPDATE SET
     count = count + excluded.count,
-    last_used = excluded.last_used
+    last_used = MAX(exact_command_transitions.last_used, excluded.last_used)
 `, previousCommand, nextCommand, cwd, count, lastUsed); err != nil {
 		return err
 	}
@@ -891,14 +905,128 @@ ON CONFLICT(prev_command, next_command, cwd) DO UPDATE SET
 	if previousSkeleton == "" || nextSkeleton == "" {
 		return nil
 	}
-	_, err = tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO command_transitions (prev_skeleton, next_skeleton, cwd, count, last_used)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(prev_skeleton, next_skeleton, cwd) DO UPDATE SET
     count = count + excluded.count,
-    last_used = excluded.last_used
-`, previousSkeleton, nextSkeleton, cwd, count, lastUsed)
-	return err
+    last_used = MAX(command_transitions.last_used, excluded.last_used)
+`, previousSkeleton, nextSkeleton, cwd, count, lastUsed); err != nil {
+		return err
+	}
+	return repairCanonicalSuccessorTransitions(ctx, tx, currentRowID, sessionID, previousCommand, nextCommand, cwd)
+}
+
+type canonicalTransitionPair struct {
+	previous, next, cwd string
+}
+
+type canonicalTransitionAggregate struct {
+	count  int
+	found  bool
+	latest time.Time
+}
+
+// A delayed completion inserts a command into an already learned chain.
+// Repair just the affected edges, leaving other directories and pairs alone.
+func repairCanonicalSuccessorTransitions(ctx context.Context, tx *sql.Tx, rowID int64, sessionID, previous, command, cwd string) error {
+	var successor, successorCwd string
+	err := tx.QueryRowContext(ctx, `
+SELECT normalized_command, cwd FROM history_events
+WHERE rowid > ? AND session_id = ? AND imported = 0 AND state IN ('completed', 'failed')
+ORDER BY rowid ASC LIMIT 1
+`, rowID, sessionID).Scan(&successor, &successorCwd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pairs := []canonicalTransitionPair{{command, successor, successorCwd}}
+	if previous != "" {
+		pairs = append(pairs, canonicalTransitionPair{previous, command, cwd}, canonicalTransitionPair{previous, successor, successorCwd})
+	}
+	exact, skeletons := make(map[canonicalTransitionPair]*canonicalTransitionAggregate), make(map[canonicalTransitionPair]*canonicalTransitionAggregate)
+	for _, skeleton := range []bool{false, true} {
+		target := exact
+		if skeleton {
+			target = skeletons
+		}
+		for _, pair := range pairs {
+			if skeleton {
+				pair.previous, pair.next = ExtractSkeleton(pair.previous), ExtractSkeleton(pair.next)
+			}
+			if pair.previous == "" || pair.next == "" {
+				continue
+			}
+			target[pair] = &canonicalTransitionAggregate{}
+		}
+	}
+	// Scan the affected directories once, using their completion index.
+	// Stored aliases and quoted roots cannot be filtered by a skeleton prefix:
+	// they must pass through the same parser as ordinary transition learning.
+	rows, err := tx.QueryContext(ctx, `
+SELECT n.normalized_command, n.cwd, n.state, n.completed_at,
+       (SELECT p.normalized_command FROM history_events p
+        WHERE p.rowid < n.rowid AND p.session_id = n.session_id
+          AND p.imported = 0 AND p.state IN ('completed', 'failed')
+        ORDER BY p.rowid DESC LIMIT 1)
+FROM history_events n
+WHERE n.cwd IN (?, ?) AND n.imported = 0 AND n.session_id <> ''
+  AND n.state IN ('completed', 'failed')
+`, cwd, successorCwd)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var next, directory, state, completed string
+		var previous sql.NullString
+		if err := rows.Scan(&next, &directory, &state, &completed, &previous); err != nil {
+			return err
+		}
+		if !previous.Valid {
+			continue
+		}
+		for _, aggregate := range []*canonicalTransitionAggregate{
+			exact[canonicalTransitionPair{previous.String, next, directory}],
+			skeletons[canonicalTransitionPair{ExtractSkeleton(previous.String), ExtractSkeleton(next), directory}],
+		} {
+			if aggregate == nil {
+				continue
+			}
+			aggregate.found = true
+			if state == "completed" {
+				aggregate.count++
+			}
+			aggregate.latest = laterHistoryTimestamp(aggregate.latest, parseKnownTimestamp(completed))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, projection := range []struct {
+		table, previousColumn, nextColumn string
+		pairs                             map[canonicalTransitionPair]*canonicalTransitionAggregate
+	}{
+		{"exact_command_transitions", "prev_command", "next_command", exact},
+		{"command_transitions", "prev_skeleton", "next_skeleton", skeletons},
+	} {
+		for pair, aggregate := range projection.pairs {
+			if !aggregate.found {
+				_, err = tx.ExecContext(ctx, "DELETE FROM "+projection.table+" WHERE "+projection.previousColumn+" = ? AND "+projection.nextColumn+" = ? AND cwd = ?", pair.previous, pair.next, pair.cwd)
+			} else {
+				_, err = tx.ExecContext(ctx, "INSERT INTO "+projection.table+" ("+projection.previousColumn+", "+projection.nextColumn+", cwd, count, last_used) VALUES (?, ?, ?, ?, ?) ON CONFLICT("+projection.previousColumn+", "+projection.nextColumn+", cwd) DO UPDATE SET count = excluded.count, last_used = excluded.last_used", pair.previous, pair.next, pair.cwd, aggregate.count, canonicalTimestamp(aggregate.latest))
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (f *FrecencyStore) ReconcileInterruptedHistory(ctx context.Context, activeSessionID string, otherLiveSessionIDs ...string) (int64, error) {

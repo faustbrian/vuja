@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
@@ -44,10 +45,10 @@ func historyRecoveryJournalPending() (bool, error) {
 }
 
 // retryHistoryRecoveryOnce moves one bounded batch from the fsynced fallback
-// journal into the canonical SQLite store. The in-memory event was published
-// before the shell was allowed to execute, so only derived ranking state must
-// be invalidated after replay; other sessions observe the same database writes
-// through the canonical change feed.
+// journal into SQLite and the current recall generation. Previous-session
+// records may not have been published locally, and the change feed excludes
+// this process's own writes. Publication precedes checkpoint advancement so
+// a failed refresh remains eligible for idempotent retry.
 func retryHistoryRecoveryOnce(ctx context.Context, store *scoring.FrecencyStore) (bool, error) {
 	if store == nil {
 		return false, nil
@@ -56,12 +57,38 @@ func retryHistoryRecoveryOnce(ctx context.Context, store *scoring.FrecencyStore)
 	if err != nil || !pending {
 		return false, err
 	}
-	if _, err := replayHistoryRecoveryJournalBatch(ctx, store, historyRecoveryRetryBatch); err != nil {
+	// Keep the same lock order as history clear: generation, then journal.
+	canonicalHistoryMutationMu.Lock()
+	defer canonicalHistoryMutationMu.Unlock()
+	if _, err := replayHistoryRecoveryJournalBatchObserved(ctx, store, historyRecoveryRetryBatch, publishRecoveredHistoryLocked); err != nil {
 		return false, err
 	}
 	scoring.InvalidateSignalCache()
 	spec.NotifyCompletionUpdate()
 	return true, nil
+}
+
+func publishRecoveredHistoryLocked(ctx context.Context, store *scoring.FrecencyStore, keys []string) error {
+	events, err := store.QueryHistoryEventsByKeys(ctx, keys)
+	if err != nil {
+		return err
+	}
+	unique := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		unique[key] = true
+	}
+	if len(events) != len(unique) {
+		// Concurrent retention or a reset removed a replayed event. Reload the
+		// retained generation instead of resurrecting its journal payload.
+		_, err := publishCanonicalStoreHistoryLocked(ctx, store)
+		return err
+	}
+	for _, event := range events {
+		integration.PublishCanonicalHistoryEntry(historyEventEntry(event))
+	}
+	scoring.InvalidateSignalCache()
+	spec.NotifyCompletionUpdate()
+	return nil
 }
 
 func startHistoryRecoveryRetry(store *scoring.FrecencyStore) func() {

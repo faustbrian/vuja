@@ -14,6 +14,7 @@ import (
 	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/spec"
 	"golang.org/x/sys/unix"
 )
 
@@ -549,6 +550,299 @@ func TestRecoveryJournalReplayCheckpointsWithoutLosingLaterRecords(t *testing.T)
 	info, err := os.Stat(journalPath)
 	if err != nil || info.Size() != 0 {
 		t.Fatalf("expected checkpointed replay to drain the journal, info=%v err=%v", info, err)
+	}
+}
+
+func TestRecoveryJournalCompletesInterruptedEventAndRecoversFollowingCommands(t *testing.T) {
+	for _, exitCode := range []int{0, 255} {
+		t.Run(fmt.Sprint(exitCode), func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+			original := integration.RichHistorySnapshot()
+			t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
+			databasePath := filepath.Join(t.TempDir(), "history.db")
+			store, err := scoring.NewFrecencyStore(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+			entry := integration.HistoryEntry{
+				ID: "vuja:late-completion", Command: "ssh forge@old", NormalizedCommand: "ssh forge@old",
+				Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja",
+				SessionID: "old-session", State: integration.HistoryStateRunning,
+			}
+			if err := store.RecordHistorySubmission(t.Context(), scoringHistoryEvent(entry)); err != nil {
+				t.Fatal(err)
+			}
+			if count, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil || count != 1 {
+				t.Fatalf("reconcile interrupted event: count=%d err=%v", count, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			entry.CompletedAt = started.Add(3 * time.Second)
+			entry.Duration = 3 * time.Second
+			entry.ExitCode, entry.HasExitCode = exitCode, true
+			entry.State = integration.HistoryStateCompleted
+			if exitCode != 0 {
+				entry.State = integration.HistoryStateFailed
+			}
+			// Duplicate durable records must not inflate completion projections.
+			for range 2 {
+				if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+					t.Fatal(err)
+				}
+			}
+			following := entry
+			following.ID = "vuja:following"
+			following.Command, following.NormalizedCommand = "ssh forge@new", "ssh forge@new"
+			following.SubmittedAt, following.StartedAt = started.Add(time.Minute), started.Add(time.Minute)
+			following.CompletedAt = following.StartedAt.Add(3 * time.Second)
+			if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, following); err != nil {
+				t.Fatal(err)
+			}
+			store, err = scoring.NewFrecencyStore(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if drained, err := replayHistoryRecoveryJournalBatch(t.Context(), store, 1); err != nil || drained {
+				t.Fatalf("late completion did not checkpoint before following records: drained=%t err=%v", drained, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = scoring.NewFrecencyStore(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovered, err := retryHistoryRecoveryOnce(t.Context(), store); err != nil || !recovered {
+				t.Fatalf("late completion blocked history recovery: recovered=%t err=%v", recovered, err)
+			}
+			events, err := store.QueryAllHistoryEvents(t.Context())
+			if err != nil || len(events) != 2 {
+				t.Fatalf("expected both queued events: events=%+v err=%v", events, err)
+			}
+			for _, event := range events {
+				if event.State != entry.State || !event.HasExitCode || event.ExitCode != exitCode || event.Duration != entry.Duration || event.Occurrences != 1 {
+					t.Fatalf("durable outcome was not recovered: %+v", event)
+				}
+			}
+			counts, err := store.QueryLocal(t.Context(), "/repo", "ssh", 10)
+			if err != nil || len(counts) != 2 {
+				t.Fatalf("expected recovered ranking evidence: entries=%+v err=%v", counts, err)
+			}
+			for _, count := range counts {
+				if count.Count != 1 {
+					t.Fatalf("duplicate completion inflated frequency: %+v", count)
+				}
+			}
+			if pending, err := historyRecoveryJournalPending(); err != nil || pending {
+				t.Fatalf("recovery backlog was not drained: pending=%t err=%v", pending, err)
+			}
+			if recovered, err := retryHistoryRecoveryOnce(t.Context(), store); err != nil || recovered {
+				t.Fatalf("drained journal should be idle: recovered=%t err=%v", recovered, err)
+			}
+			if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if results, err := integration.SearchHistory("ssh", nil); err != nil || len(results) != 2 {
+				t.Fatalf("recovered commands unavailable in recall: count=%d err=%v", len(results), err)
+			}
+		})
+	}
+}
+
+func TestCanonicalHistoryRemainsUsableWhenRecoveryReplayFails(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	original := integration.RichHistorySnapshot()
+	t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
+	oldCwd := spec.GetCWD()
+	spec.SetShellCWD(t.TempDir())
+	t.Cleanup(func() { spec.SetShellCWD(oldCwd) })
+	cfg := config.Get()
+	oldImport := cfg.Suggestions.ImportZoxide
+	cfg.Suggestions.ImportZoxide = false
+	t.Cleanup(func() { cfg.Suggestions.ImportZoxide = oldImport })
+	store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+	entry := integration.HistoryEntry{
+		ID: "vuja:unknown", Command: "ssh forge@existing", NormalizedCommand: "ssh forge@existing",
+		Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja",
+		State: integration.HistoryStateUnknown,
+	}
+	if err := store.RecordHistoryEvent(t.Context(), scoringHistoryEvent(entry)); err != nil {
+		t.Fatal(err)
+	}
+	entry.CompletedAt, entry.Duration = started.Add(time.Second), time.Second
+	entry.HasExitCode, entry.State = true, integration.HistoryStateCompleted
+	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+		t.Fatal(err)
+	}
+	journalPath, err := historyRecoveryJournalPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := prepareCanonicalHistory(store, "new-session")
+	if err != nil || ready != store {
+		t.Fatalf("replay failure discarded healthy SQLite: ready=%v err=%v", ready != nil, err)
+	}
+	results, err := integration.SearchHistory("ssh", nil)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("existing recall unavailable after replay failure: count=%d err=%v", len(results), err)
+	}
+	next := entry
+	next.ID, next.Command, next.NormalizedCommand = "vuja:new", "ssh forge@new", "ssh forge@new"
+	next.HasExitCode, next.State = false, integration.HistoryStateRunning
+	if persisted, journaled := persistHistorySubmissionDurably(ready, next); !persisted || journaled {
+		t.Fatalf("healthy SQLite submission fell back to journal: persisted=%t journaled=%t", persisted, journaled)
+	}
+	if recovered, err := retryHistoryRecoveryOnce(t.Context(), ready); err == nil || recovered {
+		t.Fatalf("invalid state should remain visible and retryable: recovered=%t err=%v", recovered, err)
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("failed replay lost queued history: err=%v", err)
+	}
+	events, err := ready.QueryAllHistoryEvents(t.Context())
+	if err != nil || len(events) != 2 {
+		t.Fatalf("expected existing and new durable events: count=%d err=%v", len(events), err)
+	}
+	for _, event := range events {
+		if event.EventKey == entry.ID && (event.State != integration.HistoryStateUnknown || event.HasExitCode) {
+			t.Fatal("failed recovery rewrote unknown state")
+		}
+	}
+}
+
+func TestRecoveryJournalRetryPublishesOwnOriginAfterStartupFailure(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	original := integration.RichHistorySnapshot()
+	t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
+	store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.SetHistoryChangeOrigin("new-session")
+	started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+	entry := integration.HistoryEntry{ID: "vuja:retry", Command: "ssh forge@retry", NormalizedCommand: "ssh forge@retry", Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja", SessionID: "old-session", State: integration.HistoryStateRunning}
+	if err := store.RecordHistorySubmission(t.Context(), scoringHistoryEvent(entry)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileInterruptedHistory(t.Context(), "new-session"); err != nil {
+		t.Fatal(err)
+	}
+	// A cancelled startup replay leaves the old interrupted generation visible.
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	entry.HasExitCode, entry.State = true, integration.HistoryStateCompleted
+	entry.CompletedAt, entry.Duration = started.Add(time.Second), time.Second
+	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+		t.Fatal(err)
+	}
+	following := entry
+	following.ID, following.Command, following.NormalizedCommand = "vuja:retry-new", "ssh forge@queued", "ssh forge@queued"
+	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, following); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replayHistoryRecoveryJournalBatch(cancelled, store, 1); err == nil {
+		t.Fatal("expected startup replay obstacle")
+	}
+	newer := entry
+	newer.ID, newer.Command, newer.NormalizedCommand = "vuja:newer", "ssh forge@newest", "ssh forge@newest"
+	newer.SubmittedAt, newer.StartedAt = started.Add(time.Hour), started.Add(time.Hour)
+	newer.CompletedAt = newer.StartedAt.Add(time.Second)
+	if err := store.RecordHistorySubmission(t.Context(), scoringHistoryEvent(newer)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteHistoryEvent(t.Context(), scoringHistoryEvent(newer)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	cursor := historySyncStartCursor(store)
+	if recovered, err := retryHistoryRecoveryOnce(t.Context(), store); err != nil || !recovered {
+		t.Fatalf("retry: recovered=%t err=%v", recovered, err)
+	}
+	if _, _, err := syncCanonicalHistoryOnce(t.Context(), store, "new-session", cursor); err != nil {
+		t.Fatal(err)
+	}
+	entries := integration.RichHistorySnapshot()
+	if len(entries) != 3 {
+		t.Fatalf("expected healed and queued history, got %+v", entries)
+	}
+	for _, recovered := range entries {
+		if recovered.State != integration.HistoryStateCompleted || !recovered.HasExitCode || recovered.Duration != time.Second {
+			t.Fatalf("recovered snapshot remained stale: %+v", recovered)
+		}
+	}
+	for _, query := range []string{"", "ssh"} {
+		results, err := integration.SearchHistory(query, nil)
+		if err != nil || len(results) != 3 || results[0].Cmd != "ssh forge@newest" {
+			t.Fatalf("recovery changed execution order for %q: results=%+v err=%v", query, results, err)
+		}
+	}
+}
+
+func TestRecoveryJournalPublicationFailureRetainsCheckpointForRetry(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	original := integration.RichHistorySnapshot()
+	t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
+	store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	started := time.Date(2026, time.October, 7, 1, 0, 0, 0, time.UTC)
+	entry := integration.HistoryEntry{ID: "vuja:publication", Command: "ssh forge@publication", NormalizedCommand: "ssh forge@publication", Cwd: "/repo", SubmittedAt: started, StartedAt: started, CompletedAt: started.Add(time.Second), Duration: time.Second, HasExitCode: true, State: integration.HistoryStateCompleted, Source: "vuja"}
+	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+		t.Fatal(err)
+	}
+	path, err := historyRecoveryJournalPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	canonicalHistoryMutationMu.Lock()
+	_, replayErr := replayHistoryRecoveryJournalBatchObserved(ctx, store, 1, func(ctx context.Context, store *scoring.FrecencyStore, keys []string) error {
+		cancel() // Completion committed; the real publication query now fails.
+		return publishRecoveredHistoryLocked(ctx, store, keys)
+	})
+	canonicalHistoryMutationMu.Unlock()
+	if !errors.Is(replayErr, context.Canceled) {
+		t.Fatalf("expected publication cancellation, got %v", replayErr)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("publication failure discarded journal: %v", err)
+	}
+	if pending, err := historyRecoveryJournalPending(); err != nil || !pending {
+		t.Fatalf("publication failure acknowledged pending records: pending=%t err=%v", pending, err)
+	}
+	if recovered, err := retryHistoryRecoveryOnce(t.Context(), store); err != nil || !recovered {
+		t.Fatalf("retry publication: recovered=%t err=%v", recovered, err)
+	}
+	results, err := integration.SearchHistory("ssh forge@publication", nil)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("completion not recallable after retry: count=%d err=%v", len(results), err)
+	}
+	counts, err := store.QueryLocal(t.Context(), "/repo", "ssh", 10)
+	if err != nil || len(counts) != 1 || counts[0].Count != 1 {
+		t.Fatalf("publication retry duplicated usage: counts=%+v err=%v", counts, err)
 	}
 }
 
