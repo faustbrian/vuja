@@ -909,7 +909,7 @@ func (c *terminalCompositor) SetStatusSnapshot(snapshot statusSnapshot) {
 }
 
 func statusSnapshotsEqual(left, right statusSnapshot) bool {
-	if left.Directory != right.Directory || left.CommandContext != right.CommandContext || left.RepositoryRoot != right.RepositoryRoot ||
+	if left.Directory != right.Directory || left.CommandContext != right.CommandContext || left.CodexAccount != right.CodexAccount || left.RepositoryRoot != right.RepositoryRoot ||
 		left.DirectoryReadOnly != right.DirectoryReadOnly || left.Git != right.Git ||
 		left.Package != right.Package || left.Shell != right.Shell || left.Session != right.Session ||
 		left.Contexts != right.Contexts || !left.StaleSince.Equal(right.StaleSince) || left.CPU != right.CPU ||
@@ -1741,6 +1741,7 @@ func (c *terminalCompositor) completedCommandMode() string {
 
 func statusSnapshotMetadataEqual(left, right statusSnapshot) bool {
 	return left.Directory == right.Directory &&
+		left.CodexAccount == right.CodexAccount &&
 		left.RepositoryRoot == right.RepositoryRoot &&
 		left.DirectoryReadOnly == right.DirectoryReadOnly &&
 		left.Git == right.Git &&
@@ -2336,6 +2337,10 @@ func (c *terminalCompositor) inputBoxSegmentsForSnapshot(
 			add(name, c.repositoryAwarePath(snapshot), 90)
 			if snapshot.DirectoryReadOnly {
 				add("directory-read-only", "read-only", 95)
+			}
+		case "codex-account":
+			if safeCodexAccount(snapshot.CodexAccount) {
+				add(name, "Codex "+snapshot.CodexAccount, 100)
 			}
 		case "package":
 			value := strings.TrimSpace(strings.Join([]string{snapshot.Package.Name, snapshot.Package.Version}, " "))

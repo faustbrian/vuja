@@ -251,13 +251,26 @@ func (c *terminalCompositor) viewportBadgeTitleLine() string {
 	}
 	_, start, width := c.viewportBadge()
 	left, _, right := splitStatusSegments(c.inputBoxBarSegments(c.chatboxConfig.Title))
-	leftText := ansi.Truncate(c.renderStatusSegments(left), max(start-terminalInputHorizontalPadding, 0), "…")
-	rightText := ansi.Truncate(c.renderStatusSegments(right), max(c.width-start-width-terminalInputHorizontalPadding, 0), "…")
+	leftText := c.renderStatusSegmentsWithin(left, max(start-terminalInputHorizontalPadding, 0))
+	rightText := c.renderStatusSegmentsWithin(right, max(c.width-start-width-terminalInputHorizontalPadding, 0))
 	// The temporary navigation badge owns the center; metadata side groups get
 	// bounded space rather than being partially overwritten by the badge.
 	return terminalDefaultBackground + strings.Repeat(" ", terminalInputHorizontalPadding) +
 		leftText + terminalDefaultBackground + strings.Repeat(" ", max(c.width-2*terminalInputHorizontalPadding-ansi.StringWidth(leftText)-ansi.StringWidth(rightText), 0)) +
 		rightText + terminalDefaultBackground + strings.Repeat(" ", terminalInputHorizontalPadding)
+}
+
+// Fit each side of the frozen viewport badge using the same semantic priorities
+// as the ordinary title, rather than truncating away its highest-value suffix.
+func (c *terminalCompositor) renderStatusSegmentsWithin(segments []terminalStatusSegment, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	for len(segments) > 1 && statusSegmentWidth(segments, c.chatboxConfig.Separator) > width {
+		remove := lowestPriorityStatusSegment(segments)
+		segments = append(segments[:remove], segments[remove+1:]...)
+	}
+	return ansi.Truncate(c.renderStatusSegments(segments), width, "…")
 }
 
 func (c *terminalCompositor) appendViewportSnapshot() {

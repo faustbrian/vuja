@@ -36,6 +36,7 @@ func DefaultConfig() *Config {
 				PathColorMode:     "hierarchy",
 				PathMaxSegments:   6,
 				HistorySpacing:    1,
+				CodexAccount:      true,
 				TitleLeft:         []string{"directory"},
 				TitleRight:        []string{"package", "versions"},
 				StatusLeft:        []string{"session", "git-branch", "git-status", "git-added", "git-deleted", "git-stash", "git-lines", "environment", "version-mismatch", "contexts", "stale"},

@@ -361,6 +361,7 @@ func runWrapper() {
 	status := newStatusEngine(statusEngineOptions{
 		OnUpdate:         display.SetStatusSnapshot,
 		MetricHysteresis: config.Get().UI.Chatbox.MetricHysteresis,
+		CodexAccount:     managedStatus && config.Get().UI.Chatbox.CodexAccount,
 		Metrics: managedStatus && config.Get().UI.Chatbox.Metrics != "never" &&
 			(slices.Contains(statusSegments, "cpu") || slices.Contains(statusSegments, "memory")),
 		GitLines:    managedStatus && slices.Contains(statusSegments, "git-lines"),
@@ -1976,6 +1977,10 @@ func newTerminalMarkerIDFrom(reader io.Reader) string {
 
 func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 	chatbox := cfg.UI.Chatbox
+	titleRight := append([]string(nil), chatbox.TitleRight...)
+	if chatbox.CodexAccount {
+		titleRight = append(titleRight, "codex-account")
+	}
 	return terminalChatboxConfig{
 		Prompt:          chatbox.Prompt,
 		Separator:       chatbox.Separator,
@@ -1988,7 +1993,7 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 		PathMaxSegments: chatbox.PathMaxSegments,
 		HistorySpacing:  chatbox.HistorySpacing,
 		Title: terminalChatboxBarConfig{
-			Left: chatbox.TitleLeft, Center: chatbox.TitleCenter, Right: chatbox.TitleRight,
+			Left: chatbox.TitleLeft, Center: chatbox.TitleCenter, Right: titleRight,
 		},
 		Status: terminalChatboxBarConfig{
 			Left: chatbox.StatusLeft, Center: chatbox.StatusCenter, Right: chatbox.StatusRight,
@@ -2029,7 +2034,7 @@ func terminalChatboxColors(colors config.ChatboxColorsConfig) map[string]string 
 		"git-behind": colors.GitBehind, "git-added": colors.GitAdded,
 		"git-deleted": colors.GitDeleted, "git-stash": colors.GitStash,
 		"git-lines-added": colors.GitLinesAdded, "git-lines-deleted": colors.GitLinesDeleted,
-		"session": colors.Session, "session-warning": colors.SessionWarning,
+		"session": colors.Session, "codex-account": colors.Session, "session-warning": colors.SessionWarning,
 		"session-critical": colors.SessionCritical, "contexts": colors.Contexts,
 		"environment": colors.Environment, "version-mismatch": colors.VersionMismatch,
 		"package": colors.Package, "stale": colors.Stale, "jobs": colors.Jobs,

@@ -443,8 +443,24 @@ environment metadata.
 command output. Terminal applications own the number of retained scrollback
 lines; Vuja therefore does not expose a misleading completed-item retention
 limit.
+The Codex account email appears at the right end of the title bar by default,
+including with existing custom layouts. Set `[ui.chatbox]` `codex-account = false`
+to hide it and stop credential reads. It uses the display email in the ID token
+from `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), refreshed off the
+render path at `refresh-interval`, even with metrics disabled. Missing, malformed,
+API-key-only, or unavailable file credentials hide the element; they do not mean
+Codex is logged out. Keyring-only and ephemeral credentials are not probed.
+This is cached account metadata, not a check that the login is still valid.
+Full metadata snapshots may retain the displayed email, never credentials or
+tokens. Full-screen applications continue to own their screen; the account is
+part of Vuja's title bar, not an overlay on Codex. Narrow widths truncate or
+collapse title metadata; the account survives before directory and versions.
+Its color follows `ui.chatbox.colors.session`. Config preview uses a fictional
+account and never reads credentials.
+
 Each row has independent left, center, and right regions. Empty all three
-arrays for a row to hide it. The finite built-in segments are `directory`,
+arrays for a row to hide it (also disable `codex-account` for the title).
+The finite built-in segments are `directory`,
 `package`, `versions`, `session`, `git-branch`, `git-status`, `git-added`,
 `git-deleted`, `git-stash`, `git-lines`, `environment`, `version-mismatch`,
 `contexts`, `stale`, `jobs`, `duration`, `exit`, `cpu`, and `memory`; a segment

@@ -244,6 +244,11 @@ func renderConfigPreview(cfg *config.Config, preset string, width int, mode stri
 	if slices.Contains(cfg.UI.Chatbox.TitleRight, "versions") {
 		title += "                                      Go 1.26.0"
 	}
+	if cfg.UI.Chatbox.CodexAccount {
+		account := clip("Codex person@example.test", width)
+		title = clip(title, max(width-ansi.StringWidth(account)-2, 0))
+		title += strings.Repeat(" ", max(width-ansi.StringWidth(title)-ansi.StringWidth(account), 0)) + account
+	}
 	left := previewStatusValues(cfg.UI.Chatbox.StatusLeft)
 	right := previewStatusValues(cfg.UI.Chatbox.StatusRight)
 	status := strings.Join(left, cfg.UI.Chatbox.Separator)

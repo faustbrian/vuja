@@ -70,6 +70,7 @@ type ChatboxConfig struct {
 	PathColorMode     string              `toml:"path-color-mode"`
 	PathMaxSegments   int                 `toml:"path-max-segments"`
 	HistorySpacing    int                 `toml:"history-spacing"`
+	CodexAccount      bool                `toml:"codex-account"`
 	Status            []string            `toml:"status,omitempty"` // Legacy single-row layout.
 	TitleLeft         []string            `toml:"title-left"`
 	TitleCenter       []string            `toml:"title-center"`

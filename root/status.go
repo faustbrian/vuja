@@ -41,6 +41,7 @@ type statusSnapshot struct {
 	Revision          uint64
 	Directory         string
 	CommandContext    string
+	CodexAccount      string
 	RepositoryRoot    string
 	DirectoryReadOnly bool
 	Git               gitStatusSnapshot
@@ -69,6 +70,7 @@ type statusEngineOptions struct {
 	OnUpdate         func(statusSnapshot)
 	Sample           func() (float64, float64)
 	Metrics          bool
+	CodexAccount     bool
 	MetricHysteresis float64
 	GitLines         bool
 	Session          bool
@@ -93,6 +95,7 @@ type statusEngine struct {
 	onUpdate         func(statusSnapshot)
 	sample           func() (float64, float64)
 	metrics          bool
+	codexAccountHome string
 	metricHysteresis float64
 	gitLines         bool
 	session          bool
@@ -173,7 +176,7 @@ func newStatusEngine(options statusEngineOptions) *statusEngine {
 	if metricHysteresis <= 0 {
 		metricHysteresis = defaultMetricHysteresis
 	}
-	return &statusEngine{
+	engine := &statusEngine{
 		run: run, onUpdate: options.OnUpdate, sample: sample, metrics: options.Metrics,
 		gitLines: options.GitLines, session: options.Session, gitStash: options.GitStash,
 		projectPackage: options.Package, contexts: options.Contexts, environment: options.Environment,
@@ -187,6 +190,10 @@ func newStatusEngine(options statusEngineOptions) *statusEngine {
 		projects:     make(map[string]cachedProjectVersions),
 		repositories: make(map[string]cachedRepositoryStatus),
 	}
+	if options.CodexAccount {
+		engine.codexAccountHome = codexAccountHome()
+	}
+	return engine
 }
 
 func (e *statusEngine) Close() {
@@ -202,12 +209,13 @@ func (e *statusEngine) Close() {
 }
 
 func (e *statusEngine) StartMetrics(interval time.Duration) {
-	if interval <= 0 || !e.metrics {
+	if interval <= 0 || (!e.metrics && e.codexAccountHome == "") {
 		return
 	}
 	e.metricWG.Add(1)
 	go func() {
 		defer e.metricWG.Done()
+		e.refreshCodexAccount()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -215,7 +223,10 @@ func (e *statusEngine) StartMetrics(interval time.Duration) {
 			case <-e.ctx.Done():
 				return
 			case <-ticker.C:
-				e.refreshMetrics()
+				e.refreshCodexAccount()
+				if e.metrics {
+					e.refreshMetrics()
+				}
 			}
 		}
 	}()
@@ -537,6 +548,7 @@ func (e *statusEngine) commitSnapshot(directory string, next statusSnapshot) boo
 	e.mu.Lock()
 	next.ExitCode = e.snapshot.ExitCode
 	next.Duration = e.snapshot.Duration
+	next.CodexAccount = e.snapshot.CodexAccount
 	e.revision++
 	next.Revision = e.revision
 	e.snapshot = next
