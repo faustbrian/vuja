@@ -318,7 +318,10 @@ func (h *sessionHealthProjection) observeProvider(ctx context.Context, observati
 }
 
 func providerHealthLabel(source health.Source) string {
-	labels := [...]string{"History", "Rendering", "Files", "Completion", "History suggestions", "Workspace", "Project suggestions", "Directories", "Arguments", "Recovery suggestions", "Ranking", "AI", "Npm scripts", "Make targets", "Just recipes"}
+	labels := [...]string{"History", "Rendering", "Files", "Completion", "History suggestions", "Workspace", "Project suggestions", "Directories", "Arguments", "Recovery suggestions", "Ranking", "AI", "Npm scripts", "Make targets", "Just recipes",
+		"Git commits", "Git branches", "Git remotes", "Git tags", "Git stashes", "Pip packages",
+		"Pacman packages", "Yay packages", "Paru packages", "Debian packages", "RPM packages", "Brew packages",
+		"Processes", "Docker containers", "Docker running containers", "Docker images", "Zoxide suggestions"}
 	return labels[source]
 }
 

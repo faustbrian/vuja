@@ -29,6 +29,23 @@ const (
 	NpmScripts
 	MakeTargets
 	JustRecipes
+	GitCommits
+	GitBranches
+	GitRemotes
+	GitTags
+	GitStashes
+	PipInstalled
+	PackagesPacman
+	PackagesYay
+	PackagesParu
+	PackagesDebian
+	PackagesRPM
+	PackagesBrew
+	Processes
+	DockerContainersAll
+	DockerContainersRunning
+	DockerImages
+	ZoxideCompletion
 	SourceCount
 )
 
@@ -75,7 +92,7 @@ func Report(ctx context.Context, source Source, duration time.Duration, err erro
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout():
 		outcome = TimedOut
-	case errors.Is(err, exec.ErrNotFound) && source == Completion:
+	case errors.Is(err, exec.ErrNotFound) && source.optionalExecutable():
 		outcome = Skipped
 	case errors.Is(err, errors.ErrUnsupported) && source == Completion:
 		outcome = Skipped
@@ -89,6 +106,17 @@ func Report(ctx context.Context, source Source, duration time.Duration, err erro
 	observe(Observation{Source: source, Outcome: outcome, Duration: max(duration, 0), At: time.Now()})
 }
 
+func (s Source) optionalExecutable() bool {
+	switch s {
+	case Completion, GitCommits, GitBranches, GitRemotes, GitTags, GitStashes,
+		PipInstalled, PackagesPacman, PackagesYay, PackagesParu, PackagesDebian,
+		PackagesRPM, PackagesBrew, Processes, DockerContainersAll,
+		DockerContainersRunning, DockerImages, ZoxideCompletion:
+		return true
+	}
+	return false
+}
+
 // A local source taking a quarter second can delay enrichment noticeably;
 // optional AI has a separate allowance for an actual remote model response.
 func SlowThreshold(source Source) time.Duration {
@@ -99,7 +127,10 @@ func SlowThreshold(source Source) time.Duration {
 }
 
 func (s Source) Name() string {
-	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai", "npm-scripts", "make-targets", "just-recipes"}
+	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai", "npm-scripts", "make-targets", "just-recipes",
+		"git-commits", "git-branches", "git-remotes", "git-tags", "git-stashes", "pip-installed",
+		"packages-pacman", "packages-yay", "packages-paru", "packages-debian", "packages-rpm", "packages-brew",
+		"processes", "docker-containers-all", "docker-containers-running", "docker-images", "zoxide-completion"}
 	if s >= SourceCount {
 		return "unknown"
 	}

@@ -6,10 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func dockerContainerGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	cwd := spec.GetCWD()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
@@ -17,6 +19,7 @@ func dockerContainerGenerator(ctx context.Context, tokens []string, _ string, _ 
 	cmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--format={{.Names}}")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+	health.Report(ctx, health.DockerContainersAll, time.Since(started), err)
 	if err != nil {
 		return nil
 	}
@@ -33,6 +36,7 @@ func dockerContainerGenerator(ctx context.Context, tokens []string, _ string, _ 
 }
 
 func dockerRunningContainerGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	cwd := spec.GetCWD()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
@@ -40,6 +44,7 @@ func dockerRunningContainerGenerator(ctx context.Context, tokens []string, _ str
 	cmd := exec.CommandContext(ctx, "docker", "ps", "--format={{.Names}}")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+	health.Report(ctx, health.DockerContainersRunning, time.Since(started), err)
 	if err != nil {
 		return nil
 	}
@@ -56,6 +61,7 @@ func dockerRunningContainerGenerator(ctx context.Context, tokens []string, _ str
 }
 
 func dockerImageGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	cwd := spec.GetCWD()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
@@ -63,6 +69,7 @@ func dockerImageGenerator(ctx context.Context, tokens []string, _ string, _ stri
 	cmd := exec.CommandContext(ctx, "docker", "images", "--format={{.Repository}}:{{.Tag}}")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+	health.Report(ctx, health.DockerImages, time.Since(started), err)
 	if err != nil {
 		return nil
 	}

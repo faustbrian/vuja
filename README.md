@@ -908,7 +908,17 @@ recipes report their own read/parse outcomes separately from project-command
 discovery. Missing optional manifests remain quiet; generic npm fallback scripts
 do not hide an unreadable manifest, and partial Make results do not hide a
 failed scan. A successful uppercase Justfile fallback is a successful recipe
-read. Other built-in command and workspace providers are not yet instrumented.
+read. Process-backed Git inventories, pip packages, installed package-manager
+inventories, process lists, Docker inventories and optional zoxide completion
+also report actual outcomes. Git commits, branches, remotes, tags and stashes
+remain distinct; Docker container and image success cannot hide each other's
+failures. Package-manager aliases share health only when they use the same
+inventory tool. A successful pip3 fallback reports one successful inventory;
+a missing fallback does not hide a failed installed pip. Optional executable
+absence stays quiet, and zoxide failure does not remove local directories.
+Git's optional active-branch priority probe is not treated as a failed primary
+ref inventory. SSH-discovery and workspace metadata outcomes are not yet
+instrumented.
 
 Terminal dimensions and visual recovery counters come from the most recently
 updated session's telemetry. They are **recorded observations**, not a live

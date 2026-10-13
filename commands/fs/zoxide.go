@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 	"github.com/versenilvis/fuzzy"
 )
@@ -36,8 +38,10 @@ func ZoxideGenerator() spec.GeneratorFunc {
 		localSuggestions := spec.FileGenerator("/")(ctx, tokens, prefix, fullQuery)
 
 		var zoxideSuggestions []spec.Suggestion
+		started := time.Now()
 		cmd := exec.CommandContext(ctx, "zoxide", "query", "-l")
 		out, err := cmd.Output()
+		health.Report(ctx, health.ZoxideCompletion, time.Since(started), err)
 		if err == nil {
 			lines := strings.Split(string(bytes.TrimSpace(out)), "\n")
 			var dirs []string

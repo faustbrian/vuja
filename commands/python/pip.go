@@ -2,26 +2,35 @@ package python
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func pipPackageGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "pip", "list", "--format=freeze")
 	out, err := cmd.Output()
 	if err != nil {
+		primaryErr := err
 		// try pip3
 		cmd = exec.CommandContext(ctx, "pip3", "list", "--format=freeze")
 		out, err = cmd.Output()
-		if err != nil {
-			return nil
+		if errors.Is(err, exec.ErrNotFound) && !errors.Is(primaryErr, exec.ErrNotFound) {
+			// A missing fallback must not conceal a failed installed primary.
+			err = primaryErr
 		}
+	}
+	health.Report(ctx, health.PipInstalled, time.Since(started), err)
+	if err != nil {
+		return nil
 	}
 
 	var results []spec.Suggestion

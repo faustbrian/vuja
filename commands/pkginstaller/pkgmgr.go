@@ -6,29 +6,44 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func installedPackageGenerator(pm string) spec.GeneratorFunc {
 	return func(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+		started := time.Now()
 		ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 		defer cancel()
 
 		var cmd *exec.Cmd
+		var source health.Source
 		switch pm {
 		case "pacman", "yay", "paru":
 			cmd = exec.CommandContext(ctx, pm, "-Qq")
+			switch pm {
+			case "pacman":
+				source = health.PackagesPacman
+			case "yay":
+				source = health.PackagesYay
+			case "paru":
+				source = health.PackagesParu
+			}
 		case "apt", "apt-get":
 			cmd = exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${Package}\n")
+			source = health.PackagesDebian
 		case "dnf", "yum":
 			cmd = exec.CommandContext(ctx, "rpm", "-qa", "--qf", "%{NAME}\n")
+			source = health.PackagesRPM
 		case "brew":
 			cmd = exec.CommandContext(ctx, "brew", "list")
+			source = health.PackagesBrew
 		default:
 			return nil
 		}
 
 		out, err := cmd.Output()
+		health.Report(ctx, source, time.Since(started), err)
 		if err != nil {
 			return nil
 		}

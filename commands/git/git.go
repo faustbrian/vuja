@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/workspace"
 	"github.com/faustbrian/vuja/spec"
 )
@@ -23,6 +24,7 @@ func GitTagGenerator(ctx context.Context, tokens []string, _ string, _ string) [
 }
 
 func GitCommitGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	cwd := spec.GetCWD()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
@@ -30,6 +32,7 @@ func GitCommitGenerator(ctx context.Context, tokens []string, _ string, _ string
 	cmd := exec.CommandContext(ctx, "git", "log", "--format=%h [%cr] %s", "-30")
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+	health.Report(ctx, health.GitCommits, time.Since(started), err)
 	if err != nil {
 		return nil
 	}
@@ -56,6 +59,7 @@ func getGitResults(ctx context.Context, tokens []string, args ...string) []spec.
 }
 
 func getGitResultsFiltered(ctx context.Context, tokens []string, localOnly bool, args ...string) []spec.Suggestion {
+	started := time.Now()
 	cwd := spec.GetCWD()
 
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
@@ -64,6 +68,22 @@ func getGitResultsFiltered(ctx context.Context, tokens []string, localOnly bool,
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	out, err := cmd.Output()
+	source := health.SourceCount
+	if len(args) > 0 {
+		switch args[0] {
+		case "branch":
+			source = health.GitBranches
+		case "remote":
+			source = health.GitRemotes
+		case "tag":
+			source = health.GitTags
+		case "stash":
+			source = health.GitStashes
+		}
+	}
+	// Observe the primary inventory before optional branch-priority probes.
+	// Those probes can fail without invalidating the successfully listed refs.
+	health.Report(ctx, source, time.Since(started), err)
 	if err != nil {
 		return nil
 	}

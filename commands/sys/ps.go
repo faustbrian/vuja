@@ -6,16 +6,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func processGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
 	defer cancel()
 
 	// output: "pid command"
 	cmd := exec.CommandContext(ctx, "ps", "-eo", "pid,comm")
 	out, err := cmd.Output()
+	health.Report(ctx, health.Processes, time.Since(started), err)
 	if err != nil {
 		return nil
 	}
