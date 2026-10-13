@@ -1,6 +1,7 @@
 package root
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,6 +30,23 @@ type latencySnapshot struct {
 	RuntimeCaches []cachemetrics.Snapshot       `json:"runtime_caches,omitempty"`
 	Timeouts      uint64                        `json:"timeouts"`
 	Runtime       *runtimeDiagnosticObservation `json:"runtime,omitempty"`
+	Health        *sessionHealthSnapshot        `json:"health,omitempty"`
+}
+
+func (r *latencyRecorder) recordHealth(snapshot sessionHealthSnapshot) {
+	if r == nil {
+		return
+	}
+	for {
+		previous := r.health.Load()
+		if previous != nil && previous.Revision >= snapshot.Revision {
+			return
+		}
+		if r.health.CompareAndSwap(previous, &snapshot) {
+			break
+		}
+	}
+	r.enqueue(latencyEvent{kind: latencyRuntimeEvent})
 }
 
 type cacheLatencyStats struct {
@@ -42,6 +60,7 @@ type latencyRecorder struct {
 	done    chan struct{}
 	once    sync.Once
 	runtime atomic.Pointer[runtimeDiagnosticObservation]
+	health  atomic.Pointer[sessionHealthSnapshot]
 	writers sync.WaitGroup
 }
 
@@ -108,6 +127,17 @@ func (r *latencyRecorder) cache(tier string, hit bool) {
 
 func (r *latencyRecorder) timeout() {
 	r.enqueue(latencyEvent{kind: latencyTimeoutEvent})
+}
+
+func (r *latencyRecorder) recordSuggestionTimings(ctx context.Context, timings map[string]time.Duration) {
+	deadline := false
+	for phase, duration := range timings {
+		r.record("source-"+phase, duration)
+		deadline = deadline || phase == "core-timeout" || phase == "local-timeout"
+	}
+	if deadline {
+		recordRequestTimeout(ctx, r)
+	}
 }
 
 func (r *latencyRecorder) snapshotCopy() latencySnapshot {
@@ -186,6 +216,7 @@ func (r *latencyRecorder) run(snapshot latencySnapshot) {
 			schedule()
 		case latencySnapshotEvent:
 			snapshot.Runtime = r.runtime.Load()
+			snapshot.Health = r.health.Load()
 			snapshot.RuntimeCaches = cachemetrics.Snapshots()
 			event.reply <- cloneLatencySnapshot(snapshot)
 		case latencyPersistEvent:
@@ -195,6 +226,7 @@ func (r *latencyRecorder) run(snapshot latencySnapshot) {
 			}
 			persisting = true
 			snapshot.Runtime = r.runtime.Load()
+			snapshot.Health = r.health.Load()
 			snapshot.RuntimeCaches = cachemetrics.Snapshots()
 			copySnapshot := cloneLatencySnapshot(snapshot)
 			r.writers.Add(1)
@@ -224,6 +256,10 @@ func (r *latencyRecorder) Close() {
 
 func cloneLatencySnapshot(snapshot latencySnapshot) latencySnapshot {
 	copySnapshot := snapshot
+	if snapshot.Health != nil {
+		health := *snapshot.Health
+		copySnapshot.Health = &health
+	}
 	if snapshot.Runtime != nil {
 		observation := *snapshot.Runtime
 		copySnapshot.Runtime = &observation

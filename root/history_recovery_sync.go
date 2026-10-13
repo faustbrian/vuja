@@ -99,6 +99,10 @@ func publishRecoveredHistoryLocked(ctx context.Context, store *scoring.FrecencyS
 }
 
 func startHistoryRecoveryRetry(store *scoring.FrecencyStore) func() {
+	return startHistoryRecoveryRetryObserved(store, nil)
+}
+
+func startHistoryRecoveryRetryObserved(store *scoring.FrecencyStore, begin func() func(bool, bool, error)) func() {
 	if store == nil {
 		return func() {}
 	}
@@ -113,8 +117,19 @@ func startHistoryRecoveryRetry(store *scoring.FrecencyStore) func() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				var observe func(bool, bool, error)
+				if begin != nil {
+					observe = begin()
+				}
 				retryCtx, retryCancel := context.WithTimeout(ctx, 2*time.Second)
-				_, err := retryHistoryRecoveryOnce(retryCtx, store)
+				recovered, err := retryHistoryRecoveryOnce(retryCtx, store)
+				if observe != nil && ctx.Err() == nil {
+					pending, pendingErr := historyRecoveryJournalPending()
+					if err == nil {
+						err = pendingErr
+					}
+					observe(pending, recovered, err)
+				}
 				retryCancel()
 				if err != nil && ctx.Err() == nil {
 					logger.Errorf("failed to retry canonical history recovery: %v", err)
@@ -132,17 +147,35 @@ func startHistoryRecoveryRetry(store *scoring.FrecencyStore) func() {
 }
 
 type historyRecoveryRetryManager struct {
-	mu   sync.Mutex
-	stop func()
+	mu         sync.Mutex
+	stop       func()
+	generation uint64
+	begin      func(*scoring.FrecencyStore) func(bool, bool, error)
 }
 
 func (m *historyRecoveryRetryManager) Restart(store *scoring.FrecencyStore) {
 	if m == nil {
 		return
 	}
-	next := startHistoryRecoveryRetry(store)
 	m.mu.Lock()
+	m.generation++
+	generation := m.generation
 	previous := m.stop
+	next := startHistoryRecoveryRetryObserved(store, func() func(bool, bool, error) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if generation != m.generation || m.begin == nil {
+			return nil
+		}
+		observe := m.begin(store)
+		return func(pending, recovered bool, err error) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if generation == m.generation && observe != nil {
+				observe(pending, recovered, err)
+			}
+		}
+	})
 	m.stop = next
 	m.mu.Unlock()
 	if previous != nil {
@@ -155,6 +188,7 @@ func (m *historyRecoveryRetryManager) Close() {
 		return
 	}
 	m.mu.Lock()
+	m.generation++
 	stop := m.stop
 	m.stop = nil
 	m.mu.Unlock()

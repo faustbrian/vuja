@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/workspace"
 )
 
@@ -89,9 +90,11 @@ func CollectSignalsWithRanking(
 		if rootCmd == "cd" || rootCmd == "z" {
 			limit = 200
 		}
-		snapshot, _ := frecency.QuerySignalSnapshotRanked(
+		started := time.Now()
+		snapshot, err := frecency.QuerySignalSnapshotRanked(
 			ctx, cwd, ws.Root, query, limit, prevCommand, prevCmdSkeleton, historyRanking,
 		)
+		health.Report(ctx, health.Signals, time.Since(started), err)
 		local, project, global = snapshot.Local, snapshot.Project, snapshot.Global
 		trans, transIsLocal = snapshot.Transitions, snapshot.TransitionsLocal
 		exactTrans, exactTransIsLocal = snapshot.ExactTransitions, snapshot.ExactTransitionsLocal

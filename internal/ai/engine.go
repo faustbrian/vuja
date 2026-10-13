@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/spec"
 )
@@ -108,7 +109,9 @@ func (e *AIEngine) Suggest(ctx context.Context, buf string, env EnvSnapshot, dyn
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	started := time.Now()
 	sugg, err := e.handler(ctx, buf, env, dynamicCtx)
+	health.Report(ctx, health.AI, time.Since(started), err)
 	if err != nil {
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "too many requests") {

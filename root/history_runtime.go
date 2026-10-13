@@ -292,6 +292,25 @@ func replayHistoryRecoveryJournal(store *scoring.FrecencyStore) error {
 	return err
 }
 
+func replayHistoryRecoveryJournalWithHealth(store *scoring.FrecencyStore, begin func() func(bool, bool, error)) error {
+	if begin == nil || store == nil {
+		return replayHistoryRecoveryJournal(store)
+	}
+	observe := begin()
+	wasPending, beforeErr := historyRecoveryJournalPending()
+	err := replayHistoryRecoveryJournal(store)
+	pending, observationErr := historyRecoveryJournalPending()
+	if err != nil {
+		observationErr = err
+	} else if beforeErr != nil {
+		observationErr = beforeErr
+	}
+	if observe != nil {
+		observe(pending, wasPending && err == nil, observationErr)
+	}
+	return err
+}
+
 func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.FrecencyStore, maxRecords int) (bool, error) {
 	return replayHistoryRecoveryJournalBatchObserved(ctx, store, maxRecords, nil)
 }
@@ -848,6 +867,15 @@ func persistHistorySubmission(store *scoring.FrecencyStore, entry integration.Hi
 }
 
 func persistHistorySubmissionDurably(store *scoring.FrecencyStore, entry integration.HistoryEntry) (persisted, journaled bool) {
+	return persistHistorySubmissionDurablyObserved(store, entry, nil)
+}
+
+func persistHistorySubmissionDurablyObserved(store *scoring.FrecencyStore, entry integration.HistoryEntry, observe func(bool, bool)) (persisted, journaled bool) {
+	defer func() {
+		if observe != nil {
+			observe(persisted, journaled)
+		}
+	}()
 	if persistHistorySubmission(store, entry) {
 		return true, false
 	}
@@ -910,19 +938,35 @@ func completeHistoryEventDurably(
 	store *scoring.FrecencyStore,
 	entry integration.HistoryEntry,
 ) (completed, journaled bool) {
+	return completeHistoryEventDurablyObserved(store, entry, nil)
+}
+
+func completeHistoryEventDurablyObserved(store *scoring.FrecencyStore, entry integration.HistoryEntry, observe func(bool, bool)) (completed, journaled bool) {
 	completed, err := completeHistoryEvent(store, entry)
 	if err == nil {
+		if completed && observe != nil {
+			observe(true, false)
+		}
 		// A repeated completion is an idempotent no-op and does not need a
 		// recovery record.
 		return completed, false
 	}
 	if completed {
+		if observe != nil {
+			observe(true, false)
+		}
 		return true, false
 	}
 	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to persist history recovery completion: %v", err)
+		if observe != nil {
+			observe(false, false)
+		}
 		return false, false
+	}
+	if observe != nil {
+		observe(false, true)
 	}
 	return false, true
 }

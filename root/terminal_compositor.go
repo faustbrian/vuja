@@ -110,6 +110,7 @@ type terminalCompositor struct {
 	chatboxConfig           terminalChatboxConfig
 	chatboxConfigured       bool
 	statusSnapshot          statusSnapshot
+	sessionHealth           healthBadge
 	titleLinesCache         []string
 	statusLinesCache        []string
 	chatboxColorCodes       map[string]string
@@ -890,6 +891,7 @@ func (c *terminalCompositor) SetStatusSnapshot(snapshot statusSnapshot) {
 		return
 	}
 	snapshot = cloneStatusSnapshot(snapshot)
+	snapshot.Health = c.sessionHealth
 	if c.statusSnapshot.Revision > 0 && snapshot.Revision < c.statusSnapshot.Revision {
 		return
 	}
@@ -909,7 +911,7 @@ func (c *terminalCompositor) SetStatusSnapshot(snapshot statusSnapshot) {
 }
 
 func statusSnapshotsEqual(left, right statusSnapshot) bool {
-	if left.Directory != right.Directory || left.CommandContext != right.CommandContext || left.CodexAccount != right.CodexAccount || left.RepositoryRoot != right.RepositoryRoot ||
+	if left.Health != right.Health || left.Directory != right.Directory || left.CommandContext != right.CommandContext || left.CodexAccount != right.CodexAccount || left.RepositoryRoot != right.RepositoryRoot ||
 		left.DirectoryReadOnly != right.DirectoryReadOnly || left.Git != right.Git ||
 		left.Package != right.Package || left.Shell != right.Shell || left.Session != right.Session ||
 		left.Contexts != right.Contexts || !left.StaleSince.Equal(right.StaleSince) || left.CPU != right.CPU ||
@@ -2466,8 +2468,10 @@ func (c *terminalCompositor) inputBoxStatusLine() string {
 func (c *terminalCompositor) inputBoxStatusLines() []string {
 	if c.statusLinesCache == nil {
 		rowLimit := max(c.inputBoxStatusRowLimit(), 1)
+		segments := c.inputBoxBarSegments(c.chatboxConfig.Status)
+		segments = appendSessionHealthSegment(segments, c.statusSnapshot.Health)
 		c.statusLinesCache = c.renderBarLinesWithBackground(
-			c.inputBoxBarSegments(c.chatboxConfig.Status),
+			segments,
 			rowLimit,
 			terminalDefaultBackground,
 		)

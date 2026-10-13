@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/faustbrian/vuja/internal/health"
 )
 
 // for tracking current working dir
@@ -72,6 +75,9 @@ func FileGenerator(filters ...string) GeneratorFunc {
 	}
 
 	return ImmediateGenerator(func(ctx context.Context, tokens []string, prefix string, partial string) []Suggestion {
+		started := time.Now()
+		var scanErr error
+		defer func() { health.Report(ctx, health.Files, time.Since(started), scanErr) }()
 		base := GetCWD()
 		dir := base
 		filePrefix := partial
@@ -93,6 +99,7 @@ func FileGenerator(filters ...string) GeneratorFunc {
 
 		entries, err := os.ReadDir(dir)
 		if err != nil {
+			scanErr = err
 			return nil
 		}
 
@@ -141,6 +148,9 @@ func FileGenerator(filters ...string) GeneratorFunc {
 				} else {
 					// scan only 1 level deeper if there is a filter
 					subEntries, err := os.ReadDir(filepath.Join(dir, name))
+					if err != nil && (scanErr == nil || os.IsNotExist(scanErr)) {
+						scanErr = err
+					}
 					if err == nil {
 						for _, subEntry := range subEntries {
 							if subEntry.IsDir() {

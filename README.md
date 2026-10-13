@@ -873,6 +873,28 @@ omitted. Missing or unreadable inputs are reported as unavailable, not healthy.
 The existing detailed `config doctor` and `debug latency` commands retain their
 more identifying output; use the sanitized command when sharing diagnostics.
 
+The managed status bar stays quiet while healthy. It shows observed journal
+fallback, lost command/outcome recording, visual degradation and instrumented
+provider problems. Repeated notices are limited to once per source every 30
+seconds, with immediate escalation for recording loss. Backend recovery does
+not erase an undisclosed loss. Actual recovery appears briefly (five seconds);
+provider observations become stale after a minute, without claiming recovery.
+Local provider attempts taking 250 ms or more are considered slow; AI attempts
+have a two-second threshold. Cancelled requests and missing optional paths/tools
+are not failures. The timeout summary counts each accepted suggestion request
+once, whether its evidence comes from a provider or a core/local pipeline
+deadline. Overlapping timeouts do not inflate that summary; provider-specific
+attempt counts and pipeline timing samples remain available separately.
+Health observations and loss counts share the existing
+latency snapshot and sanitized diagnostic report; no separate health database
+is created. Native applications retain their screen and input ownership.
+Delayed recovery observations cannot overwrite a newer recording outcome.
+An empty recovery queue alone does not confirm canonical persistence; when
+needed, health checks the affected execution's submission or completion in the
+existing database with a bounded read outside rendering locks. Cleared or
+unavailable records are not called recovered, and the private execution
+reference is excluded from telemetry and diagnostics.
+
 Terminal dimensions and visual recovery counters come from the most recently
 updated session's telemetry. They are **recorded observations**, not a live
 inspection of every open pane. Historical recovery counts do not establish an

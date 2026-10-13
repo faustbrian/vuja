@@ -55,6 +55,7 @@ func (c *terminalCompositor) commandStatusLines() (int, []string) {
 		frame := int64(elapsed/runningAnimationInterval) % int64(len(frames))
 		segments = append(segments, terminalStatusSegment{name: "running", text: fmt.Sprintf("%s Running · %ds", frames[frame], seconds), priority: 110, alignment: terminalStatusRight})
 	}
+	segments = appendSessionHealthSegment(segments, c.sessionHealth)
 	lines := c.renderBarLinesWithBackground(segments, c.surfaceStatusRows, terminalDefaultBackground)
 	for len(lines) < c.surfaceStatusRows {
 		lines = append(lines, c.renderBarLinesWithBackground(nil, 1, terminalDefaultBackground)[0])

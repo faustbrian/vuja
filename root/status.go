@@ -38,6 +38,7 @@ type gitStatusSnapshot struct {
 }
 
 type statusSnapshot struct {
+	Health            healthBadge
 	Revision          uint64
 	Directory         string
 	CommandContext    string

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
 )
@@ -69,7 +70,9 @@ func failureRecoverySuggestions(
 }
 
 func mustQueryLocalHistory(ctx context.Context, store *scoring.FrecencyStore, cwd, prefix string) []scoring.FrecencyEntry {
+	started := time.Now()
 	entries, err := store.QueryLocal(ctx, cwd, prefix, 20)
+	health.Report(ctx, health.Recovery, time.Since(started), err)
 	if err != nil {
 		return nil
 	}

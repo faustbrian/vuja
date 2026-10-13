@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/spec"
@@ -1040,11 +1041,17 @@ func (f *FrecencyStore) QueryRecentFailure(ctx context.Context, cwd string, maxA
 	}
 	var failure RecentFailure
 	var failedAtRaw string
+	started := time.Now()
 	err := f.db.QueryRowContext(ctx, `
 SELECT cmd, exit_code, failed_at
 FROM recent_failures
 WHERE cwd = ?
 `, cwd).Scan(&failure.Command, &failure.ExitCode, &failedAtRaw)
+	observationErr := err
+	if errors.Is(err, sql.ErrNoRows) {
+		observationErr = nil // No retained failure is a successful empty lookup.
+	}
+	health.Report(ctx, health.Recovery, time.Since(started), observationErr)
 	if err != nil {
 		return RecentFailure{}, false
 	}
@@ -1063,13 +1070,15 @@ func (f *FrecencyStore) QueryArgumentValues(
 	position int,
 	partial string,
 	limit int,
-) ([]ArgumentValueEntry, error) {
+) (result []ArgumentValueEntry, queryErr error) {
 	if f == nil || strings.TrimSpace(scope) == "" {
 		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
+	defer func() { health.Report(ctx, health.Arguments, time.Since(started), queryErr) }()
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1251,13 +1260,15 @@ ON CONFLICT(path, source) DO UPDATE SET
 	return tx.Commit()
 }
 
-func (f *FrecencyStore) QueryDirectories(ctx context.Context, fragment string, limit int, ranking string) ([]DirectoryImport, error) {
+func (f *FrecencyStore) QueryDirectories(ctx context.Context, fragment string, limit int, ranking string) (result []DirectoryImport, queryErr error) {
 	if f == nil {
 		return nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
+	defer func() { health.Report(ctx, health.Directory, time.Since(started), queryErr) }()
 	if limit <= 0 {
 		limit = 20
 	}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
@@ -76,17 +77,28 @@ func (c *terminalCompositor) diagnosticObservation() runtimeDiagnosticObservatio
 // Sampling does no filesystem work and never holds the renderer lock while
 // enqueueing telemetry. Stop joins the observer before the compositor closes.
 func startRuntimeDiagnostics(c *terminalCompositor, recorder *latencyRecorder) func() {
+	return startRuntimeDiagnosticsObserved(c, recorder, nil)
+}
+
+func startRuntimeDiagnosticsObserved(c *terminalCompositor, recorder *latencyRecorder, observe func(runtimeDiagnosticObservation)) func() {
 	ticker := time.NewTicker(time.Second)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	var once sync.Once
-	recorder.recordRuntime(c.diagnosticObservation())
+	sample := func() {
+		observation := c.diagnosticObservation()
+		recorder.recordRuntime(observation)
+		if observe != nil {
+			observe(observation)
+		}
+	}
+	sample()
 	go func() {
 		defer close(done)
 		for {
 			select {
 			case <-ticker.C:
-				recorder.recordRuntime(c.diagnosticObservation())
+				sample()
 			case <-stop:
 				return
 			}
@@ -117,6 +129,7 @@ type diagnosticReport struct {
 		Phases   map[string]diagnosticLatencyPhase `json:"phases"`
 	} `json:"latency"`
 	Visual map[string]any `json:"visual"`
+	Health map[string]any `json:"health"`
 }
 
 func newDebugDiagnosticsCommand() *cobra.Command {
@@ -157,6 +170,7 @@ func collectDiagnosticReport(ctx context.Context) diagnosticReport {
 		Terminal:      map[string]any{"dimensions": "unavailable"},
 		History:       map[string]any{"database": "unavailable", "recording": "not-observed"},
 		Visual:        map[string]any{"state": "not-observed"},
+		Health:        map[string]any{"state": "not-observed"},
 	}
 	doctor := inspectDoctor()
 	if doctor.configErr == nil {
@@ -224,6 +238,43 @@ func collectDiagnosticReport(ctx context.Context) diagnosticReport {
 	report.Latency.State = "unavailable"
 	report.Latency.Phases = make(map[string]diagnosticLatencyPhase)
 	if snapshot, err := loadDiagnosticLatency(); err == nil {
+		if observed := snapshot.Health; observed != nil {
+			report.Health["state"] = "recorded"
+			switch observed.History {
+			case "unknown", "canonical", "journal", "unrecorded", "outcome-unrecorded", "unavailable", "recovering", "recovery-error":
+				report.Health["history"] = observed.History
+			}
+			report.Health["recovery_pending"] = observed.RecoveryPending
+			report.Health["lost_submissions"] = observed.LostSubmissions
+			report.Health["lost_outcomes"] = observed.LostOutcomes
+			providers := make(map[string]any)
+			for source := health.Files; source < health.SourceCount; source++ {
+				provider := observed.Providers[source]
+				outcome := "unknown"
+				switch provider.Outcome {
+				case health.Healthy:
+					outcome = "healthy"
+				case health.Slow:
+					outcome = "slow"
+				case health.Failed:
+					outcome = "failed"
+				case health.TimedOut:
+					outcome = "timed-out"
+				default:
+					continue
+				}
+				age := "unknown"
+				if !provider.ObservedAt.IsZero() {
+					if time.Since(provider.ObservedAt) < healthProviderFreshness {
+						age = "recent"
+					} else {
+						age = "stale"
+					}
+				}
+				providers[source.Name()] = map[string]any{"last_outcome": outcome, "observation_age": age, "failures": provider.Failures, "timeouts": provider.Timeouts, "slow": provider.Slow}
+			}
+			report.Health["providers"] = providers
+		}
 		report.Latency.State = "recorded"
 		report.Latency.Timeouts = snapshot.Timeouts
 		for _, phase := range []string{"first-paint", "first-suggestion", "full-enrichment", "enrichment", "source-history", "source-spec", "source-signals", "source-rank", "source-arguments", "source-recovery", "source-workspace", "source-local-sources", "source-fast-spec", "source-fast-history", "source-fast-rank"} {

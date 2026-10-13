@@ -218,14 +218,16 @@ func runWrapper() {
 		host,
 	)
 	historyStore, historyStoreErr := initializeCanonicalHistory(executionTracker.sessionID)
+	healthProjection := newSessionHealthProjection(time.Now)
 	if historyStoreErr != nil {
+		healthProjection.observeHistoryUnavailable()
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to initialize canonical history: %v", historyStoreErr)
 	}
 	historySync := &canonicalHistorySyncManager{}
 	historySync.Restart(historyStore, executionTracker.sessionID)
 	defer historySync.Close()
-	historyRecovery := &historyRecoveryRetryManager{}
+	historyRecovery := &historyRecoveryRetryManager{begin: healthProjection.beginRecoveryObservationWithStore}
 	historyRecovery.Restart(historyStore)
 	defer historyRecovery.Close()
 	initialWidth, initialHeight, terminalSizeErr := term.GetSize(int(os.Stdout.Fd()))
@@ -356,8 +358,6 @@ func runWrapper() {
 		display.SetInputBoxPath(cwd)
 	}
 	defer display.Close()
-	stopRuntimeDiagnostics := startRuntimeDiagnostics(display, suggestionLatency)
-	defer stopRuntimeDiagnostics()
 	statusSegments := config.Get().UI.Chatbox.Segments()
 	managedStatus := display.Managed()
 	status := newStatusEngine(statusEngineOptions{
@@ -530,6 +530,17 @@ func runWrapper() {
 		}
 		return pgrp != shellPGID
 	}
+	stopRuntimeDiagnostics := startRuntimeDiagnosticsObserved(display, suggestionLatency, func(observation runtimeDiagnosticObservation) {
+		healthProjection.observeVisual(observation)
+		suggestionLatency.recordHealth(healthProjection.snapshot())
+		display.SetSessionHealth(healthProjection.badge())
+		if !isExecuting() && display.healthWarningSurfaceAvailable() {
+			if warning := healthProjection.warning(); warning != "" {
+				writeNotification([]byte(warning))
+			}
+		}
+	})
+	defer stopRuntimeDiagnostics()
 	var codexResumeActions <-chan string
 	var resumeLinkFor func(string) string
 	codexResumeLinks := newCodexResumeLinkifier(nil)
@@ -672,7 +683,7 @@ func runWrapper() {
 					}
 				}
 				if recordable {
-					activeHistoryPersisted, activeHistoryJournaled = persistHistorySubmissionDurably(historyStore, entry)
+					activeHistoryPersisted, activeHistoryJournaled = persistHistorySubmissionDurablyObserved(historyStore, entry, healthProjection.submissionObserver(entry))
 				} else {
 					activeHistoryPersisted = false
 				}
@@ -684,11 +695,7 @@ func runWrapper() {
 				if activeHistoryPersisted {
 					publishHistorySubmission(entry)
 				}
-				if recordable && !activeHistoryPersisted {
-					writeNotification([]byte("[VUJA] history persistence failed; this command will run without being recorded"))
-				} else if activeHistoryJournaled {
-					writeNotification([]byte("[VUJA] history database unavailable; submission secured in the recovery journal"))
-				} else if activeHistoryPersisted && config.Get().History.Integrations.Shell.Mirror {
+				if activeHistoryPersisted && !activeHistoryJournaled && config.Get().History.Integrations.Shell.Mirror {
 					if err := mirrorHistorySubmission(entry.Command, shellName, entry.SubmittedAt); err != nil {
 						logger.Errorf("optional native history mirror failed: %v", err)
 						writeNotification([]byte("[VUJA] native history mirror failed; Vuja history is unaffected"))
@@ -740,27 +747,29 @@ func runWrapper() {
 						historyCleared := isHistoryClearCommand(cmdToRecord)
 						historyCompleted := false
 						completionJournaled := false
+						observeCompletion := healthProjection.completionObserver(historyEntry)
 						if historyCleared {
 							if err := clearHistoryRecoveryJournal(); err != nil {
 								recordHistoryDerivedFailure("recovery journal clear", err)
 							}
 						} else if activeHistoryJournaled {
 							if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, historyEntry); err != nil {
+								observeCompletion(false, false)
 								recordHistoryDerivedFailure("recovery completion", err)
 							} else {
+								observeCompletion(true, true)
 								historyCompleted = true
 								publishHistorySubmission(historyEntry)
 								if historyStore != nil {
-									if err := replayHistoryRecoveryJournal(historyStore); err != nil {
+									if err := replayHistoryRecoveryJournalWithHealth(historyStore, healthProjection.recoveryObserver(historyStore)); err != nil {
 										logger.Errorf("failed to replay completed history recovery event: %v", err)
 									}
 								}
 							}
 						} else {
-							historyCompleted, completionJournaled = completeHistoryEventDurably(historyStore, historyEntry)
+							historyCompleted, completionJournaled = completeHistoryEventDurablyObserved(historyStore, historyEntry, observeCompletion)
 							if completionJournaled {
 								publishHistorySubmission(historyEntry)
-								writeNotification([]byte("[VUJA] history completion secured in the recovery journal"))
 							}
 						}
 						if historyCompleted {
@@ -970,6 +979,7 @@ func runWrapper() {
 				aiCancel = cancel
 				aiMu.Unlock()
 				defer cancel()
+				ctx = observedProviderContext(ctx, healthProjection, suggestionLatency, nil)
 
 				cwd := spec.GetCWD()
 				var recentCmds []string
@@ -1017,6 +1027,7 @@ func runWrapper() {
 		suggestionWorkCancel = workCancel
 		suggestionWorkMu.Unlock()
 		generation := suggestionResults.begin(request)
+		workContext = observedProviderContext(workContext, healthProjection, suggestionLatency, func() bool { return suggestionResults.current(generation) })
 		requestStarted := time.Now()
 		immediateHit := false
 		var immediateResults []spec.Suggestion
@@ -1077,14 +1088,7 @@ func runWrapper() {
 				return
 			}
 			results, timings := mergeResultsProfiledContext(workContext, request.query, request.mode)
-			for phase, duration := range timings {
-				suggestionLatency.record("source-"+phase, duration)
-				if strings.HasSuffix(phase, "-timeout") ||
-					((phase == "arguments" || phase == "recovery") && duration >= 20*time.Millisecond) ||
-					(phase == "signals" && duration >= suggestionSignalBudget) {
-					suggestionLatency.timeout()
-				}
-			}
+			suggestionLatency.recordSuggestionTimings(workContext, timings)
 			stopUpdatingTimer()
 			if workContext.Err() != nil {
 				return
