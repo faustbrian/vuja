@@ -92,7 +92,7 @@ func (p *universalProvider) Gather(ctx context.Context) (string, error) {
 
 	var sb strings.Builder
 
-	ws := workspace.DetectCached(p.cwd)
+	ws := workspace.DetectCachedContext(ctxTimeout, p.cwd)
 	var ecosystems []string
 	if ws.HasGit {
 		ecosystems = append(ecosystems, "Git")

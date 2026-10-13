@@ -160,7 +160,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 	}()
 	go func() {
 		started := time.Now()
-		result := workspace.DetectCached(cwd)
+		result := workspace.DetectCachedContext(coreContext, cwd)
 		coreResults <- coreProviderResult{name: "workspace", workspace: result, duration: time.Since(started)}
 	}()
 	var cmdResults []spec.Suggestion
@@ -204,7 +204,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 	localResults := make(chan localProviderResult, 4)
 	go func() {
 		started := time.Now()
-		localResults <- localProviderResult{name: "git", suggestions: gitStateSuggestions(activeQuery, ws), duration: time.Since(started)}
+		localResults <- localProviderResult{name: "git", suggestions: gitStateSuggestionsContext(ctx, activeQuery, ws), duration: time.Since(started)}
 	}()
 	go func() {
 		started := time.Now()
@@ -409,10 +409,14 @@ func applySuggestionPolicy(query string, suggestions []spec.Suggestion) []spec.S
 }
 
 func gitStateSuggestions(query string, ws workspace.WorkspaceInfo) []spec.Suggestion {
+	return gitStateSuggestionsContext(context.Background(), query, ws)
+}
+
+func gitStateSuggestionsContext(ctx context.Context, query string, ws workspace.WorkspaceInfo) []spec.Suggestion {
 	if !ws.HasGit || (query != "" && !strings.HasPrefix("git ", strings.ToLower(query)) && !strings.HasPrefix(strings.ToLower(query), "git ")) {
 		return nil
 	}
-	ws = workspace.WithGitStatusCached(ws)
+	ws = workspace.WithGitStatusCachedContext(ctx, ws)
 	var commands []string
 	switch {
 	case ws.GitConflicted:

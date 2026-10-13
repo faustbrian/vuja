@@ -70,7 +70,7 @@ func CollectSignalsWithRanking(
 		}
 	}
 
-	ws := workspace.DetectCached(cwd)
+	ws := workspace.DetectCachedContext(ctx, cwd)
 
 	if ctx == nil {
 		ctx = context.Background()

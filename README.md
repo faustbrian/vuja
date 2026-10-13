@@ -920,8 +920,11 @@ Git's optional active-branch priority probe is not treated as a failed primary
 ref inventory. SSH discovery reports failed, unstable or bounded-partial
 acquisition while preserving usable aliases; absent optional configuration
 and unmatched Include paths stay quiet. Valid empty configuration can confirm
-recovery, but cached aliases cannot. Workspace metadata outcomes are not yet
-instrumented.
+recovery, but cached aliases cannot. Workspace metadata reports filesystem
+acquisition failures separately from Git working-tree query outcomes. Missing
+optional project markers stay quiet, and cache reuse cannot imply recovery.
+A failed Git-state refresh retains last-known facts rather than inventing a
+clean repository; the health indicator discloses the failed refresh.
 
 Terminal dimensions and visual recovery counters come from the most recently
 updated session's telemetry. They are **recorded observations**, not a live

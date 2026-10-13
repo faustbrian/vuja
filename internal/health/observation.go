@@ -47,6 +47,7 @@ const (
 	DockerImages
 	ZoxideCompletion
 	SSHHosts
+	WorkspaceGitStatus
 	SourceCount
 )
 
@@ -114,6 +115,8 @@ func (s Source) optionalExecutable() bool {
 		PackagesRPM, PackagesBrew, Processes, DockerContainersAll,
 		DockerContainersRunning, DockerImages, ZoxideCompletion:
 		return true
+	case WorkspaceGitStatus:
+		return true
 	}
 	return false
 }
@@ -131,7 +134,7 @@ func (s Source) Name() string {
 	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai", "npm-scripts", "make-targets", "just-recipes",
 		"git-commits", "git-branches", "git-remotes", "git-tags", "git-stashes", "pip-installed",
 		"packages-pacman", "packages-yay", "packages-paru", "packages-debian", "packages-rpm", "packages-brew",
-		"processes", "docker-containers-all", "docker-containers-running", "docker-images", "zoxide-completion", "ssh-hosts"}
+		"processes", "docker-containers-all", "docker-containers-running", "docker-images", "zoxide-completion", "ssh-hosts", "workspace-git-status"}
 	if s >= SourceCount {
 		return "unknown"
 	}
