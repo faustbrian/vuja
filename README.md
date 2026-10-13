@@ -903,8 +903,12 @@ reads include parse failures, while cancelled scans cannot cache incomplete
 command inventories. Accepted completion health is recorded before its cache
 notification refreshes the UI. Canonical history search reports
 search outcomes only, not database durability. Cache hits do not imply provider
-recovery. Additional built-in command and workspace providers are not yet
-instrumented.
+recovery. Built-in npm/pnpm/yarn/bun script manifests, Make targets and Just
+recipes report their own read/parse outcomes separately from project-command
+discovery. Missing optional manifests remain quiet; generic npm fallback scripts
+do not hide an unreadable manifest, and partial Make results do not hide a
+failed scan. A successful uppercase Justfile fallback is a successful recipe
+read. Other built-in command and workspace providers are not yet instrumented.
 
 Terminal dimensions and visual recovery counters come from the most recently
 updated session's telemetry. They are **recorded observations**, not a live

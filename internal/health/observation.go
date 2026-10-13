@@ -26,6 +26,9 @@ const (
 	Recovery
 	Signals
 	AI
+	NpmScripts
+	MakeTargets
+	JustRecipes
 	SourceCount
 )
 
@@ -76,7 +79,7 @@ func Report(ctx context.Context, source Source, duration time.Duration, err erro
 		outcome = Skipped
 	case errors.Is(err, errors.ErrUnsupported) && source == Completion:
 		outcome = Skipped
-	case errors.Is(err, os.ErrNotExist) && (source == Files || source == Project || source == Workspace):
+	case errors.Is(err, os.ErrNotExist) && (source == Files || source == Project || source == Workspace || source == NpmScripts || source == MakeTargets || source == JustRecipes):
 		outcome = Skipped
 	case err != nil:
 		outcome = Failed
@@ -96,7 +99,7 @@ func SlowThreshold(source Source) time.Duration {
 }
 
 func (s Source) Name() string {
-	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai"}
+	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai", "npm-scripts", "make-targets", "just-recipes"}
 	if s >= SourceCount {
 		return "unknown"
 	}

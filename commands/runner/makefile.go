@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
@@ -15,10 +17,14 @@ func init() {
 		Name:        "make",
 		Description: "build automation",
 		Generator: func(ctx context.Context, tokens []string, prefix string, partial string) []spec.Suggestion {
+			started := time.Now()
+			var providerErr error
+			defer func() { health.Report(ctx, health.MakeTargets, time.Since(started), providerErr) }()
 			// Read the Makefile
 			cwd := spec.GetCWD()
 			file, err := os.Open(filepath.Join(cwd, "Makefile"))
 			if err != nil {
+				providerErr = err
 				// No Makefile, don't pretend we have one
 				return nil
 			}
@@ -54,7 +60,7 @@ func init() {
 					})
 				}
 			}
-			_ = scanner.Err()
+			providerErr = scanner.Err()
 			return suggestions
 		},
 	})

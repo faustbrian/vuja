@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func NpmScriptGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
+	var providerErr error
+	defer func() { health.Report(ctx, health.NpmScripts, time.Since(started), providerErr) }()
 	cwd := spec.GetCWD()
 	data, err := os.ReadFile(filepath.Join(cwd, "package.json"))
 	if err != nil {
+		providerErr = err
 		return []spec.Suggestion{
 			{Cmd: "dev", Desc: "development server"},
 			{Cmd: "build", Desc: "build for production"},
@@ -25,7 +31,8 @@ func NpmScriptGenerator(ctx context.Context, tokens []string, _ string, _ string
 	var pkg struct {
 		Scripts map[string]string `json:"scripts"`
 	}
-	if err := json.Unmarshal(data, &pkg); err != nil || len(pkg.Scripts) == 0 {
+	providerErr = json.Unmarshal(data, &pkg)
+	if providerErr != nil || len(pkg.Scripts) == 0 {
 		return nil
 	}
 
