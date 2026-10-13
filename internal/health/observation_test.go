@@ -33,13 +33,14 @@ func TestReportKeepsOptionalMissesAndCancellationQuiet(t *testing.T) {
 	Report(ctx, Files, 0, os.ErrNotExist)
 	Report(ctx, Completion, 0, exec.ErrNotFound)
 	Report(ctx, Project, 0, os.ErrNotExist)
+	Report(ctx, Completion, 0, errors.ErrUnsupported)
 	Report(ctx, History, 0, os.ErrNotExist) // Required history is not an optional file.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	Report(cancelled, Completion, time.Second, errors.New("private-error"))
 	Report(ctx, Completion, time.Millisecond, context.Canceled)
 	Report(ctx, Source(255), 0, errors.New("private-error"))
-	if len(observations) != 4 || observations[0].Outcome != Skipped || observations[1].Outcome != Skipped || observations[2].Outcome != Skipped || observations[3].Outcome != Failed {
+	if len(observations) != 5 || observations[0].Outcome != Skipped || observations[1].Outcome != Skipped || observations[2].Outcome != Skipped || observations[3].Outcome != Skipped || observations[4].Outcome != Failed {
 		t.Fatalf("optional misses/cancellation became failures, or required failure was hidden: %+v", observations)
 	}
 }

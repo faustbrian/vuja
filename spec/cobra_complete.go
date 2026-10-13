@@ -2,6 +2,7 @@ package spec
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/cachemetrics"
+	"github.com/faustbrian/vuja/internal/health"
 )
 
 type cobraCacheEntry struct {
@@ -53,26 +55,18 @@ func resolveCobraBinary(binName string) (string, string, bool) {
 // each line is "value\tdesc", last line is ":N" (ShellCompDirective bitmask).
 // returns nil if output is not Cobra-style.
 func parseCobraOutput(raw string, prefix string) []Suggestion {
-	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
-	if len(lines) == 0 {
-		return nil
-	}
-	lastLine := lines[len(lines)-1]
-	if !strings.HasPrefix(lastLine, ":") {
-		return nil
-	}
-	directive, err := strconv.Atoi(lastLine[1:])
+	results, _ := parseCobraOutputWithOutcome(raw, prefix)
+	return results
+}
+
+func parseCobraOutputWithOutcome(raw string, prefix string) ([]Suggestion, error) {
+	lines, err := cobraOutputCandidates(raw)
 	if err != nil {
-		return nil
-	}
-	// ShellCompDirectiveError = 1
-	if directive&1 != 0 {
-		return nil
+		return nil, err
 	}
 
-	candidates := lines[:len(lines)-1]
-	results := make([]Suggestion, 0, len(candidates))
-	for _, line := range candidates {
+	results := make([]Suggestion, 0, len(lines))
+	for _, line := range lines {
 		if line == "" {
 			continue
 		}
@@ -96,7 +90,22 @@ func parseCobraOutput(raw string, prefix string) []Suggestion {
 			break
 		}
 	}
-	return results
+	return results, nil
+}
+
+// Non-Cobra output is an unsupported optional provider, whereas a declared
+// protocol error is a failed attempt. Neither error contains output text.
+func cobraOutputCandidates(raw string) ([]string, error) {
+	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+	lastLine := lines[len(lines)-1]
+	if !strings.HasPrefix(lastLine, ":") {
+		return nil, errors.ErrUnsupported
+	}
+	directive, err := strconv.Atoi(lastLine[1:])
+	if err != nil || directive&1 != 0 {
+		return nil, errors.New("completion protocol failed")
+	}
+	return lines[:len(lines)-1], nil
 }
 
 func buildCobraCacheKey(binKey string, args []string, _ string) string {
@@ -173,21 +182,25 @@ func QueryCobraCompleteContext(ctx context.Context, binName string, args []strin
 func refreshCobraCompletion(ctx context.Context, generation uint64, key, binaryPath, binName string, args []string) {
 	ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	defer cancel()
+	started := time.Now()
 	cmdArgs := append([]string{"__complete"}, args...)
 	cmdArgs = append(cmdArgs, "")
 	prefixParts := append([]string{binName}, args...)
 	out, err := runCobraCompletion(ctx, binaryPath, cmdArgs)
+	providerErr := err
 	var suggestions []Suggestion
 	if err == nil {
-		suggestions = parseCobraOutput(string(out), strings.Join(prefixParts, " "))
+		suggestions, providerErr = parseCobraOutputWithOutcome(string(out), strings.Join(prefixParts, " "))
 	}
 	cobraCacheMu.Lock()
-	defer cobraCacheMu.Unlock()
 	if generation != cobraCacheGeneration.Load() {
+		cobraCacheMu.Unlock()
 		return
 	}
 	if ctx.Err() != nil && err != nil {
 		delete(cobraCache, key)
+		cobraCacheMu.Unlock()
+		health.Report(ctx, health.Completion, time.Since(started), providerErr)
 		return
 	}
 	ttl := cobraCacheTTL
@@ -196,6 +209,10 @@ func refreshCobraCompletion(ctx context.Context, generation uint64, key, binaryP
 	}
 	now := time.Now()
 	cobraCache[key] = cobraCacheEntry{suggestions: cloneSuggestions(suggestions), expires: now.Add(ttl), lastUsed: now}
+	cobraCacheMu.Unlock()
+	// A completion update can refresh the UI and cancel this request. Retain
+	// its accepted outcome first, outside cache locks and before that reentry.
+	health.Report(ctx, health.Completion, time.Since(started), providerErr)
 	notifyCompletionUpdate()
 }
 

@@ -74,6 +74,8 @@ func Report(ctx context.Context, source Source, duration time.Duration, err erro
 		outcome = TimedOut
 	case errors.Is(err, exec.ErrNotFound) && source == Completion:
 		outcome = Skipped
+	case errors.Is(err, errors.ErrUnsupported) && source == Completion:
+		outcome = Skipped
 	case errors.Is(err, os.ErrNotExist) && (source == Files || source == Project || source == Workspace):
 		outcome = Skipped
 	case err != nil:

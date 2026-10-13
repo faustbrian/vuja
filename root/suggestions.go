@@ -22,6 +22,8 @@ const (
 	suggestionSignalBudget        = 100 * time.Millisecond
 )
 
+var lookupPreparedSuggestions = spec.LookupContextPreparedWithCompletionContext
+
 // MergeResults collects and dedupes suggestions for a query and mode
 func MergeResults(query string, mode string) []spec.Suggestion {
 	results, _ := mergeResultsProfiled(query, mode)
@@ -141,16 +143,14 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 		duration    time.Duration
 	}
 	coreContext, cancelCore := context.WithTimeout(ctx, suggestionCoreProviderBudget)
-	// Keep the provider deadline alive after the synchronous providers return.
-	// Dynamic completions use this same context to warm their bounded async
-	// cache; cancelling it immediately here prevents every cold lookup from
-	// completing. The deadline still bounds stale work, while a newer request
-	// cancels the parent context.
+	// Synchronous lookup retains its core budget. Async Cobra completion owns
+	// its separate 300 ms child of the request context, so completing this
+	// merge does not cancel it; a newer request still cancels the parent.
 	defer cancelCore()
 	coreResults := make(chan coreProviderResult, 3)
 	go func() {
 		started := time.Now()
-		results := spec.LookupContextPrepared(coreContext, activeQuery)
+		results := lookupPreparedSuggestions(coreContext, ctx, activeQuery)
 		coreResults <- coreProviderResult{name: "spec", suggestions: results, duration: time.Since(started)}
 	}()
 	go func() {

@@ -64,6 +64,18 @@ func LookupContextPrepared(ctx context.Context, input string) []Suggestion {
 	return lookupContext(ctx, input)
 }
 
+// LookupContextPreparedWithCompletionContext separates synchronous lookup
+// lifetime from the caller-owned request lifetime used by async completion.
+func LookupContextPreparedWithCompletionContext(ctx, completionContext context.Context, input string) []Suggestion {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if completionContext == nil {
+		completionContext = ctx
+	}
+	return lookupWithCompletionContext(ctx, completionContext, input)
+}
+
 func RefreshShellAliases() map[string]string {
 	shellAliasesMu.RLock()
 	fresh := !lastAliasScan.IsZero() && time.Since(lastAliasScan) < 2*time.Second
@@ -114,6 +126,10 @@ func resetAliasScanCache() {
 }
 
 func lookupContext(ctx context.Context, input string) []Suggestion {
+	return lookupWithCompletionContext(ctx, ctx, input)
+}
+
+func lookupWithCompletionContext(ctx, completionContext context.Context, input string) []Suggestion {
 	shellAliasesMu.RLock()
 	aliases := ShellAliases
 	shellAliasesMu.RUnlock()
@@ -374,7 +390,7 @@ func lookupContext(ctx context.Context, input string) []Suggestion {
 		if len(args) > 0 && args[len(args)-1] == partial {
 			args = args[:len(args)-1]
 		}
-		results = append(results, QueryCobraCompleteContext(ctx, rootCmdName, args, partial)...)
+		results = append(results, QueryCobraCompleteContext(completionContext, rootCmdName, args, partial)...)
 	}
 
 	return results

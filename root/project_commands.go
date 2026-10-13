@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/vuja/internal/cachemetrics"
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/workspace"
 	"github.com/faustbrian/vuja/spec"
 )
@@ -58,6 +59,11 @@ func discoverProjectCommands(ctx context.Context, query string, ws workspace.Wor
 	projectCommandCache.Unlock()
 
 	commands := readProjectCommands(ctx, ws)
+	if ctx.Err() != nil {
+		// A partial scan is not a reusable project inventory. A later request
+		// must be able to read the remaining files without a metadata change.
+		return nil
+	}
 	projectCommandCache.Lock()
 	entry = projectCommandCacheEntry{key: key, commands: commands, lastUsed: time.Now()}
 	projectCommandCache.entries[ws.Root] = entry
@@ -138,14 +144,16 @@ func readJSONScripts(ctx context.Context, path string, add func(string)) {
 	if ctx.Err() != nil {
 		return
 	}
+	started := time.Now()
 	data, err := os.ReadFile(path)
+	defer func() { health.Report(ctx, health.Project, time.Since(started), err) }()
 	if err != nil {
 		return
 	}
 	var document struct {
 		Scripts map[string]json.RawMessage `json:"scripts"`
 	}
-	if json.Unmarshal(data, &document) != nil {
+	if err = json.Unmarshal(data, &document); err != nil {
 		return
 	}
 	for name := range document.Scripts {
@@ -157,7 +165,9 @@ func readRecipeFile(ctx context.Context, path string, add func(string)) {
 	if ctx.Err() != nil {
 		return
 	}
+	started := time.Now()
 	data, err := os.ReadFile(path)
+	defer func() { health.Report(ctx, health.Project, time.Since(started), err) }()
 	if err != nil {
 		return
 	}
@@ -179,7 +189,9 @@ func readMakefile(ctx context.Context, path string, add func(string)) {
 	if ctx.Err() != nil {
 		return
 	}
+	started := time.Now()
 	data, err := os.ReadFile(path)
+	defer func() { health.Report(ctx, health.Project, time.Since(started), err) }()
 	if err != nil {
 		return
 	}

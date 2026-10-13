@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/versenilvis/fuzzy"
 )
@@ -232,10 +233,12 @@ func SearchHistory(query string, aliases map[string]string) ([]HistResult, error
 	return SearchHistoryContext(context.Background(), query, aliases)
 }
 
-func SearchHistoryContext(ctx context.Context, query string, aliases map[string]string) ([]HistResult, error) {
+func SearchHistoryContext(ctx context.Context, query string, aliases map[string]string) (_ []HistResult, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
+	defer func() { health.Report(ctx, health.History, time.Since(started), err) }()
 	if err := ensureHistoryCache(ctx); err != nil {
 		return nil, err
 	}

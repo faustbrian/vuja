@@ -895,6 +895,17 @@ existing database with a bounded read outside rendering locks. Cleared or
 unavailable records are not called recovered, and the private execution
 reference is excluded from telemetry and diagnostics.
 
+Dynamic Cobra completion distinguishes valid empty results, provider failures,
+protocol errors and deadlines; unsupported completion and missing optional tools
+remain quiet. Its 300 ms request-owned deadline survives synchronous merge
+completion; cancelling the request still cancels the provider. Project-file
+reads include parse failures, while cancelled scans cannot cache incomplete
+command inventories. Accepted completion health is recorded before its cache
+notification refreshes the UI. Canonical history search reports
+search outcomes only, not database durability. Cache hits do not imply provider
+recovery. Additional built-in command and workspace providers are not yet
+instrumented.
+
 Terminal dimensions and visual recovery counters come from the most recently
 updated session's telemetry. They are **recorded observations**, not a live
 inspection of every open pane. Historical recovery counts do not establish an
