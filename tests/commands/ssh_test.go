@@ -1,17 +1,19 @@
 package tests
 
 import (
-	"bufio"
+	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
+	_ "github.com/faustbrian/vuja/commands/ops"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func TestSshHostGenerator(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
 	sshDir := filepath.Join(tmp, ".ssh")
 	_ = os.MkdirAll(sshDir, 0700)
 
@@ -32,7 +34,7 @@ Host !forbidden wildcard-test
 `
 	_ = os.WriteFile(filepath.Join(sshDir, "config"), []byte(configContent), 0600)
 
-	results := sshHostGeneratorFromPath(filepath.Join(sshDir, "config"))
+	results := productionSSHHosts(t)
 
 	found := make(map[string]bool)
 	for _, r := range results {
@@ -56,33 +58,20 @@ Host !forbidden wildcard-test
 	}
 }
 
-// sshHostGeneratorFromPath is a helper that reads a specific ssh config path
-func sshHostGeneratorFromPath(configPath string) []spec.Suggestion {
-	f, err := os.Open(configPath)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = f.Close() }()
-
-	seen := make(map[string]bool)
-	var results []spec.Suggestion
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		parts := strings.Fields(scanner.Text())
-		if len(parts) < 2 || !strings.EqualFold(parts[0], "host") {
-			continue
-		}
-		for _, host := range parts[1:] {
-			if strings.ContainsAny(host, "*?!") {
-				continue
+func productionSSHHosts(t *testing.T) []spec.Suggestion {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	provider := spec.Registry["ssh"].Generator
+	for ctx.Err() == nil {
+		results := provider(ctx, []string{"ssh", ""}, "ssh", "")
+		for _, result := range results {
+			if result.Cmd == "prod-server" {
+				return results
 			}
-			if seen[host] {
-				continue
-			}
-			seen[host] = true
-			results = append(results, spec.Suggestion{Cmd: host, Desc: "ssh host"})
 		}
+		time.Sleep(time.Millisecond)
 	}
-	return results
+	t.Fatal("production SSH discovery did not publish the fixture inventory")
+	return nil
 }

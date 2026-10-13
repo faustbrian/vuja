@@ -219,6 +219,38 @@ the originating Vuja session. For safety, activation is accepted only while
 that shell is idle and its prompt is empty. `vuja setup` registers the private
 `vuja://` action handler on macOS and Linux; `vuja uninstall` removes it.
 
+### Local SSH host discovery
+
+SSH, SCP, SFTP, and rsync suggestions share a local inventory of literal `Host`
+aliases. Discovery follows user and system `Include` files, including nested
+includes, quoted paths, and lexically ordered globs. Relative include paths use
+`~/.ssh` for user configuration or `/etc/ssh` for system configuration, not the
+directory of the including file. Inline comments, wildcard and negated hosts,
+unsafe aliases, unreadable files, and nonregular files are excluded. Glob
+escaping, bracket ranges and negation follow shell-glob syntax; named character
+classes use portable ASCII definitions. Locale-specific collating/equivalence
+classes and patterns longer than 4096 bytes are skipped rather than broadened.
+Symlinks and parent components are resolved in filesystem order, without
+lexically collapsing `link/..` to the wrong directory.
+
+This is an alias inventory, not an evaluation of connection settings: files in
+conditional `Host`/`Match` sections are inventoried without evaluating the
+conditions. Vuja never executes SSH, `Match exec`, shell expressions, or network
+requests for discovery. User `~/` paths, `${VARIABLE}`, and local `%d`, `%i`, and
+`%%` tokens are supported; other-user tildes and connection-dependent tokens are
+skipped instead of guessed. Environment values are never shown.
+
+Discovery stays on the existing asynchronous generator refresh boundary (a
+two-second result cache). Its shared inventory checks included-file identities,
+timestamps, directory changes, and referenced environment variables on refresh.
+Traversal is bounded to 128 configuration files, 16 levels, 2 MiB total and
+256 KiB per file, 128 glob directories with 4096 entries each, and 2048 aliases.
+When a bound is reached, only the deterministic inventory already discovered is
+used; there is no unbounded fallback. A discovered alias that is also in history
+keeps its structured description and badge while retaining history recall
+priority and display reservation; discovery does not hide a previously used
+command merely because it now appears in an included configuration.
+
 ## Configuration
 
 Vuja reads `~/.config/vuja/config.toml`. Create the canonical file or print the

@@ -323,6 +323,10 @@ func transitionScoreFor(cmdSkeleton string, entries []TransitionEntry, isLocal b
 }
 
 func basePriorityFor(s spec.Suggestion) int {
+	return max(providerBasePriorityFor(s), min(max(s.HistoryConfidence, 0), 100))
+}
+
+func providerBasePriorityFor(s spec.Suggestion) int {
 	if s.Priority > 0 {
 		if s.Priority > 100 {
 			return 100

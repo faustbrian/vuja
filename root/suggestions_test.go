@@ -1,12 +1,106 @@
 package root
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
 )
+
+func TestSSHIncludeCandidatesPreserveHistoryRankAndDisplay(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(filepath.Join(dir, "parts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{
+		"config":      "Host vuja-alpha\nInclude parts/bravo\n",
+		"parts/bravo": "Host vuja-bravo\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range []string{"ssh", "scp", "sftp", "rsync"} {
+		t.Run(command, func(t *testing.T) {
+			query := command + " vuja-"
+			var mapped []spec.Suggestion
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				mapped = spec.LookupContextPrepared(t.Context(), query)
+				if slices.ContainsFunc(mapped, func(s spec.Suggestion) bool { return s.Cmd == command+" vuja-bravo" }) {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if !slices.ContainsFunc(mapped, func(s spec.Suggestion) bool { return s.Cmd == command+" vuja-bravo" }) {
+				t.Fatal("included host never reached production command mapping")
+			}
+			history := []integration.HistResult{{Cmd: command + " vuja-bravo"}}
+			signals := scoring.SignalSet{Query: query} // cold/expired signal-cache fallback
+			baseline := slices.DeleteFunc(slices.Clone(mapped), func(s spec.Suggestion) bool { return strings.HasSuffix(s.Cmd, "vuja-bravo") })
+			before := limitScoredSuggestions(scoring.Score(collectSuggestionCandidates(query, baseline, history), signals), 1, query)
+			if len(before) != 1 || before[0].Cmd != command+" vuja-bravo" {
+				t.Fatalf("expected history command before discovery, got %+v", before)
+			}
+			after := limitScoredSuggestions(scoring.Score(collectSuggestionCandidates(query, mapped, history), signals), 1, query)
+			if len(after) != 1 || after[0].Cmd != before[0].Cmd {
+				t.Fatalf("discovering a previously used alias hid it: before=%+v after=%+v", before, after)
+			}
+			if after[0].Source != "spec" || after[0].Desc != "ssh host" {
+				t.Fatalf("history merge discarded structured alias metadata: %+v", after[0])
+			}
+		})
+	}
+}
+
+func TestCollectSuggestionCandidatesPreservesHistoryReservationForStructuredDuplicates(t *testing.T) {
+	query := "deploy"
+	candidates := collectSuggestionCandidates(query,
+		[]spec.Suggestion{{Cmd: "deploy --help", Priority: 100}, {Cmd: "deploy production", Desc: "production target"}},
+		[]integration.HistResult{{Cmd: "deploy production"}},
+	)
+	// Stronger specification priority can still rank first, but the existing
+	// exact-prefix history reservation must survive the metadata merge.
+	scored := scoring.Score(candidates, scoring.SignalSet{Query: query})
+	results := limitScoredSuggestions(scored, 1, query)
+	if len(results) != 1 || results[0].Cmd != "deploy production" {
+		t.Fatalf("structured collision lost history reservation: %+v", results)
+	}
+}
+
+func TestHistoryCollisionKeepsFunctionAndFilesystemMetadata(t *testing.T) {
+	for _, source := range []string{"function", "filesystem"} {
+		candidates := collectSuggestionCandidates("deploy", []spec.Suggestion{{
+			ID: "provider:stable", Cmd: "deploy production", Source: source,
+			Desc: "structured description", Icon: "provider-icon", Live: source == "filesystem",
+		}}, []integration.HistResult{{Cmd: "deploy production"}})
+		if len(candidates) != 1 || candidates[0].ID != "provider:stable" || candidates[0].Source != source || candidates[0].Desc != "structured description" || candidates[0].Icon != "provider-icon" || candidates[0].Live != (source == "filesystem") {
+			t.Fatalf("history collision changed provider identity: %+v", candidates)
+		}
+		boostHistoryRecall(candidates)
+		scored := scoring.Score(candidates, scoring.SignalSet{Query: "deploy"})
+		if len(scored) != 1 || scored[0].Breakdown.BasePriority != 100 {
+			t.Fatalf("history-mode recall boost was lost: %+v", scored)
+		}
+	}
+}
+
+func TestSuggestionPipelineDetectsChangedHistoryEvidence(t *testing.T) {
+	before := []spec.Suggestion{{Cmd: "ssh prod", Source: "spec", HistoryConfidence: 90}}
+	after := slices.Clone(before)
+	after[0].HistoryConfidence = 65
+	if sameSuggestionResults(before, after) {
+		t.Fatal("changed history recall evidence was treated as the same async result")
+	}
+}
 
 func TestCollectSuggestionCandidatesIncludesHistoryInDefaultMode(t *testing.T) {
 	results := collectSuggestionCandidates(

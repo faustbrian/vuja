@@ -1,11 +1,9 @@
 package ops
 
 import (
-	"bufio"
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/faustbrian/vuja/spec"
 )
@@ -16,48 +14,10 @@ func sshHostGenerator(ctx context.Context, tokens []string, _ string, _ string) 
 		return nil
 	}
 
-	paths := []string{
-		filepath.Join(home, ".ssh", "config"),
-		"/etc/ssh/ssh_config",
-	}
-
-	seen := make(map[string]bool)
-	var results []spec.Suggestion
-
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			if ctx.Err() != nil {
-				_ = f.Close()
-				return nil
-			}
-			parts := strings.Fields(scanner.Text())
-			if len(parts) < 2 || !strings.EqualFold(parts[0], "host") {
-				continue
-			}
-
-			for _, host := range parts[1:] {
-				// skip wildcards
-				if strings.ContainsAny(host, "*?!") {
-					continue
-				}
-				if seen[host] {
-					continue
-				}
-				seen[host] = true
-				results = append(results, spec.Suggestion{Cmd: host, Desc: "ssh host"})
-			}
-		}
-		_ = scanner.Err()
-		_ = f.Close()
-	}
-
-	return results
+	return sshHosts.load(ctx, home, []sshConfigRoot{
+		{filepath.Join(home, ".ssh", "config"), filepath.Join(home, ".ssh"), true},
+		{"/etc/ssh/ssh_config", "/etc/ssh", false},
+	})
 }
 
 func init() {

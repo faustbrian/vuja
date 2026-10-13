@@ -140,6 +140,7 @@ func sameSuggestionResults(left, right []spec.Suggestion) bool {
 			left[index].Desc != right[index].Desc || left[index].Icon != right[index].Icon ||
 			left[index].Live != right[index].Live ||
 			left[index].Confidence != right[index].Confidence ||
+			left[index].HistoryConfidence != right[index].HistoryConfidence ||
 			left[index].Priority != right[index].Priority {
 			return false
 		}

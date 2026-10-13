@@ -8,6 +8,7 @@ func init() {
 	spec.Register(&spec.Spec{
 		Name:        "sftp",
 		Description: "OpenSSH secure file transfer",
+		Generator:   sshHostGenerator,
 		Options: []spec.Option{
 			{Name: "--help", Description: "Show help for sftp"},
 			{Name: "-4", Description: "Forces scp to use IPv4 addresses only"},

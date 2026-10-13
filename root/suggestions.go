@@ -62,11 +62,7 @@ func mergeFastResultsProfiled(query string, mode string) ([]spec.Suggestion, map
 		}
 	}
 	if mode == "history" {
-		for index := range candidates {
-			if candidates[index].Source == "history" {
-				candidates[index].Confidence = min(candidates[index].Confidence+20, 100)
-			}
-		}
+		boostHistoryRecall(candidates)
 	}
 	var scored []scoring.ScoredSuggestion
 	measure("fast-rank", func() {
@@ -94,7 +90,7 @@ func limitScoredSuggestions(scored []scoring.ScoredSuggestion, limit int, query 
 		return results
 	}
 	isExactPrefixHistory := func(suggestion spec.Suggestion) bool {
-		return suggestion.Source == "history" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(suggestion.Cmd)), query)
+		return (suggestion.Source == "history" || suggestion.HistoryConfidence > 0) && strings.HasPrefix(strings.ToLower(strings.TrimSpace(suggestion.Cmd)), query)
 	}
 	for _, suggestion := range results {
 		if isExactPrefixHistory(suggestion) {
@@ -279,11 +275,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 		normalizedQuery = strings.TrimSpace(segment.Prefix + normalizedQuery)
 	}
 	if mode == "history" {
-		for i := range deduped {
-			if deduped[i].Source == "history" {
-				deduped[i].Confidence = min(deduped[i].Confidence+20, 100)
-			}
-		}
+		boostHistoryRecall(deduped)
 	}
 
 	seen := make(map[string]bool, len(deduped))
@@ -340,6 +332,8 @@ func dedupeSuggestionCandidates(query string, suggestions []spec.Suggestion) []s
 		key := canonicalDirectorySuggestion(suggestion.Cmd)
 		if position, ok := positions[key]; ok {
 			existing := &deduped[position]
+			historyConfidence := max(existing.HistoryConfidence, suggestion.HistoryConfidence)
+			existing.HistoryConfidence = historyConfidence
 			if existing.Source == "filesystem" && suggestion.Source == "directory-index" {
 				// The filesystem candidate proves the path currently exists, while the
 				// directory index carries the recency/frequency rank. Preserve the live
@@ -352,6 +346,7 @@ func dedupeSuggestionCandidates(query string, suggestions []spec.Suggestion) []s
 				continue
 			}
 			if suggestion.Cmd == existing.Cmd && suggestion.Priority > existing.Priority {
+				suggestion.HistoryConfidence = historyConfidence
 				deduped[position] = suggestion
 				continue
 			}
@@ -458,12 +453,12 @@ func gitStateSuggestions(query string, ws workspace.WorkspaceInfo) []spec.Sugges
 
 func collectSuggestionCandidates(query string, commandResults []spec.Suggestion, historyResults []integration.HistResult) []spec.Suggestion {
 	normalizedQuery := strings.TrimSpace(query)
-	seen := make(map[string]bool)
+	seen := make(map[string]int)
 	candidates := make([]spec.Suggestion, 0, len(commandResults)+len(historyResults))
 
 	add := func(suggestion spec.Suggestion) {
 		suggestion.Cmd = strings.TrimSpace(suggestion.Cmd)
-		if suggestion.Cmd == "" || suggestion.Cmd == normalizedQuery || seen[suggestion.Cmd] {
+		if suggestion.Cmd == "" || suggestion.Cmd == normalizedQuery {
 			return
 		}
 		if suggestion.Source == "" {
@@ -472,7 +467,16 @@ func collectSuggestionCandidates(query string, commandResults []spec.Suggestion,
 		if suggestion.Confidence == 0 {
 			suggestion.Confidence = 50
 		}
-		seen[suggestion.Cmd] = true
+		if suggestion.Source == "history" {
+			suggestion.HistoryConfidence = max(suggestion.HistoryConfidence, suggestion.Confidence)
+		}
+		if position, exists := seen[suggestion.Cmd]; exists {
+			// Keep structured provider identity, descriptions and badges, while
+			// retaining the history evidence used for ranking and cap reservation.
+			candidates[position].HistoryConfidence = max(candidates[position].HistoryConfidence, suggestion.HistoryConfidence)
+			return
+		}
+		seen[suggestion.Cmd] = len(candidates)
 		candidates = append(candidates, suggestion)
 	}
 
@@ -491,6 +495,17 @@ func collectSuggestionCandidates(query string, commandResults []spec.Suggestion,
 		})
 	}
 	return candidates
+}
+
+func boostHistoryRecall(candidates []spec.Suggestion) {
+	for index := range candidates {
+		if candidates[index].Source == "history" {
+			candidates[index].Confidence = min(candidates[index].Confidence+20, 100)
+		}
+		if candidates[index].HistoryConfidence > 0 {
+			candidates[index].HistoryConfidence = min(candidates[index].HistoryConfidence+20, 100)
+		}
+	}
 }
 
 func injectAISuggestion(deduped *[]spec.Suggestion, seen map[string]bool, normalizedQuery string) {
