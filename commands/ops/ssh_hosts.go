@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 	"golang.org/x/sys/unix"
 )
@@ -52,9 +54,20 @@ type sshHostInventory struct {
 var sshHosts sshHostInventory
 
 func (c *sshHostInventory) load(ctx context.Context, home string, roots []sshConfigRoot) []spec.Suggestion {
+	started := time.Now()
+	attempted := false
+	var outcomeErr error
+	// Observe after unlocking: session observers must not inherit inventory
+	// ownership. Reusing a cached snapshot is not another acquisition attempt.
+	defer func() {
+		if attempted {
+			health.Report(ctx, health.SSHHosts, time.Since(started), outcomeErr)
+		}
+	}()
 	c.Lock()
 	defer c.Unlock()
 	if ctx.Err() != nil {
+		attempted, outcomeErr = true, ctx.Err()
 		return nil
 	}
 	valid := c.files != nil && c.home == home && slices.Equal(c.roots, roots)
@@ -62,28 +75,44 @@ func (c *sshHostInventory) load(ctx context.Context, home string, roots []sshCon
 		if !valid || ctx.Err() != nil {
 			break
 		}
-		current, _ := os.Stat(path)
-		valid = sameSSHFile(old, current)
+		current, statErr := os.Stat(path)
+		valid = sameSSHFile(old, current) && (statErr == nil || errors.Is(statErr, os.ErrNotExist))
 	}
 	for key, value := range c.env {
 		current, present := os.LookupEnv(key)
 		valid = valid && value == (sshEnvironmentValue{current, present})
 	}
 	if ctx.Err() != nil {
+		attempted, outcomeErr = true, ctx.Err()
 		return nil
 	}
 	if valid {
 		return slices.Clone(c.results)
 	}
+	attempted = true
 	p := sshHostParser{ctx: ctx, home: home, files: make(map[string]os.FileInfo), env: make(map[string]sshEnvironmentValue), requested: make(map[string]bool), visited: make(map[string]bool), hosts: make(map[string]bool)}
 	for _, root := range roots {
+		if ctx.Err() != nil {
+			break
+		}
+		// The finite configured roots are optional. An absent second root
+		// must not turn an otherwise complete exact-cap graph into a failure;
+		// retain its absence as a dependency so creation invalidates the cache.
+		if _, err := os.Stat(root.path); errors.Is(err, os.ErrNotExist) {
+			p.files[root.path] = nil
+			continue
+		}
 		p.read(root.path, root, 0)
+	}
+	outcomeErr = p.err
+	if outcomeErr == nil && p.readFiles == 0 {
+		outcomeErr = os.ErrNotExist
 	}
 	if ctx.Err() != nil {
 		return nil
 	}
 	c.home, c.roots, c.files, c.env, c.results = home, slices.Clone(roots), p.files, p.env, p.results
-	if p.unstable {
+	if p.unstable || p.err != nil {
 		c.files = nil
 	}
 	return slices.Clone(p.results)
@@ -120,10 +149,21 @@ type sshHostParser struct {
 	results                   []spec.Suggestion
 	bytes, directories        int
 	unstable                  bool
+	readFiles                 int
+	err                       error
+}
+
+var errSSHConfigLimit = errors.New("SSH discovery limit reached")
+var errSSHConfigType = errors.New("SSH configuration is not a regular file or directory")
+
+func (p *sshHostParser) fail(err error) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) && p.err == nil {
+		p.err = err
+	}
 }
 
 func (p *sshHostParser) read(path string, root sshConfigRoot, depth int) {
-	if p.ctx.Err() != nil || depth >= sshConfigDepth || len(p.requested) >= sshConfigFiles || p.bytes >= sshConfigBytes {
+	if p.ctx.Err() != nil {
 		return
 	}
 	identity := root.base + "\x00" + strconv.FormatBool(root.user)
@@ -131,10 +171,15 @@ func (p *sshHostParser) read(path string, root sshConfigRoot, depth int) {
 	if p.requested[request] {
 		return
 	}
+	if depth >= sshConfigDepth || len(p.requested) >= sshConfigFiles || p.bytes >= sshConfigBytes {
+		p.fail(errSSHConfigLimit)
+		return
+	}
 	p.requested[request] = true
 	// Every lexical alias remains a dependency even when its current target has
 	// already been parsed. Retargeting a duplicate symlink must invalidate us.
-	before, _ := os.Stat(path)
+	before, statErr := os.Stat(path)
+	p.fail(statErr)
 	p.files[path] = before
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -145,26 +190,46 @@ func (p *sshHostParser) read(path string, root sshConfigRoot, depth int) {
 		return
 	}
 	p.visited[canonical] = true
-	if before == nil || !before.Mode().IsRegular() || before.Size() > sshFileBytes {
+	if before == nil {
+		return
+	}
+	if !before.Mode().IsRegular() {
+		p.fail(errSSHConfigType)
+		return
+	}
+	if before.Size() > sshFileBytes {
+		p.fail(errSSHConfigLimit)
 		return
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
+		p.fail(err)
 		return
 	}
 	f := os.NewFile(uintptr(fd), "SSH configuration")
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > sshFileBytes {
+	if err != nil {
+		p.fail(err)
+		return
+	}
+	if !info.Mode().IsRegular() {
+		p.fail(errSSHConfigType)
+		return
+	}
+	if info.Size() > sshFileBytes {
+		p.fail(errSSHConfigLimit)
 		return
 	}
 	budget := min(sshFileBytes, sshConfigBytes-p.bytes)
 	data, after, err := readSSHConfigSnapshot(f, info, budget)
 	p.bytes += len(data)
 	if err != nil {
+		p.fail(err)
 		p.unstable = p.unstable || errors.Is(err, errSSHConfigUnstable)
 		return
 	}
+	p.readFiles++
 	p.files[path] = after
 	for _, line := range strings.Split(string(data), "\n") {
 		if p.ctx.Err() != nil {
@@ -177,7 +242,11 @@ func (p *sshHostParser) read(path string, root sshConfigRoot, depth int) {
 		switch strings.ToLower(parts[0]) {
 		case "host":
 			for _, host := range parts[1:] {
-				if len(p.results) >= sshHostLimit || !safeSSHHost(host) || p.hosts[host] {
+				if !safeSSHHost(host) || p.hosts[host] {
+					continue
+				}
+				if len(p.results) >= sshHostLimit {
+					p.fail(errSSHConfigLimit)
 					continue
 				}
 				p.hosts[host] = true
@@ -352,11 +421,16 @@ func sshAppendPath(base, part string) string {
 // Unlike filepath.Glob, this bounds directory allocations and traversal too.
 func (p *sshHostParser) glob(pattern string) []string {
 	if len(pattern) > 4096 {
+		p.fail(errSSHConfigLimit)
 		return nil
 	}
 	var walk func(string, []string) []string
 	walk = func(base string, parts []string) []string {
-		if p.ctx.Err() != nil || len(p.files) >= sshConfigFiles+sshGlobDirectories {
+		if p.ctx.Err() != nil {
+			return nil
+		}
+		if len(p.files) >= sshConfigFiles+sshGlobDirectories {
+			p.fail(errSSHConfigLimit)
 			return nil
 		}
 		if len(parts) == 0 {
@@ -367,26 +441,39 @@ func (p *sshHostParser) glob(pattern string) []string {
 			return walk(sshAppendPath(base, part), parts[1:])
 		}
 		if p.directories >= sshGlobDirectories {
+			p.fail(errSSHConfigLimit)
 			return nil
 		}
 		p.directories++
-		info, _ := os.Stat(base)
+		info, statErr := os.Stat(base)
+		p.fail(statErr)
 		p.files[base] = info
-		if info == nil || !info.IsDir() {
+		if info == nil {
+			return nil
+		}
+		if !info.IsDir() {
+			p.fail(errSSHConfigType)
 			return nil
 		}
 		f, err := os.Open(base)
 		if err != nil {
+			p.fail(err)
 			return nil
 		}
 		entries, err := f.ReadDir(sshDirectoryEntries + 1)
 		f.Close()
-		if err != nil && err != io.EOF || len(entries) > sshDirectoryEntries {
+		if err != nil && err != io.EOF {
+			p.fail(err)
+			return nil
+		}
+		if len(entries) > sshDirectoryEntries {
+			p.fail(errSSHConfigLimit)
 			return nil
 		}
 		slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 		matcher, err := sshGlobMatcher(part)
 		if err != nil {
+			p.fail(err)
 			return nil
 		}
 		var results []string
@@ -397,7 +484,8 @@ func (p *sshHostParser) glob(pattern string) []string {
 			if matcher.MatchString(entry.Name()) {
 				results = append(results, walk(sshAppendPath(base, entry.Name()), parts[1:])...)
 			}
-			if len(results) >= sshConfigFiles {
+			if len(results) > sshConfigFiles {
+				p.fail(errSSHConfigLimit)
 				return results[:sshConfigFiles]
 			}
 		}

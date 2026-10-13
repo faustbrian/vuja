@@ -4,13 +4,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
 )
 
 func sshHostGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {
+	started := time.Now()
 	home, err := os.UserHomeDir()
 	if err != nil {
+		health.Report(ctx, health.SSHHosts, time.Since(started), err)
 		return nil
 	}
 

@@ -917,7 +917,10 @@ inventory tool. A successful pip3 fallback reports one successful inventory;
 a missing fallback does not hide a failed installed pip. Optional executable
 absence stays quiet, and zoxide failure does not remove local directories.
 Git's optional active-branch priority probe is not treated as a failed primary
-ref inventory. SSH-discovery and workspace metadata outcomes are not yet
+ref inventory. SSH discovery reports failed, unstable or bounded-partial
+acquisition while preserving usable aliases; absent optional configuration
+and unmatched Include paths stay quiet. Valid empty configuration can confirm
+recovery, but cached aliases cannot. Workspace metadata outcomes are not yet
 instrumented.
 
 Terminal dimensions and visual recovery counters come from the most recently

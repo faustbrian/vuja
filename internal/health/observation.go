@@ -46,6 +46,7 @@ const (
 	DockerContainersRunning
 	DockerImages
 	ZoxideCompletion
+	SSHHosts
 	SourceCount
 )
 
@@ -96,7 +97,7 @@ func Report(ctx context.Context, source Source, duration time.Duration, err erro
 		outcome = Skipped
 	case errors.Is(err, errors.ErrUnsupported) && source == Completion:
 		outcome = Skipped
-	case errors.Is(err, os.ErrNotExist) && (source == Files || source == Project || source == Workspace || source == NpmScripts || source == MakeTargets || source == JustRecipes):
+	case errors.Is(err, os.ErrNotExist) && (source == Files || source == Project || source == Workspace || source == NpmScripts || source == MakeTargets || source == JustRecipes || source == SSHHosts):
 		outcome = Skipped
 	case err != nil:
 		outcome = Failed
@@ -130,7 +131,7 @@ func (s Source) Name() string {
 	names := [...]string{"history-persistence", "visual", "files", "completion", "history", "workspace", "project", "directory", "arguments", "recovery", "signals", "ai", "npm-scripts", "make-targets", "just-recipes",
 		"git-commits", "git-branches", "git-remotes", "git-tags", "git-stashes", "pip-installed",
 		"packages-pacman", "packages-yay", "packages-paru", "packages-debian", "packages-rpm", "packages-brew",
-		"processes", "docker-containers-all", "docker-containers-running", "docker-images", "zoxide-completion"}
+		"processes", "docker-containers-all", "docker-containers-running", "docker-images", "zoxide-completion", "ssh-hosts"}
 	if s >= SourceCount {
 		return "unknown"
 	}

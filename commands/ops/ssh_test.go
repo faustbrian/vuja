@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/tests/providerfixture"
 	"golang.org/x/sys/unix"
 )
 
@@ -211,10 +213,12 @@ func TestSSHDiscoveryBoundsCyclesDepthFilesBytesAndHosts(t *testing.T) {
 			}
 			home, roots := sshFixture(t, files)
 			var cache sshHostInventory
-			got := cache.load(t.Context(), home, roots)
+			ctx, observations := providerfixture.Observe(t, "inventory")
+			got := cache.load(ctx, home, roots)
 			if len(got) != want {
 				t.Fatalf("%s limit want %d hosts, got %d", mode, want, len(got))
 			}
+			providerfixture.Check(t, *observations, "ssh-hosts", health.Failed)
 			for i, result := range got {
 				name := fmt.Sprintf("host-%d", i)
 				switch mode {
