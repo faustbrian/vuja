@@ -23,6 +23,10 @@ const (
 // A concurrent append may become visible on the next bounded tick, but can
 // never be acknowledged or removed by this read-only check.
 func historyRecoveryJournalPending() (bool, error) {
+	return historyRecoveryJournalPendingWithOffset(readHistoryRecoveryOffset)
+}
+
+func historyRecoveryJournalPendingWithOffset(readOffset func() (int64, bool, error)) (bool, error) {
 	path, err := historyRecoveryJournalPath()
 	if err != nil {
 		return false, err
@@ -34,10 +38,13 @@ func historyRecoveryJournalPending() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if !info.Mode().IsRegular() {
+		return false, errors.New("history recovery journal is not a regular file")
+	}
 	if info.Size() == 0 {
 		return false, nil
 	}
-	offset, present, err := readHistoryRecoveryOffset()
+	offset, present, err := readOffset()
 	if err != nil {
 		return false, err
 	}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/faustbrian/vuja/internal/cachemetrics"
@@ -20,13 +21,14 @@ import (
 const latencySampleLimit = 256
 
 type latencySnapshot struct {
-	UpdatedAt     time.Time                    `json:"updated_at"`
-	SessionID     string                       `json:"session_id"`
-	PID           int                          `json:"pid"`
-	SamplesUS     map[string][]int64           `json:"samples_us"`
-	Cache         map[string]cacheLatencyStats `json:"cache"`
-	RuntimeCaches []cachemetrics.Snapshot      `json:"runtime_caches,omitempty"`
-	Timeouts      uint64                       `json:"timeouts"`
+	UpdatedAt     time.Time                     `json:"updated_at"`
+	SessionID     string                        `json:"session_id"`
+	PID           int                           `json:"pid"`
+	SamplesUS     map[string][]int64            `json:"samples_us"`
+	Cache         map[string]cacheLatencyStats  `json:"cache"`
+	RuntimeCaches []cachemetrics.Snapshot       `json:"runtime_caches,omitempty"`
+	Timeouts      uint64                        `json:"timeouts"`
+	Runtime       *runtimeDiagnosticObservation `json:"runtime,omitempty"`
 }
 
 type cacheLatencyStats struct {
@@ -35,10 +37,25 @@ type cacheLatencyStats struct {
 }
 
 type latencyRecorder struct {
-	events chan latencyEvent
-	stop   chan struct{}
-	done   chan struct{}
-	once   sync.Once
+	events  chan latencyEvent
+	stop    chan struct{}
+	done    chan struct{}
+	once    sync.Once
+	runtime atomic.Pointer[runtimeDiagnosticObservation]
+	writers sync.WaitGroup
+}
+
+func (r *latencyRecorder) recordRuntime(observation runtimeDiagnosticObservation) {
+	if r == nil {
+		return
+	}
+	if previous := r.runtime.Load(); previous != nil && *previous == observation {
+		return
+	}
+	// Keep the latest bounded observation even if interactive telemetry fills
+	// the event queue. Persistence remains on the recorder's existing worker.
+	r.runtime.Store(&observation)
+	r.enqueue(latencyEvent{kind: latencyRuntimeEvent})
 }
 
 type latencyEvent struct {
@@ -58,6 +75,7 @@ const (
 	latencySnapshotEvent
 	latencyPersistEvent
 	latencyPersistedEvent
+	latencyRuntimeEvent
 )
 
 func newLatencyRecorder() *latencyRecorder {
@@ -163,7 +181,11 @@ func (r *latencyRecorder) run(snapshot latencySnapshot) {
 			snapshot.Timeouts++
 			snapshot.UpdatedAt = time.Now()
 			schedule()
+		case latencyRuntimeEvent:
+			snapshot.UpdatedAt = time.Now()
+			schedule()
 		case latencySnapshotEvent:
+			snapshot.Runtime = r.runtime.Load()
 			snapshot.RuntimeCaches = cachemetrics.Snapshots()
 			event.reply <- cloneLatencySnapshot(snapshot)
 		case latencyPersistEvent:
@@ -172,9 +194,12 @@ func (r *latencyRecorder) run(snapshot latencySnapshot) {
 				continue
 			}
 			persisting = true
+			snapshot.Runtime = r.runtime.Load()
 			snapshot.RuntimeCaches = cachemetrics.Snapshots()
 			copySnapshot := cloneLatencySnapshot(snapshot)
+			r.writers.Add(1)
 			go func() {
+				defer r.writers.Done()
 				_ = persistLatencySnapshot(copySnapshot)
 				r.enqueue(latencyEvent{kind: latencyPersistedEvent, updated: copySnapshot.UpdatedAt})
 			}()
@@ -194,10 +219,15 @@ func (r *latencyRecorder) Close() {
 	}
 	r.once.Do(func() { close(r.stop) })
 	<-r.done
+	r.writers.Wait()
 }
 
 func cloneLatencySnapshot(snapshot latencySnapshot) latencySnapshot {
 	copySnapshot := snapshot
+	if snapshot.Runtime != nil {
+		observation := *snapshot.Runtime
+		copySnapshot.Runtime = &observation
+	}
 	copySnapshot.SamplesUS = make(map[string][]int64, len(snapshot.SamplesUS))
 	for phase, samples := range snapshot.SamplesUS {
 		copySnapshot.SamplesUS[phase] = append([]int64(nil), samples...)

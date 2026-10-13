@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -369,11 +368,8 @@ func configDifferences(defaults, current reflect.Value, prefix string) []string 
 }
 
 func runConfigDoctor(cmd *cobra.Command) error {
-	path, err := config.ConfigPath()
-	if err != nil {
-		return err
-	}
-	cfg, configErr := config.LoadPath(path)
+	doctor := inspectDoctor()
+	path, cfg, configErr := doctor.configPath, doctor.cfg, doctor.configErr
 	if configErr != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "FAIL config: %v\n", configErr)
 		cfg = config.DefaultConfig()
@@ -384,40 +380,24 @@ func runConfigDoctor(cmd *cobra.Command) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "WARN config: schema %d can be migrated to %d\n", cfg.Core.Version, config.CurrentVersion)
 	}
 
-	shell := cfg.Core.Shell
-	if shell == "" {
-		shell = filepath.Base(os.Getenv("SHELL"))
-	}
-	home, _ := os.UserHomeDir()
-	rcNames := map[string]string{"zsh": ".zshrc", "bash": ".bashrc", "fish": filepath.Join(".config", "fish", "config.fish")}
-	rcPath := filepath.Join(home, rcNames[shell])
+	rcPath := doctor.startupPath
 	fmt.Fprintln(cmd.OutOrStdout(), "OK shell: managed Vuja protocol is built in")
-	data, readErr := os.ReadFile(rcPath)
-	if readErr != nil {
+	if !doctor.startupAvailable {
 		fmt.Fprintf(cmd.OutOrStdout(), "INFO shell: optional startup file unavailable at %s\n", rcPath)
 	} else {
-		text := activeShellConfiguration(string(data))
-		if strings.Contains(text, ".local/share/vuja/init.") {
+		if doctor.autostart {
 			fmt.Fprintf(cmd.OutOrStdout(), "OK shell: optional autostart referenced by %s\n", rcPath)
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "INFO shell: no optional Vuja autostart hook")
 		}
-		var conflicts []string
-		for name, marker := range map[string]string{"starship": "starship init", "powerlevel10k": "powerlevel10k", "oh-my-posh": "oh-my-posh", "spaceship": "spaceship", "pure": "prompt pure"} {
-			if strings.Contains(strings.ToLower(text), marker) {
-				conflicts = append(conflicts, name)
-			}
-		}
-		sort.Strings(conflicts)
-		if len(conflicts) > 0 {
-			fmt.Fprintf(cmd.OutOrStdout(), "WARN prompt conflicts: %s\n", strings.Join(conflicts, ", "))
+		if len(doctor.conflicts) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "WARN prompt conflicts: %s\n", strings.Join(doctor.conflicts, ", "))
 		}
 	}
 
-	hook := filepath.Join(home, ".local", "share", "vuja", "init."+shell)
-	if hookData, hookErr := os.ReadFile(hook); hookErr == nil && len(hookData) > 0 {
-		hookText := string(hookData)
-		if strings.Contains(hookText, "VUJA_CMD_START") && strings.Contains(hookText, "prompt-start") {
+	hook := doctor.hookPath
+	if doctor.hookState != "unavailable" {
+		if doctor.hookState == "current" {
 			fmt.Fprintf(cmd.OutOrStdout(), "OK optional hook: %s\n", hook)
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "WARN optional hook: generated integration is stale at %s\n", hook)
@@ -425,26 +405,22 @@ func runConfigDoctor(cmd *cobra.Command) error {
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "INFO optional hook: not installed")
 	}
-	termName := os.Getenv("TERM")
-	if termName == "" || termName == "dumb" {
+	termName := doctor.term
+	if !doctor.interactive {
 		fmt.Fprintln(cmd.OutOrStdout(), "WARN terminal: TERM does not advertise an interactive terminal")
 	} else {
 		fmt.Fprintf(cmd.OutOrStdout(), "OK terminal: TERM=%s\n", termName)
 	}
-	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
-	if strings.Contains(colorTerm, "truecolor") || strings.Contains(colorTerm, "24bit") {
+	if doctor.truecolor {
 		fmt.Fprintln(cmd.OutOrStdout(), "OK terminal: truecolor advertised")
 	} else {
 		fmt.Fprintln(cmd.OutOrStdout(), "WARN terminal: truecolor not advertised; palette=terminal is safest")
 	}
-	locale := strings.ToLower(os.Getenv("LC_ALL") + " " + os.Getenv("LC_CTYPE") + " " + os.Getenv("LANG"))
-	if !strings.Contains(locale, "utf-8") && !strings.Contains(locale, "utf8") {
+	if !doctor.utf8 {
 		fmt.Fprintln(cmd.OutOrStdout(), "WARN terminal: UTF-8 locale not detected")
 	}
-	if columns := os.Getenv("COLUMNS"); columns != "" {
-		if value, parseErr := strconv.Atoi(columns); parseErr == nil && value < 40 {
-			fmt.Fprintf(cmd.OutOrStdout(), "WARN terminal: narrow width %d\n", value)
-		}
+	if doctor.columns > 0 && doctor.columns < 40 {
+		fmt.Fprintf(cmd.OutOrStdout(), "WARN terminal: narrow width %d\n", doctor.columns)
 	}
 	return configErr
 }

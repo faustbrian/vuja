@@ -80,6 +80,17 @@ func LoadPath(path string) (*Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("config: read %s: %w", path, err)
 	}
+	return decodeConfig(data, path)
+}
+
+// Decode validates configuration bytes without opening files or repairing
+// permissions. Read-only diagnostics share the normal compatibility rules.
+func Decode(data []byte) (*Config, error) {
+	return decodeConfig(data, "configuration")
+}
+
+func decodeConfig(data []byte, path string) (*Config, error) {
+	cfg := DefaultConfig()
 	metadata, err := toml.Decode(string(data), cfg)
 	if err != nil {
 		return cfg, fmt.Errorf("config: parse %s: %w", path, err)

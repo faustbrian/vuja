@@ -161,6 +161,7 @@ vuja config preset <minimal|balanced|context-rich|ops> [--write] [--force]
 vuja config preview --preset balanced --width 120 --night
 vuja debug suggest "<query>" [--cwd <directory>] [--mode spec|history] [--json]
 vuja debug latency [--session <id>] [--json]
+vuja debug diagnostics
 vuja history doctor
 vuja history stats
 vuja history sources
@@ -861,6 +862,23 @@ later invocation instead of whichever session updated most recently. Use
 `--json` for machine-readable output. Samples are bounded and persisted at most
 once per second, so diagnostics do not add synchronous disk work to a
 keystroke.
+
+`vuja debug diagnostics` emits a sanitized JSON support report without
+launching a shell, migrating configuration, replaying history, or repairing
+permissions. It includes finite configuration and terminal-capability metadata,
+read-only history statistics, pending recovery, recorded persistence failures,
+and bounded latency summaries. Credentials, command/output text, account email,
+environment values, session/process identifiers and identifying paths are
+omitted. Missing or unreadable inputs are reported as unavailable, not healthy.
+The existing detailed `config doctor` and `debug latency` commands retain their
+more identifying output; use the sanitized command when sharing diagnostics.
+
+Terminal dimensions and visual recovery counters come from the most recently
+updated session's telemetry. They are **recorded observations**, not a live
+inspection of every open pane. Historical recovery counts do not establish an
+ongoing fault, and a readable history database does not prove future writes will
+succeed. Reading an active SQLite WAL database may update its shared-memory
+coordination files, but diagnostics do not change canonical events or journals.
 
 Build a versioned release binary:
 

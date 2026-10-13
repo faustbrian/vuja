@@ -114,11 +114,11 @@ const walCheckpointInterval = 10 * time.Minute
 
 func NewFrecencyStore(dbPath string) (*FrecencyStore, error) {
 	if dbPath == "" {
-		home, err := os.UserHomeDir()
+		var err error
+		dbPath, err = DefaultHistoryPath()
 		if err != nil {
 			return nil, err
 		}
-		dbPath = filepath.Join(home, ".local", "share", "vuja", "history.db")
 	}
 
 	dir := filepath.Dir(dbPath)

@@ -197,6 +197,13 @@ func runOriginal() {
 }
 
 func Execute() {
+	if handled, err := executeDiagnosticsInvocation(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	_ = config.MigrateFromLegacyJSON()
 	cfg, err := loadRuntimeConfig()
 	if err != nil {

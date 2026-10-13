@@ -356,6 +356,8 @@ func runWrapper() {
 		display.SetInputBoxPath(cwd)
 	}
 	defer display.Close()
+	stopRuntimeDiagnostics := startRuntimeDiagnostics(display, suggestionLatency)
+	defer stopRuntimeDiagnostics()
 	statusSegments := config.Get().UI.Chatbox.Segments()
 	managedStatus := display.Managed()
 	status := newStatusEngine(statusEngineOptions{

@@ -545,6 +545,10 @@ func readHistoryRecoveryOffset() (int64, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
+	return parseHistoryRecoveryOffset(data)
+}
+
+func parseHistoryRecoveryOffset(data []byte) (int64, bool, error) {
 	if len(data) > 64 {
 		return 0, false, nil
 	}

@@ -151,6 +151,7 @@ var DebugCmd = &cobra.Command{
 func init() {
 	DebugCmd.AddCommand(newDebugSuggestCommand())
 	DebugCmd.AddCommand(newDebugLatencyCommand())
+	DebugCmd.AddCommand(newDebugDiagnosticsCommand())
 	rootCmd.AddCommand(DebugCmd)
 }
 

@@ -3,10 +3,32 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDecodeSharesFileLoaderValidationWithoutFileAccess(t *testing.T) {
+	for _, content := range []string{
+		"[ui.chatbox]\nprompt = 'fixture> '\n",
+		"[history]\nprefer-atuin = true\n",
+		"[ui.chatbox]\nsurface-width = 'unsupported'\n",
+		"[private-unknown]\ncredential = 'private-value'\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			decoded, decodeErr := Decode([]byte(content))
+			loaded, loadErr := LoadPath(path)
+			if (decodeErr == nil) != (loadErr == nil) || !reflect.DeepEqual(decoded, loaded) {
+				t.Fatalf("in-memory parsing diverged from file parsing: decoded=%+v loaded=%+v errors=%v/%v", decoded, loaded, decodeErr, loadErr)
+			}
+		})
+	}
+}
 
 func TestPresetsAreValidAndUseBottomPrompt(t *testing.T) {
 	for _, name := range PresetNames {
