@@ -510,9 +510,9 @@ func (o *Overlay) SetHistorySearch(query string, label string, items []spec.Sugg
 	contextLabel := historyContextLabel(query, label)
 	selectedID := ""
 	selectedCommand := ""
-	preserveSelection := o.UserNavigated && !o.RichHistory && o.ContextLabel == contextLabel &&
-		o.TypedQuery == query && o.Cursor >= 0 && o.Cursor < len(o.Items)
-	if preserveSelection {
+	sameSearch := !o.RichHistory && o.ContextLabel == contextLabel && o.TypedQuery == query
+	navigated := o.UserNavigated
+	if sameSearch && o.Cursor >= 0 && o.Cursor < len(o.Items) {
 		selectedID = o.Items[o.Cursor].ID
 		selectedCommand = o.Items[o.Cursor].Cmd
 	}
@@ -525,13 +525,13 @@ func (o *Overlay) SetHistorySearch(query string, label string, items []spec.Sugg
 	o.HistoryResults = nil
 	o.Visible = len(items) > 0
 	o.Cursor = noOverlaySelection
-	if len(items) > 0 {
+	if !sameSearch && len(items) > 0 {
 		o.Cursor = 0
 	}
-	if preserveSelection {
+	if sameSearch {
 		if index := selectedSuggestionIndex(items, selectedID, selectedCommand); index >= 0 {
 			o.Cursor = index
-			o.UserNavigated = true
+			o.UserNavigated = navigated
 		}
 	}
 	o.StartIdx = 0
@@ -544,9 +544,9 @@ func (o *Overlay) SetRichHistorySearch(query string, label string, results []Ric
 	contextLabel := historyContextLabel(query, label)
 	selectedID := ""
 	selectedCommand := ""
-	preserveSelection := o.UserNavigated && o.RichHistory && !o.RecentHistory &&
-		o.TypedQuery == query && o.ContextLabel == contextLabel && o.Cursor >= 0 && o.Cursor < len(o.Items)
-	if preserveSelection {
+	sameSearch := o.RichHistory && !o.RecentHistory && o.TypedQuery == query && o.ContextLabel == contextLabel
+	navigated := o.UserNavigated
+	if sameSearch && o.Cursor >= 0 && o.Cursor < len(o.Items) {
 		selectedCommand = o.Items[o.Cursor].Cmd
 		if o.Cursor < len(o.HistoryResults) {
 			selectedID = o.HistoryResults[o.Cursor].ID
@@ -571,13 +571,13 @@ func (o *Overlay) SetRichHistorySearch(query string, label string, results []Ric
 	}
 	o.Visible = true
 	o.Cursor = noOverlaySelection
-	if len(results) > 0 {
+	if !sameSearch && len(results) > 0 {
 		o.Cursor = 0
 	}
-	if preserveSelection {
-		if index := selectedHistoryResultIndex(results, selectedID, selectedCommand); index >= 0 {
+	if sameSearch {
+		if index := selectedSuggestionIndex(o.Items, selectedID, selectedCommand); index >= 0 {
 			o.Cursor = index
-			o.UserNavigated = true
+			o.UserNavigated = navigated
 		}
 	}
 	o.StartIdx = 0
@@ -619,39 +619,29 @@ func historyContextLabel(query, label string) string {
 }
 
 func selectedSuggestionIndex(items []spec.Suggestion, selectedID, selectedCommand string) int {
-	if selectedID != "" {
-		for index := range items {
-			if items[index].ID == selectedID {
-				return index
+	if selectedCommand == "" {
+		return noOverlaySelection
+	}
+	// An authoritative ID must never fall back to another execution with the
+	// same command. ID reuse with changed command text also loses selection.
+	// Legacy providers without IDs may preserve a unique command match only.
+	selected := noOverlaySelection
+	for index := range items {
+		matches := items[index].Cmd == selectedCommand
+		if selectedID != "" {
+			matches = items[index].ID == selectedID
+		}
+		if matches {
+			if selected != noOverlaySelection {
+				return noOverlaySelection
 			}
+			selected = index
 		}
 	}
-	if selectedCommand != "" {
-		for index := range items {
-			if items[index].Cmd == selectedCommand {
-				return index
-			}
-		}
+	if selected >= 0 && items[selected].Cmd != selectedCommand {
+		return noOverlaySelection
 	}
-	return -1
-}
-
-func selectedHistoryResultIndex(results []RichHistoryResult, selectedID, selectedCommand string) int {
-	if selectedID != "" {
-		for index := range results {
-			if results[index].ID == selectedID {
-				return index
-			}
-		}
-	}
-	if selectedCommand != "" {
-		for index := range results {
-			if results[index].Command == selectedCommand {
-				return index
-			}
-		}
-	}
-	return -1
+	return selected
 }
 
 func (o *Overlay) InjectAISuggestion(sugg spec.Suggestion) bool {

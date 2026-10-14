@@ -206,6 +206,11 @@ accepts the same optional flag.
 | <kbd>Ctrl</kbd> + <kbd>C</kbd> | Cancel the current command |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | Delete the previous word |
 
+As suggestions are enriched, a selection follows the same identity and command,
+not its row number. If it disappears, changes command, or becomes ambiguous,
+selection clears and the footer returns to **Run typed**. Choose a row again
+to execute a replacement; ghost text alone is never an execution selection.
+
 Vuja handles line-editing shortcuts directly while the terminal is in raw mode
 so its input buffer and suggestion menu remain synchronized. The table shows
 the defaults. `keybindings.keymap = "emacs"` uses Ctrl+A/C/E/L/U/W; `"vi"`
