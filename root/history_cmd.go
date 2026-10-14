@@ -203,7 +203,7 @@ func formatHistoryExplanation(
 }
 
 var historyImportCmd = &cobra.Command{
-	Use: "import <atuin|shell>", Args: cobra.ExactArgs(1), Short: "import an optional external history source",
+	Use: "import <atuin|shell|native>", Args: cobra.ExactArgs(1), Short: "import an optional external source or native Vuja archive",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, _, cancel, err := historyCommandStore()
 		defer cancel()
@@ -284,5 +284,7 @@ func init() {
 	historyClearCmd.Flags().BoolVar(&historyClearConfirm, "confirm", false, "confirm irreversible history deletion")
 	historyCmd.AddCommand(historyStatsCmd, historySourcesCmd, historyDoctorCmd, historyExplainCmd, historyImportCmd, historyPruneCmd, historyClearCmd)
 	historyCmd.AddCommand(newHistoryForgetCommand())
+	historyCmd.AddCommand(newHistoryExportCommand())
+	historyImportCmd.AddCommand(newNativeHistoryImportCommand())
 	rootCmd.AddCommand(historyCmd)
 }

@@ -37,6 +37,13 @@ type HistoryEvent struct {
 	HistoryOrder      int
 	Occurrences       int
 	Imported          bool
+	// Aggregate identifies a compact representative, even after retention
+	// reduces its mutable Occurrences to one. It is not one observed execution.
+	Aggregate bool
+}
+
+func historyEventIsAggregate(event HistoryEvent) bool {
+	return event.Aggregate || event.Occurrences > 1
 }
 
 type HistoryStoreStats struct {
@@ -546,12 +553,12 @@ func insertMissingLegacyEvents(
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-     duration_ns, exit_code, source, session_id, state, history_order, occurrences, imported)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy-migration', ?, ?, ?, ?)
+     duration_ns, exit_code, source, session_id, state, history_order, occurrences, imported, aggregate)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'legacy-migration', ?, ?, ?, ?, ?)
 ON CONFLICT(event_key) DO NOTHING
 `, eventKey, aggregate.command, aggregate.command, aggregate.cwd, canonicalTimestamp(timestamp),
 		canonicalTimestamp(timestamp), canonicalTimestamp(timestamp), aggregate.duration.Nanoseconds(), exitCode,
-		aggregate.source, aggregate.state, existing+1, missing, boolInt(aggregate.imported)); err != nil {
+		aggregate.source, aggregate.state, existing+1, missing, boolInt(aggregate.imported), boolInt(missing > 1)); err != nil {
 		return err
 	}
 	return nil
@@ -639,7 +646,8 @@ func (f *FrecencyStore) RecordHistoryEvent(ctx context.Context, event HistoryEve
 	} else if forgotten {
 		return ErrHistoryForgotten
 	}
-	forgotten, removed, err := reconcileForgottenNativeCounterparts(ctx, tx, &event, nil)
+	preserveLearning := newHistoryLearningGuard(ctx, tx)
+	forgotten, removed, err := reconcileForgottenNativeCounterparts(ctx, tx, &event, nil, preserveLearning)
 	if err != nil {
 		return err
 	}
@@ -659,16 +667,20 @@ func (f *FrecencyStore) RecordHistoryEvent(ctx context.Context, event HistoryEve
 		}
 		return ErrHistoryForgotten
 	}
+	event.HistoryOrder, err = advanceNativeHistoryOrder(ctx, tx, event.HistoryOrder)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
 ON CONFLICT(event_key) DO NOTHING
 	`, event.EventKey, event.Command, event.NormalizedCommand, strings.TrimSpace(event.Cwd),
 		canonicalTimestamp(event.SubmittedAt), canonicalTimestamp(event.StartedAt), canonicalTimestamp(event.CompletedAt),
 		event.Duration.Nanoseconds(), exitCode, event.Source, strings.TrimSpace(event.Host),
-		strings.TrimSpace(event.SessionID), strings.TrimSpace(event.Shell), event.State, event.HistoryOrder, event.Occurrences)
+		strings.TrimSpace(event.SessionID), strings.TrimSpace(event.Shell), event.State, event.HistoryOrder, event.Occurrences, boolInt(historyEventIsAggregate(event)))
 	if err != nil {
 		return err
 	}
@@ -686,6 +698,27 @@ ON CONFLICT(event_key) DO NOTHING
 		return err
 	}
 	return tx.Commit()
+}
+
+// The allocator is transaction-local canonical metadata, not an alternate
+// history authority. Its high-water mark survives pruning/forgetting so a
+// later submission cannot reuse an archived execution's order.
+func advanceNativeHistoryOrder(ctx context.Context, tx *sql.Tx, requested int) (int, error) {
+	if requested > 0 {
+		_, err := tx.ExecContext(ctx, `INSERT INTO metadata (key, value)
+VALUES ('history_native_sequence', ?)
+ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(metadata.value AS INTEGER), CAST(excluded.value AS INTEGER))`, requested)
+		return requested, err
+	}
+	var order int
+	err := tx.QueryRowContext(ctx, `UPDATE metadata
+SET value = CAST(value AS INTEGER) + 1
+WHERE key = 'history_native_sequence' AND CAST(value AS INTEGER) < 9223372036854775807
+RETURNING CAST(value AS INTEGER)`).Scan(&order)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errors.New("native history submission order is unavailable or exhausted")
+	}
+	return order, err
 }
 
 func historyEventState(event HistoryEvent) string {
@@ -749,12 +782,13 @@ func (f *FrecencyStore) CompleteHistoryEvent(ctx context.Context, event HistoryE
 		return false, tx.Commit()
 	}
 	var currentRowID int64
+	var currentOrder int
 	var command, normalizedCommand, cwd, state, startedAtRaw, sessionID string
 	if err := tx.QueryRowContext(ctx, `
-SELECT rowid, command, normalized_command, cwd, state, started_at, session_id
+SELECT rowid, history_order, command, normalized_command, cwd, state, started_at, session_id
 FROM history_events
 WHERE event_key = ? AND imported = 0
-`, event.EventKey).Scan(&currentRowID, &command, &normalizedCommand, &cwd, &state, &startedAtRaw, &sessionID); err != nil {
+`, event.EventKey).Scan(&currentRowID, &currentOrder, &command, &normalizedCommand, &cwd, &state, &startedAtRaw, &sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, fmt.Errorf("history event %q was not found", event.EventKey)
 		}
@@ -800,76 +834,8 @@ WHERE event_key = ? AND imported = 0 AND state IN ('submitted', 'running', 'inte
 		}
 		return false, fmt.Errorf("history event %q changed while completing", event.EventKey)
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO history_entries (cmd, cwd, count, last_used)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(cmd, cwd) DO UPDATE SET
-    count = count + excluded.count,
-    last_used = MAX(history_entries.last_used, excluded.last_used)
-	`, normalizedCommand, cwd, 1, canonicalTimestamp(event.CompletedAt)); err != nil {
+	if err := recordHistoryCompletionSignals(ctx, tx, event, normalizedCommand, cwd, currentOrder); err != nil {
 		return false, err
-	}
-	successes, failures := 0, 1
-	if event.ExitCode == 0 {
-		successes, failures = 1, 0
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO command_outcomes (cmd, cwd, successes, failures, last_used)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(cmd, cwd) DO UPDATE SET
-    successes = successes + excluded.successes,
-    failures = failures + excluded.failures,
-    last_used = MAX(command_outcomes.last_used, excluded.last_used)
-	`, normalizedCommand, cwd, successes, failures, canonicalTimestamp(event.CompletedAt)); err != nil {
-		return false, err
-	}
-	var newerCompletion bool
-	if err := tx.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM history_events
-    WHERE cwd = ? AND imported = 0 AND state IN ('completed', 'failed')
-      AND completed_at >= ? AND (completed_at > ? OR rowid > ?)
-)
-`, cwd, canonicalTimestamp(event.CompletedAt), canonicalTimestamp(event.CompletedAt), currentRowID).Scan(&newerCompletion); err != nil {
-		return false, err
-	}
-	if !newerCompletion && event.ExitCode == 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM recent_failures WHERE cwd = ?`, cwd); err != nil {
-			return false, err
-		}
-	} else if !newerCompletion {
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO recent_failures (cwd, cmd, exit_code, failed_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(cwd) DO UPDATE SET
-    cmd = excluded.cmd,
-    exit_code = excluded.exit_code,
-    failed_at = excluded.failed_at
-	`, cwd, normalizedCommand, event.ExitCode, canonicalTimestamp(event.CompletedAt)); err != nil {
-			return false, err
-		}
-	}
-	if event.ExitCode == 0 {
-		tokens := spec.Tokenize(normalizedCommand)
-		for position := 1; position < len(tokens); position++ {
-			value := strings.TrimSpace(tokens[position])
-			if value == "" || strings.HasPrefix(value, "-") {
-				continue
-			}
-			scope := strings.TrimSpace(strings.Join(tokens[:position], " "))
-			if scope == "" || len(scope) > 512 || len(value) > 512 {
-				continue
-			}
-			if _, err := tx.ExecContext(ctx, `
-INSERT INTO argument_values (scope, position, value, cwd, last_used)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(scope, position, value, cwd) DO UPDATE SET
-    count = count + 1,
-    last_used = MAX(argument_values.last_used, excluded.last_used)
-			`, scope, position, value, cwd, canonicalTimestamp(event.CompletedAt)); err != nil {
-				return false, err
-			}
-		}
 	}
 	if err := deriveCanonicalHistoryTransition(
 		ctx,
@@ -895,11 +861,103 @@ ON CONFLICT(scope, position, value, cwd) DO UPDATE SET
 	return true, nil
 }
 
+// recordHistoryCompletionSignals is the single incremental completion owner for
+// lifecycle and compatibility writes, including timestamp precision and outcome
+// ordering. The canonical completed event must already be stored in this tx.
+func recordHistoryCompletionSignals(ctx context.Context, tx *sql.Tx, event HistoryEvent, normalizedCommand, cwd string, currentOrder int) error {
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO history_entries (cmd, cwd, count, last_used)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(cmd, cwd) DO UPDATE SET
+    count = count + excluded.count,
+    last_used = MAX(history_entries.last_used, excluded.last_used)
+	`, normalizedCommand, cwd, 1, canonicalTimestamp(event.CompletedAt)); err != nil {
+		return err
+	}
+	successes, failures := 0, 1
+	if event.ExitCode == 0 {
+		successes, failures = 1, 0
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO command_outcomes (cmd, cwd, successes, failures, last_used)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(cmd, cwd) DO UPDATE SET
+    successes = successes + excluded.successes,
+    failures = failures + excluded.failures,
+    last_used = MAX(command_outcomes.last_used, excluded.last_used)
+	`, normalizedCommand, cwd, successes, failures, canonicalTimestamp(event.CompletedAt)); err != nil {
+		return err
+	}
+	var newerCompletion bool
+	// Match the retained projection's portable tie-break. Physical insertion
+	// order changes on clean/partial restore and cannot decide the last outcome.
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM history_events
+    WHERE cwd = ? AND imported = 0 AND state IN ('completed', 'failed')
+      AND (completed_at, history_order, event_key) > (?, ?, ?)
+)
+`, cwd, canonicalTimestamp(event.CompletedAt), currentOrder, event.EventKey).Scan(&newerCompletion); err != nil {
+		return err
+	}
+	if !newerCompletion && event.ExitCode == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM recent_failures WHERE cwd = ?`, cwd); err != nil {
+			return err
+		}
+	} else if !newerCompletion {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO recent_failures (cwd, cmd, exit_code, failed_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(cwd) DO UPDATE SET
+    cmd = excluded.cmd,
+    exit_code = excluded.exit_code,
+    failed_at = excluded.failed_at
+	`, cwd, normalizedCommand, event.ExitCode, canonicalTimestamp(event.CompletedAt)); err != nil {
+			return err
+		}
+	}
+	if event.ExitCode == 0 {
+		tokens := spec.Tokenize(normalizedCommand)
+		for position := 1; position < len(tokens); position++ {
+			value := strings.TrimSpace(tokens[position])
+			if value == "" || strings.HasPrefix(value, "-") {
+				continue
+			}
+			scope := strings.TrimSpace(strings.Join(tokens[:position], " "))
+			if scope == "" || len(scope) > 512 || len(value) > 512 {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO argument_values (scope, position, value, cwd, last_used)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(scope, position, value, cwd) DO UPDATE SET
+    count = count + 1,
+    last_used = MAX(argument_values.last_used, excluded.last_used)
+			`, scope, position, value, cwd, canonicalTimestamp(event.CompletedAt)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// canonicalTransitionEvidenceSQL admits observed lifecycle rows only. Legacy
+// aggregate representatives share a synthetic session for provenance, not an
+// observed execution chain. Alias names are fixed internal SQL identifiers.
+func canonicalTransitionEvidenceSQL(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return alias + "imported = 0 AND " + alias + "aggregate = 0 AND " + alias + "session_id <> '' AND " +
+		alias + "state IN ('completed', 'failed') AND NOT (" +
+		alias + "source = 'legacy-vuja' AND " + alias + "session_id = 'legacy-migration')"
+}
+
 // deriveCanonicalHistoryTransition updates both transition projections inside
 // the same transaction that completes the canonical event. A process exit can
 // therefore no longer persist completion while silently losing its transition
-// evidence. Row order is submission order for Vuja-owned events and avoids
-// depending on wall-clock precision when two commands begin together.
+// evidence. The persisted native ordinal preserves submission order across
+// archives, tied clocks and delayed completion, independently of local rowids.
 func deriveCanonicalHistoryTransition(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -912,19 +970,27 @@ func deriveCanonicalHistoryTransition(
 	if sessionID == "" || currentRowID <= 0 {
 		return nil
 	}
+	var order int
+	var eventKey string
+	var eligible bool
+	if err := tx.QueryRowContext(ctx, `SELECT history_order, event_key, `+canonicalTransitionEvidenceSQL("")+`
+FROM history_events WHERE rowid = ?`, currentRowID).Scan(&order, &eventKey, &eligible); err != nil {
+		return err
+	}
+	if !eligible {
+		return nil
+	}
 	var previousCommand string
 	err := tx.QueryRowContext(ctx, `
 SELECT normalized_command
 FROM history_events
-WHERE rowid < ?
-  AND imported = 0
-  AND session_id = ?
-  AND state IN ('completed', 'failed')
-ORDER BY rowid DESC
+WHERE (history_order, event_key) < (?, ?) AND session_id = ?
+  AND `+canonicalTransitionEvidenceSQL("")+`
+ORDER BY history_order DESC, event_key DESC
 LIMIT 1
-`, currentRowID, sessionID).Scan(&previousCommand)
+`, order, eventKey, sessionID).Scan(&previousCommand)
 	if errors.Is(err, sql.ErrNoRows) {
-		return repairCanonicalSuccessorTransitions(ctx, tx, currentRowID, sessionID, "", strings.TrimSpace(nextCommand), cwd)
+		return repairCanonicalSuccessorTransitions(ctx, tx, order, eventKey, sessionID, "", strings.TrimSpace(nextCommand), cwd)
 	}
 	if err != nil {
 		return err
@@ -962,7 +1028,7 @@ ON CONFLICT(prev_skeleton, next_skeleton, cwd) DO UPDATE SET
 `, previousSkeleton, nextSkeleton, cwd, count, lastUsed); err != nil {
 		return err
 	}
-	return repairCanonicalSuccessorTransitions(ctx, tx, currentRowID, sessionID, previousCommand, nextCommand, cwd)
+	return repairCanonicalSuccessorTransitions(ctx, tx, order, eventKey, sessionID, previousCommand, nextCommand, cwd)
 }
 
 type canonicalTransitionPair struct {
@@ -977,13 +1043,14 @@ type canonicalTransitionAggregate struct {
 
 // A delayed completion inserts a command into an already learned chain.
 // Repair just the affected edges, leaving other directories and pairs alone.
-func repairCanonicalSuccessorTransitions(ctx context.Context, tx *sql.Tx, rowID int64, sessionID, previous, command, cwd string) error {
+func repairCanonicalSuccessorTransitions(ctx context.Context, tx *sql.Tx, order int, eventKey, sessionID, previous, command, cwd string) error {
 	var successor, successorCwd string
 	err := tx.QueryRowContext(ctx, `
 SELECT normalized_command, cwd FROM history_events
-WHERE rowid > ? AND session_id = ? AND imported = 0 AND state IN ('completed', 'failed')
-ORDER BY rowid ASC LIMIT 1
-`, rowID, sessionID).Scan(&successor, &successorCwd)
+WHERE (history_order, event_key) > (?, ?) AND session_id = ?
+  AND `+canonicalTransitionEvidenceSQL("")+`
+ORDER BY history_order ASC, event_key ASC LIMIT 1
+`, order, eventKey, sessionID).Scan(&successor, &successorCwd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -1016,12 +1083,11 @@ ORDER BY rowid ASC LIMIT 1
 	rows, err := tx.QueryContext(ctx, `
 SELECT n.normalized_command, n.cwd, n.state, n.completed_at,
        (SELECT p.normalized_command FROM history_events p
-        WHERE p.rowid < n.rowid AND p.session_id = n.session_id
-          AND p.imported = 0 AND p.state IN ('completed', 'failed')
-        ORDER BY p.rowid DESC LIMIT 1)
+        WHERE (p.history_order, p.event_key) < (n.history_order, n.event_key) AND p.session_id = n.session_id
+          AND `+canonicalTransitionEvidenceSQL("p")+`
+        ORDER BY p.history_order DESC, p.event_key DESC LIMIT 1)
 FROM history_events n
-WHERE n.cwd IN (?, ?) AND n.imported = 0 AND n.session_id <> ''
-  AND n.state IN ('completed', 'failed')
+WHERE n.cwd IN (?, ?) AND `+canonicalTransitionEvidenceSQL("n")+`
 `, cwd, successorCwd)
 	if err != nil {
 		return err
@@ -1144,7 +1210,7 @@ func (f *FrecencyStore) QueryUnfinishedHistoryEvents(ctx context.Context) ([]His
 	}
 	rows, err := f.db.QueryContext(ctx, `
 SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
 FROM history_events
 WHERE imported = 0 AND state IN ('submitted', 'running')
 ORDER BY started_at DESC, event_key DESC
@@ -1245,6 +1311,11 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
+	if removed > 0 {
+		if err := preflightHistoryLearning(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
 	if partialKey != "" {
 		if err := removeLegacyNavigationEvidence(ctx, tx, partialKey); err != nil {
 			return 0, err
@@ -1252,7 +1323,9 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 		if err := rejectUnattributedHistoryFeedbackRemoval(ctx, tx, partialKey); err != nil {
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE history_events SET occurrences = ? WHERE event_key = ?`, partialOccurrences, partialKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE history_events
+SET aggregate = CASE WHEN occurrences > 1 THEN 1 ELSE aggregate END, occurrences = ?
+WHERE event_key = ?`, partialOccurrences, partialKey); err != nil {
 			return 0, err
 		}
 	}
@@ -1293,7 +1366,7 @@ func rebuildRetainedCompletionSignals(ctx context.Context, tx *sql.Tx) error {
 SELECT normalized_command, cwd, state, exit_code, completed_at, occurrences
 FROM history_events
 WHERE imported = 0 AND state IN ('completed', 'failed')
-ORDER BY completed_at ASC, event_key ASC
+ORDER BY completed_at ASC, history_order ASC, event_key ASC
 `)
 	if err != nil {
 		return err
@@ -1370,8 +1443,8 @@ func rebuildRetainedTransitions(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `
 SELECT normalized_command, cwd, session_id, state, completed_at
 FROM history_events
-WHERE imported = 0 AND state IN ('completed', 'failed')
-ORDER BY rowid ASC
+WHERE `+canonicalTransitionEvidenceSQL("")+`
+ORDER BY history_order ASC, event_key ASC
 `)
 	if err != nil {
 		return err
@@ -1384,7 +1457,7 @@ ORDER BY rowid ASC
 	}
 	type transitionAggregate struct {
 		count    int
-		lastUsed string
+		lastUsed time.Time
 	}
 	previousBySession := make(map[string]string)
 	exact := make(map[transitionKey]transitionAggregate)
@@ -1400,11 +1473,16 @@ ORDER BY rowid ASC
 			continue
 		}
 		previous := previousBySession[sessionID]
-		if previous != "" && state == "completed" {
+		if previous != "" {
+			finishedAt := parseKnownTimestamp(completedAt)
+			count := 0
+			if state == "completed" {
+				count = 1
+			}
 			key := transitionKey{previous: previous, next: command, cwd: strings.TrimSpace(cwd)}
 			aggregate := exact[key]
-			aggregate.count++
-			aggregate.lastUsed = completedAt
+			aggregate.count += count
+			aggregate.lastUsed = laterHistoryTimestamp(aggregate.lastUsed, finishedAt)
 			exact[key] = aggregate
 
 			previousSkeleton := ExtractSkeleton(previous)
@@ -1412,8 +1490,8 @@ ORDER BY rowid ASC
 			if previousSkeleton != "" && nextSkeleton != "" {
 				key = transitionKey{previous: previousSkeleton, next: nextSkeleton, cwd: strings.TrimSpace(cwd)}
 				aggregate = skeletons[key]
-				aggregate.count++
-				aggregate.lastUsed = completedAt
+				aggregate.count += count
+				aggregate.lastUsed = laterHistoryTimestamp(aggregate.lastUsed, finishedAt)
 				skeletons[key] = aggregate
 			}
 		}
@@ -1426,7 +1504,7 @@ ORDER BY rowid ASC
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO exact_command_transitions (prev_command, next_command, cwd, count, last_used)
 VALUES (?, ?, ?, ?, ?)
-`, key.previous, key.next, key.cwd, aggregate.count, aggregate.lastUsed); err != nil {
+`, key.previous, key.next, key.cwd, aggregate.count, canonicalTimestamp(aggregate.lastUsed)); err != nil {
 			return err
 		}
 	}
@@ -1434,7 +1512,7 @@ VALUES (?, ?, ?, ?, ?)
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO command_transitions (prev_skeleton, next_skeleton, cwd, count, last_used)
 VALUES (?, ?, ?, ?, ?)
-`, key.previous, key.next, key.cwd, aggregate.count, aggregate.lastUsed); err != nil {
+`, key.previous, key.next, key.cwd, aggregate.count, canonicalTimestamp(aggregate.lastUsed)); err != nil {
 			return err
 		}
 	}
@@ -1710,6 +1788,7 @@ func normalizeImportedHistoryEvents(events []HistoryEvent) []HistoryEvent {
 		if event.Occurrences <= 0 {
 			event.Occurrences = 1
 		}
+		event.Aggregate = historyEventIsAggregate(event)
 		if event.EventKey == "" || event.Source == "" || !validHistoryEventState(event.State) {
 			continue
 		}
@@ -1780,7 +1859,7 @@ func (f *FrecencyStore) replaceImportedHistoryEvents(ctx context.Context, events
 		return fingerprintErr
 	}
 
-	oldRows, err := tx.QueryContext(ctx, `SELECT event_key FROM history_events WHERE imported = 1`)
+	oldRows, err := tx.QueryContext(ctx, `SELECT event_key FROM history_events WHERE imported = 1 AND archive_owned = 0`)
 	if err != nil {
 		return err
 	}
@@ -1809,14 +1888,14 @@ func (f *FrecencyStore) replaceImportedHistoryEvents(ctx context.Context, events
 	if err := removeHistoryCounterpartSources(ctx, tx, departed); err != nil {
 		return err
 	}
-	if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM history_events WHERE imported = 1`); deleteErr != nil {
+	if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM history_events WHERE imported = 1 AND archive_owned = 0`); deleteErr != nil {
 		return deleteErr
 	}
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?
 WHERE NOT EXISTS (SELECT 1 FROM forgotten_history_events WHERE identity_hash IN (?, ?))
 ON CONFLICT(event_key) DO NOTHING
 `)
@@ -1834,7 +1913,7 @@ ON CONFLICT(event_key) DO NOTHING
 			strings.TrimSpace(event.Cwd), canonicalTimestamp(event.SubmittedAt), canonicalTimestamp(event.StartedAt),
 			canonicalTimestamp(event.CompletedAt), event.Duration.Nanoseconds(), exitCode, event.Source,
 			strings.TrimSpace(event.Host), strings.TrimSpace(event.SessionID), strings.TrimSpace(event.Shell), event.State,
-			event.HistoryOrder, event.Occurrences, forgottenHistoryIdentity(event.EventKey), forgottenImportedProvenance(event)); err != nil {
+			event.HistoryOrder, event.Occurrences, boolInt(event.Aggregate), forgottenHistoryIdentity(event.EventKey), forgottenImportedProvenance(event)); err != nil {
 			return err
 		}
 	}
@@ -1898,7 +1977,7 @@ func importedHistoryEventsFingerprint(events []HistoryEvent) string {
 	for _, event := range normalized {
 		_, _ = fmt.Fprintf(
 			hash,
-			"%d:%s:%d:%s:%d:%s:%d:%d:%d:%d:%d:%t:%d:%s:%s:%s:%s:%s:%d:%d\n",
+			"%d:%s:%d:%s:%d:%s:%d:%d:%d:%d:%d:%t:%d:%s:%s:%s:%s:%s:%d:%d:%t\n",
 			len(event.EventKey),
 			event.EventKey,
 			len(event.Command),
@@ -1919,9 +1998,10 @@ func importedHistoryEventsFingerprint(events []HistoryEvent) string {
 			event.State,
 			event.HistoryOrder,
 			event.Occurrences,
+			event.Aggregate,
 		)
 	}
-	return "events-v2:" + hex.EncodeToString(hash.Sum(nil))
+	return "events-v3:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 func (f *FrecencyStore) QueryHistoryEvents(ctx context.Context, limit int) ([]HistoryEvent, error) {
@@ -1937,7 +2017,7 @@ func (f *FrecencyStore) QueryHistoryEvents(ctx context.Context, limit int) ([]Hi
 
 	rows, err := f.db.QueryContext(ctx, `
 SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
 FROM history_events
 ORDER BY started_at DESC, history_order DESC, event_key DESC
 LIMIT ?
@@ -1960,7 +2040,7 @@ func scanHistoryEvents(rows *sql.Rows) ([]HistoryEvent, error) {
 		var imported int
 		if err := rows.Scan(&event.EventKey, &event.Command, &event.NormalizedCommand, &event.Cwd,
 			&submittedAtRaw, &startedAtRaw, &completedAtRaw, &durationNS, &exitCode, &event.Source,
-			&event.Host, &event.SessionID, &event.Shell, &event.State, &event.HistoryOrder, &event.Occurrences, &imported); err != nil {
+			&event.Host, &event.SessionID, &event.Shell, &event.State, &event.HistoryOrder, &event.Occurrences, &imported, &event.Aggregate); err != nil {
 			return nil, err
 		}
 		event.SubmittedAt = parseKnownTimestamp(submittedAtRaw)
@@ -2008,7 +2088,7 @@ func (f *FrecencyStore) QueryHistoryEventsByKeys(ctx context.Context, eventKeys 
 	}
 	rows, err := f.db.QueryContext(ctx, `
 SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
 FROM history_events
 WHERE event_key IN (`+strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")+`)
 ORDER BY started_at ASC, history_order ASC, event_key ASC

@@ -22,7 +22,6 @@ import (
 	"github.com/faustbrian/vuja/internal/health"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/policy"
-	"github.com/faustbrian/vuja/spec"
 	_ "modernc.org/sqlite"
 )
 
@@ -329,7 +328,8 @@ CREATE TABLE IF NOT EXISTS history_events (
     state             TEXT NOT NULL DEFAULT 'unknown',
     history_order     INTEGER NOT NULL DEFAULT 0,
     occurrences       INTEGER NOT NULL DEFAULT 1,
-    imported          INTEGER NOT NULL DEFAULT 0
+    imported          INTEGER NOT NULL DEFAULT 0,
+    archive_owned     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_events_started_at
@@ -601,6 +601,39 @@ CREATE TABLE IF NOT EXISTS history_changes (
 	var schemaVersion string
 	// The preceding updates hold SQLite's writer lock. Inspect/extend this
 	// additive projection only after that boundary, including older dev stores.
+	var hasArchiveOwnership bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('history_events') WHERE name = 'archive_owned')`).Scan(&hasArchiveOwnership); err != nil {
+		return err
+	}
+	if !hasArchiveOwnership {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE history_events ADD COLUMN archive_owned INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	var hasArchivePayload bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('history_events') WHERE name = 'archive_payload_hash')`).Scan(&hasArchivePayload); err != nil {
+		return err
+	}
+	if !hasArchivePayload {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE history_events ADD COLUMN archive_payload_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	var hasAggregateScope bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('history_events') WHERE name = 'aggregate')`).Scan(&hasAggregateScope); err != nil {
+		return err
+	}
+	if !hasAggregateScope {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE history_events ADD COLUMN aggregate INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		// Older development archives do not prove whether a retained singleton
+		// was originally compact. Do not infer an individual alias from them.
+		if _, err := tx.ExecContext(ctx, `UPDATE history_events SET aggregate = 1
+WHERE occurrences > 1 OR archive_owned = 1`); err != nil {
+			return err
+		}
+	}
 	var hasForgottenOccurrences bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('forgotten_history_events') WHERE name = 'occurrences')`).Scan(&hasForgottenOccurrences); err != nil {
 		return err
@@ -680,6 +713,44 @@ ON CONFLICT(key) DO NOTHING;
 		if err := migrateLegacyHistoryAggregates(ctx, tx); err != nil {
 			return err
 		}
+	}
+	// Before native archives, physical row order was submission order. Freeze
+	// that order once in the existing portable field; neither timestamps nor
+	// insertion order after a partial restore can recover it reliably.
+	if _, err := tx.ExecContext(ctx, `
+UPDATE history_events SET history_order = rowid
+WHERE imported = 0 AND NOT EXISTS (
+    SELECT 1 FROM metadata WHERE key = 'history_native_order_version');
+INSERT INTO metadata (key, value)
+SELECT 'history_native_sequence', CAST(COALESCE(MAX(history_order), 0) AS TEXT)
+FROM history_events WHERE imported = 0
+  AND NOT EXISTS (SELECT 1 FROM metadata WHERE key = 'history_native_order_version')
+ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(metadata.value AS INTEGER), CAST(excluded.value AS INTEGER));
+INSERT INTO metadata (key, value) VALUES ('history_native_order_version', '1')
+ON CONFLICT(key) DO NOTHING;
+CREATE INDEX IF NOT EXISTS idx_history_events_native_order
+ON history_events(session_id, history_order, event_key) WHERE imported = 0;
+-- Older live writers and the compatibility API still submit native order 0.
+-- Allocate at insertion, not during a later scan that could reorder them
+-- after a newer writer. Reuse the canonical counter under the same writer
+-- transaction; explicit portable archive orders remain untouched.
+CREATE TRIGGER IF NOT EXISTS history_events_allocate_native_order
+AFTER INSERT ON history_events
+WHEN NEW.imported = 0 AND NEW.history_order = 0
+BEGIN
+    SELECT RAISE(ABORT, 'native history submission order is unavailable or exhausted')
+    WHERE NOT EXISTS (
+        SELECT 1 FROM metadata WHERE key = 'history_native_sequence'
+          AND CAST(value AS INTEGER) BETWEEN 0 AND 9223372036854775806);
+    UPDATE metadata SET value = CAST(value AS INTEGER) + 1
+    WHERE key = 'history_native_sequence';
+    UPDATE history_events
+    SET history_order = (SELECT CAST(value AS INTEGER) FROM metadata
+                         WHERE key = 'history_native_sequence')
+    WHERE rowid = NEW.rowid;
+END;
+`); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO metadata (key, value)
@@ -1137,97 +1208,33 @@ func (f *FrecencyStore) Record(ctx context.Context, cmd, cwd string, exitCode in
 	ctxTimeout, cancel := context.WithTimeout(ctx, 1000*time.Millisecond)
 	defer cancel()
 	recordedAt := time.Now()
-
-	var query string
+	stamp := canonicalTimestamp(recordedAt)
+	// Version the opaque producer identity so historical dual-clock records
+	// can be recognized without weakening modern timestamp comparisons.
+	eventKey := fmt.Sprintf("vuja:compat:v2:%d:%d:%d", os.Getpid(), recordedAt.UnixNano(), f.recordSequence.Add(1))
+	state := "failed"
 	if exitCode == 0 {
-		query = `
-INSERT INTO history_entries (cmd, cwd, count, last_used)
-VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-ON CONFLICT(cmd, cwd) DO UPDATE SET
-    count = count + 1,
-    last_used = CURRENT_TIMESTAMP;
-`
-	} else {
-		query = `
-INSERT INTO history_entries (cmd, cwd, count, last_used)
-VALUES (?, ?, 1, CURRENT_TIMESTAMP)
-ON CONFLICT(cmd, cwd) DO UPDATE SET
-	count = count + 1,
-    last_used = CURRENT_TIMESTAMP;
-`
+		state = "completed"
 	}
 	tx, err := f.db.BeginTx(ctxTimeout, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(ctxTimeout, query, cmd, cwd); err != nil {
-		return err
-	}
-	success, failure := 0, 1
-	if exitCode == 0 {
-		success, failure = 1, 0
-	}
-	if _, err = tx.ExecContext(ctxTimeout, `
-INSERT INTO command_outcomes (cmd, cwd, successes, failures)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(cmd, cwd) DO UPDATE SET
-    successes = successes + excluded.successes,
-    failures = failures + excluded.failures,
-    last_used = CURRENT_TIMESTAMP
-`, cmd, cwd, success, failure); err != nil {
-		return err
-	}
-	if exitCode == 0 {
-		if _, err = tx.ExecContext(ctxTimeout, `DELETE FROM recent_failures WHERE cwd = ?`, cwd); err != nil {
-			return err
-		}
-	} else {
-		if _, err = tx.ExecContext(ctxTimeout, `
-INSERT INTO recent_failures (cwd, cmd, exit_code)
-VALUES (?, ?, ?)
-ON CONFLICT(cwd) DO UPDATE SET
-    cmd = excluded.cmd,
-    exit_code = excluded.exit_code,
-    failed_at = CURRENT_TIMESTAMP
-`, cwd, cmd, exitCode); err != nil {
-			return err
-		}
-	}
-	if exitCode == 0 {
-		tokens := spec.Tokenize(cmd)
-		for position := 1; position < len(tokens); position++ {
-			value := strings.TrimSpace(tokens[position])
-			if value == "" || strings.HasPrefix(value, "-") {
-				continue
-			}
-			scope := strings.TrimSpace(strings.Join(tokens[:position], " "))
-			if scope == "" || len(scope) > 512 || len(value) > 512 {
-				continue
-			}
-			if _, err = tx.ExecContext(ctxTimeout, `
-INSERT INTO argument_values (scope, position, value, cwd)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(scope, position,value,cwd) DO UPDATE SET
-    count = count + 1,
-    last_used = CURRENT_TIMESTAMP
-`, scope, position, value, cwd); err != nil {
-				return err
-			}
-		}
-	}
-	state := "failed"
-	if exitCode == 0 {
-		state = "completed"
-	}
-	eventKey := fmt.Sprintf("vuja:compat:%d:%d:%d", os.Getpid(), recordedAt.UnixNano(), f.recordSequence.Add(1))
 	if _, err = tx.ExecContext(ctxTimeout, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
      duration_ns, exit_code, source, state, history_order, occurrences, imported)
 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'vuja', ?, 0, 1, 0)
-`, eventKey, cmd, cmd, cwd, canonicalTimestamp(recordedAt), canonicalTimestamp(recordedAt),
-		canonicalTimestamp(recordedAt), exitCode, state); err != nil {
+`, eventKey, cmd, cmd, cwd, stamp, stamp, stamp, exitCode, state); err != nil {
+		return err
+	}
+	var order int
+	if err := tx.QueryRowContext(ctxTimeout, "SELECT history_order FROM history_events WHERE event_key = ?", eventKey).Scan(&order); err != nil {
+		return err
+	}
+	event := HistoryEvent{EventKey: eventKey, CompletedAt: recordedAt, ExitCode: exitCode}
+	if err := recordHistoryCompletionSignals(ctxTimeout, tx, event, cmd, cwd, order); err != nil {
 		return err
 	}
 	if err := f.recordHistoryChange(ctxTimeout, tx, "upsert", eventKey); err != nil {

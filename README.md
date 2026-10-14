@@ -438,12 +438,98 @@ reconciled together at startup, completion, import refresh and recovery before
 recovered history is published. Saved exports, external history files and output
 checkpoints are not erased by history retention.
 
-Legacy navigation or suggestion-learning aggregates may lack execution
-attribution. If retention cannot reconcile them without resetting unrelated
-learning, it removes nothing and shows `History retention not applied`.
+Legacy navigation, transition or suggestion-learning aggregates may lack
+execution attribution. Before a removal rebuilds derived learning, Vuja checks
+that existing evidence can be reconstructed without resetting unrelated state.
+Unsafe forgetting or counterpart removal is refused atomically. If automatic
+retention cannot reconcile the evidence, it removes nothing and shows
+`History retention not applied`.
 Canonical command recording stays available; pending journal records are kept
 for retry rather than discarded. `vuja history doctor` and sanitized health
 diagnostics distinguish this maintenance refusal from database/write failure.
+
+### Native history archives
+
+Back up or move history without Atuin, shell-history imports, or other tools:
+
+```sh
+vuja history export ./vuja-history.json
+vuja history import native ./vuja-history.json --old-sessions-restarted
+```
+
+Export recovers pending journal records and attempts configured retention before
+reading the canonical snapshot; a safe retention refusal leaves the full snapshot
+available for export. It writes a version-1 `vuja-history` JSON file
+with owner-only permissions, publishes the complete file atomically, and refuses
+to overwrite an existing destination. Archives contain command text, directories,
+host/session metadata and source provenance: keep them private. They do not
+contain output checkpoints, journals, preferences or feedback databases.
+
+Native import preserves distinct execution IDs, timestamps, source and original
+native/imported evidence semantics. Identical IDs and payloads are no-ops;
+conflicting payloads reject the entire merge. Optional adapter refreshes cannot
+replace archive-owned records. Single-execution counterparts use the existing
+one-to-one matching rule; compact aggregates or unknown timestamps do not prove
+which independent external executions they represent.
+
+Archives also preserve whether a record represents a compact aggregate. Reducing
+its retained count to one does not turn it into an individually observed
+execution, including after exporting and restoring to a clean database.
+Forgetting that representative fences its ID and recorded imported provenance,
+without guessing external copies from its representative timestamp.
+
+Partial count retention never refills an archived aggregate on retry. Retained
+rows privately remember their original admitted payload, so the same archive
+can be retried without treating a retention-reduced count as a conflict. Other
+payload changes still reject; exports contain only current retained counts.
+
+Native submission order travels in `history_order`: transition learning does
+not infer it from archive array order, timestamps or command IDs. Existing
+native rows acquire their original submission order during upgrade; new writes
+allocate durable ordinals. Conflicting same-session ordinal claims reject the
+merge, and pruning/forgetting does not reuse a previously allocated ordinal.
+Migrated aggregate representatives retain their synthetic provenance and
+frequency counts, but do not imply observed command adjacency.
+Orders remain exact signed integers, including above JavaScript's safe-number
+range; archive consumers must not round them through floating-point values.
+
+Atuin's imported unknown exit/duration sentinels (`-1`) travel as unknown outcome
+and zero/unknown duration, not invented failures. Known outcomes are preserved.
+This portable normalization does not rewrite legacy rows in an existing database;
+a clean restore stores the normalized values.
+
+Running/submitted executions travel as interrupted history without an invented
+exit status: **processes are not resumed**. Derived ranking and transition
+evidence is reconstructed from canonical executions, not copied as a second
+history authority. Current privacy exclusions and forgotten identities/provenance
+still apply; importing an old archive does not undo forgetting. Saved archive
+files themselves remain separate and are not erased by forgetting or retention.
+
+Import refuses without changes when existing learning cannot be reconstructed
+from canonical executions. This protects unattributed compatibility/legacy
+learning rather than silently dropping it or guessing overlapping counts. Keep
+the original database if you need that evidence; archives carry executions,
+not a backup of unattributed learning. Identical-ID no-ops do not rebuild it.
+Known incomplete lifecycle-migration projections are recognized using the same
+canonical projector; this does not waive protection for unexplained counts or
+transition evidence.
+Older second-resolution recording is reconciled only against its own canonical
+execution; current recording retains exact nanosecond timing. Known archive
+dates must be strictly after Unix epoch and fit a four-digit UTC year. Use an
+explicit unknown date rather than an epoch sentinel; existing stored sentinels
+retain their established unknown interpretation. Unsupported known dates are
+rejected instead of changing on read or breaking an identical retry.
+
+The format is bounded to 100,000 records and 32 MiB; unsupported versions,
+malformed/private records, symlinks, nonregular files and oversized inputs are
+rejected without partial archive admission. Configured retention runs after a
+successful merge and before recall publication. If that later maintenance or
+publication fails, the command explicitly reports that the merge committed;
+retrying the same archive remains idempotent.
+
+Restart pre-update Vuja sessions before acknowledging native import. Older
+adapter implementations cannot preserve the new archive ownership boundary.
+Output checkpoints and external history files are unchanged by these commands.
 
 Selective forgetting starts with a non-mutating preview:
 

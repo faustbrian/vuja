@@ -891,6 +891,10 @@ func TestHistoryPrivacyForgetConfirmationBindsLogicalOccurrenceScope(t *testing.
 	if token := historyForgetConfirmation([]scoring.HistoryEvent{event}); token != pending {
 		t.Fatal("normalizing a pending single execution or receiving completion invalidated its identity-bound confirmation")
 	}
+	event.Aggregate = true
+	if token := historyForgetConfirmation([]scoring.HistoryEvent{event}); token == pending {
+		t.Fatal("confirmation silently changed a single execution into a retained aggregate")
+	}
 }
 
 // Goal QA3: migration groups are multiple logical executions, even when their

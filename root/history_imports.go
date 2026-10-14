@@ -119,7 +119,7 @@ func importSelectedHistoryContext(
 		return adapterErr
 	}
 
-	stored, err := store.QueryAllHistoryEvents(ctx)
+	stored, err := store.QueryAdapterHistoryEvents(ctx)
 	if err != nil {
 		return returnAdapterFailure(err)
 	}

@@ -72,7 +72,13 @@ func historyTimeDistance(left, right time.Time) time.Duration {
 }
 
 func retainForgottenHistoryCounterpart(ctx context.Context, tx *sql.Tx, event HistoryEvent) error {
-	evidence := historyEvidence(event, true)
+	// A representative timestamp cannot identify one external execution.
+	// Exact event/provenance exclusions are retained by the forgetting owner.
+	slot, eligible := singleExecutionCounterpartSlot(event)
+	if !eligible {
+		return nil
+	}
+	evidence := slot.historyExecutionEvidence
 	var exitCode any
 	if evidence.exitCode.Valid {
 		exitCode = evidence.exitCode.Int64
@@ -87,7 +93,7 @@ func retainForgottenHistoryCounterpart(ctx context.Context, tx *sql.Tx, event Hi
 	_, err := tx.ExecContext(ctx, `INSERT INTO forgotten_native_history
         (identity_hash, command_hash, cwd_hash, started_at, duration_ns, exit_code, origin_source_hash, forgotten_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(identity_hash) DO NOTHING`,
-		forgottenHistoryIdentity(event.EventKey), evidence.command, evidence.cwd,
+		slot.identity, evidence.command, evidence.cwd,
 		canonicalTimestamp(evidence.startedAt), evidence.duration.Nanoseconds(), exitCode, sourceHash, canonicalTimestamp(time.Now()))
 	return err
 }
@@ -100,6 +106,17 @@ type historyCounterpartSlot struct {
 	preferred        bool
 	nativeCutoff     time.Time
 	sources          map[string]historyCounterpartSource
+}
+
+// All event-backed slot producers share this boundary. A compact record may
+// remain a candidate (with conservative forgotten-scope refusal), but cannot
+// claim or reserve the identity of any individual external execution.
+func singleExecutionCounterpartSlot(event HistoryEvent) (historyCounterpartSlot, bool) {
+	if historyEventIsAggregate(event) {
+		return historyCounterpartSlot{}, false
+	}
+	return historyCounterpartSlot{historyExecutionEvidence: historyEvidence(event, true),
+		identity: forgottenHistoryIdentity(event.EventKey)}, true
 }
 
 type historyCounterpartCandidate struct {
@@ -180,38 +197,43 @@ func filterHistoryCounterparts(ctx context.Context, tx *sql.Tx, events []History
 	if len(slots) == 0 && !preferNative {
 		return events, nil
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT event_key, command, normalized_command, cwd, CAST(started_at AS TEXT), duration_ns, exit_code, source, imported
-        FROM history_events WHERE imported = 0 OR ?`, len(importedOrigins) > 0)
+	rows, err = tx.QueryContext(ctx, `SELECT event_key, command, normalized_command, cwd, CAST(started_at AS TEXT), duration_ns, exit_code, source, imported, occurrences, archive_owned, aggregate
+        FROM history_events WHERE imported = 0 OR (archive_owned = 1 AND ?) OR ?`, preferNative, len(importedOrigins) > 0)
 	if err != nil {
 		return nil, err
 	}
 	reserved := make(map[string]bool)
-	reserve := func(event HistoryEvent) {
+	reserve := func(event HistoryEvent, archiveOwned bool) {
 		if reserved[event.EventKey] {
 			return
 		}
 		var sourceHash string
-		if event.Imported {
+		if event.Imported && !archiveOwned {
 			sourceHash = historyEvidenceHash("source", event.Source)
 			if !importedOrigins[sourceHash] {
 				return
 			}
 		}
+		slot, eligible := singleExecutionCounterpartSlot(event)
+		if !eligible {
+			return
+		}
 		reserved[event.EventKey] = true
-		slots = append(slots, historyCounterpartSlot{historyExecutionEvidence: historyEvidence(event, true),
-			identity: forgottenHistoryIdentity(event.EventKey), originSourceHash: sourceHash, preferred: !event.Imported})
+		slot.originSourceHash, slot.preferred = sourceHash, !event.Imported || archiveOwned
+		slots = append(slots, slot)
 	}
 	for rows.Next() {
 		var event HistoryEvent
 		var startedAt string
 		var exitCode sql.NullInt64
-		if err := rows.Scan(&event.EventKey, &event.Command, &event.NormalizedCommand, &event.Cwd, &startedAt, &event.Duration, &exitCode, &event.Source, &event.Imported); err != nil {
+		var archiveOwned bool
+		if err := rows.Scan(&event.EventKey, &event.Command, &event.NormalizedCommand, &event.Cwd, &startedAt, &event.Duration, &exitCode, &event.Source, &event.Imported, &event.Occurrences, &archiveOwned, &event.Aggregate); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
 		event.StartedAt = parseKnownTimestamp(startedAt)
 		event.HasExitCode, event.ExitCode = exitCode.Valid, int(exitCode.Int64)
-		reserve(event)
+		reserve(event, preferNative && archiveOwned)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -224,7 +246,7 @@ func filterHistoryCounterparts(ctx context.Context, tx *sql.Tx, events []History
 		// Replacement inputs are all external, even when their caller has
 		// not yet set the canonical Imported flag.
 		event.Imported = true
-		reserve(event)
+		reserve(event, false)
 	}
 	if err := loadHistoryCounterpartSources(ctx, tx, slots); err != nil {
 		return nil, err
@@ -287,6 +309,12 @@ func matchHistoryCounterpartSlots(ctx context.Context, slots []historyCounterpar
 	matchedSlots := make([]bool, len(slots))
 	matched := make(map[int]int)
 	eligible := func(slot historyCounterpartSlot, index int) bool {
+		// A representative is not an individual alias or a consumed source
+		// identity. Skip it for retained/preferred owners, but leave it visible
+		// to forgotten scope so ambiguous groups cause an atomic refusal.
+		if !slot.forgotten && historyEventIsAggregate(events[index]) {
+			return false
+		}
 		if used[index] || !compatibleHistoryEvidence(evidence[index], slot.historyExecutionEvidence) {
 			return false
 		}
@@ -361,15 +389,8 @@ func matchHistoryCounterpartSlots(ctx context.Context, slots []historyCounterpar
 			}
 			continue
 		}
-		if events[candidate.event].Occurrences > 1 {
-			if slots[candidate.slot].forgotten {
-				return nil, nil, ErrHistoryCompactCounterpart
-			}
-			// A representative timestamp cannot make the entire aggregate an
-			// observed single-execution alias. Keep the group, without binding
-			// its identity/provenance or suppressing it through source preference.
-			used[candidate.event] = true
-			continue
+		if historyEventIsAggregate(events[candidate.event]) {
+			return nil, nil, ErrHistoryCompactCounterpart
 		}
 		used[candidate.event] = true
 		matchedSlots[candidate.slot] = true
@@ -421,9 +442,10 @@ func preferExternalHistoryEvents(ctx context.Context, tx *sql.Tx, events []Histo
 			continue
 		}
 		preferred = append(preferred, event)
-		slots = append(slots, historyCounterpartSlot{historyExecutionEvidence: historyEvidence(event, true),
-			identity:         forgottenHistoryIdentity(event.EventKey),
-			originSourceHash: historyEvidenceHash("source", event.Source), preferred: true})
+		if slot, eligible := singleExecutionCounterpartSlot(event); eligible {
+			slot.originSourceHash, slot.preferred = historyEvidenceHash("source", event.Source), true
+			slots = append(slots, slot)
+		}
 	}
 	if len(preferred) == 0 {
 		return events, nil
@@ -454,7 +476,7 @@ func preferExternalHistoryEvents(ctx context.Context, tx *sql.Tx, events []Histo
 // repeats reserve their own stronger matches before an excluded slot can win.
 // The caller holds SQLite writer ownership; alias binding, canonical removal
 // and rebuilding derived evidence must commit together.
-func reconcileForgottenNativeCounterparts(ctx context.Context, tx *sql.Tx, incoming *HistoryEvent, selected []string) (bool, int64, error) {
+func reconcileForgottenNativeCounterparts(ctx context.Context, tx *sql.Tx, incoming *HistoryEvent, selected []string, preserveLearning func() error) (bool, int64, error) {
 	query := `SELECT identity_hash, command_hash, cwd_hash, started_at, duration_ns, exit_code, origin_source_hash, forgotten_at
 FROM forgotten_native_history WHERE origin_source_hash <> '' AND native_identity_hash = ''`
 	type lookup struct {
@@ -519,7 +541,7 @@ FROM forgotten_native_history WHERE origin_source_hash <> '' AND native_identity
 		return false, 0, nil
 	}
 	query = `SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
 FROM history_events WHERE started_at >= ? AND started_at <= ?`
 	arguments := []any{canonicalTimestamp(first.Add(-time.Second)), canonicalTimestamp(last.Add(time.Second))}
 	if incoming != nil {
@@ -548,8 +570,10 @@ FROM history_events WHERE started_at >= ? AND started_at <= ?`
 		}
 		sourceHash := historyEvidenceHash("source", event.Source)
 		if origins[sourceHash] {
-			slots = append(slots, historyCounterpartSlot{historyExecutionEvidence: historyEvidence(event, true),
-				identity: forgottenHistoryIdentity(event.EventKey), originSourceHash: sourceHash})
+			if slot, eligible := singleExecutionCounterpartSlot(event); eligible {
+				slot.originSourceHash = sourceHash
+				slots = append(slots, slot)
+			}
 		}
 	}
 	if incoming != nil && !seen[incoming.EventKey] {
@@ -565,6 +589,14 @@ FROM history_events WHERE started_at >= ? AND started_at <= ?`
 	_, matches, err := matchHistoryCounterpartSlots(ctx, slots, natives, false, true, eventSources)
 	if err != nil {
 		return false, 0, err
+	}
+	for index, slotIndex := range matches {
+		if slots[slotIndex].forgotten && seen[natives[index].EventKey] {
+			if err := preserveLearning(); err != nil {
+				return false, 0, err
+			}
+			break
+		}
 	}
 	if err := recordHistoryCounterpartSources(ctx, tx, slots, natives, matches); err != nil {
 		return false, 0, err
@@ -609,9 +641,9 @@ FROM history_events WHERE started_at >= ? AND started_at <= ?`
 // already in canonical storage using the same forgotten/retained slots and
 // one-to-one evidence rule as future imports, before rebuilding projections.
 // This is part of the caller's existing deletion transaction, not a refresh.
-func reconcileForgottenHistoryCounterparts(ctx context.Context, tx *sql.Tx) (int64, error) {
+func reconcileForgottenHistoryCounterparts(ctx context.Context, tx *sql.Tx, preserveLearning func() error) (int64, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-        duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+        duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
         FROM history_events WHERE imported = 1 ORDER BY event_key`)
 	if err != nil {
 		return 0, err
@@ -636,6 +668,9 @@ func reconcileForgottenHistoryCounterparts(ctx context.Context, tx *sql.Tx) (int
 	for _, event := range events {
 		if retained[event.EventKey] {
 			continue
+		}
+		if err := preserveLearning(); err != nil {
+			return 0, err
 		}
 		result, err := tx.ExecContext(ctx, `DELETE FROM history_events WHERE event_key = ? AND imported = 1`, event.EventKey)
 		if err != nil {

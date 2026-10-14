@@ -102,7 +102,7 @@ func (f *FrecencyStore) QueryHistoryForgetMatches(ctx context.Context, eventKey,
 	}
 	rows, err := f.db.QueryContext(ctx, `
 SELECT event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported
+       duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported, aggregate
 FROM history_events WHERE `+where+` ORDER BY event_key ASC`, arguments...)
 	if err != nil {
 		return nil, err
@@ -184,7 +184,7 @@ func pendingHistoryForgetTargets(pending []HistoryEvent) (map[string]HistoryEven
 func sameHistoryForgetTarget(a, b HistoryEvent) bool {
 	return strings.TrimSpace(a.Command) == strings.TrimSpace(b.Command) && a.Cwd == b.Cwd &&
 		a.Source == b.Source && a.StartedAt.Equal(b.StartedAt) && a.Imported == b.Imported &&
-		max(a.Occurrences, 1) == max(b.Occurrences, 1)
+		max(a.Occurrences, 1) == max(b.Occurrences, 1) && historyEventIsAggregate(a) == historyEventIsAggregate(b)
 }
 
 func (f *FrecencyStore) forgetHistoryEvents(ctx context.Context, eventKeys []string, pending, confirmed map[string]HistoryEvent) (int64, error) {
@@ -231,7 +231,7 @@ func (f *FrecencyStore) forgetHistoryEvents(ctx context.Context, eventKeys []str
 		seen[eventKey] = true
 		selected := target{event: HistoryEvent{EventKey: eventKey}}
 		var exitCode sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT command, normalized_command, cwd, source, CAST(started_at AS TEXT), imported, duration_ns, exit_code, occurrences FROM history_events WHERE event_key = ?`, eventKey).Scan(&selected.event.Command, &selected.event.NormalizedCommand, &selected.event.Cwd, &selected.event.Source, &selected.startedAt, &selected.event.Imported, &selected.event.Duration, &exitCode, &selected.event.Occurrences); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT command, normalized_command, cwd, source, CAST(started_at AS TEXT), imported, duration_ns, exit_code, occurrences, aggregate FROM history_events WHERE event_key = ?`, eventKey).Scan(&selected.event.Command, &selected.event.NormalizedCommand, &selected.event.Cwd, &selected.event.Source, &selected.startedAt, &selected.event.Imported, &selected.event.Duration, &exitCode, &selected.event.Occurrences, &selected.event.Aggregate); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				journalEvent, observed := pending[eventKey]
 				if !observed {
@@ -288,10 +288,14 @@ func (f *FrecencyStore) forgetHistoryEvents(ctx context.Context, eventKeys []str
 			return 0, errors.New("imported executions have indistinguishable metadata; preview an exact command selection including the whole group")
 		}
 	}
+	preserveLearning := newHistoryLearningGuard(ctx, tx)
 	forgottenCounterpart := false
 	for _, selected := range targets {
 		event := selected.event
 		if !selected.pending {
+			if err := preserveLearning(); err != nil {
+				return 0, err
+			}
 			if err := removeLegacyNavigationEvidence(ctx, tx, event.EventKey); err != nil {
 				return 0, err
 			}
@@ -309,13 +313,15 @@ ON CONFLICT(identity_hash) DO UPDATE SET occurrences = MAX(occurrences, excluded
 				return 0, err
 			}
 		}
-		if err := excludeKnownHistoryCounterparts(ctx, tx, event.EventKey); err != nil {
-			return 0, err
+		if !historyEventIsAggregate(event) {
+			if err := excludeKnownHistoryCounterparts(ctx, tx, event.EventKey); err != nil {
+				return 0, err
+			}
+			if err := retainForgottenHistoryCounterpart(ctx, tx, event); err != nil {
+				return 0, err
+			}
+			forgottenCounterpart = true
 		}
-		if err := retainForgottenHistoryCounterpart(ctx, tx, event); err != nil {
-			return 0, err
-		}
-		forgottenCounterpart = true
 		if _, err := tx.ExecContext(ctx, `DELETE FROM history_events WHERE event_key = ?`, event.EventKey); err != nil {
 			return 0, err
 		}
@@ -331,16 +337,16 @@ ON CONFLICT(identity_hash) DO UPDATE SET occurrences = MAX(occurrences, excluded
 	if forgottenCounterpart {
 		var importedTargets []string
 		for _, selected := range targets {
-			if selected.event.Imported {
+			if selected.event.Imported && !historyEventIsAggregate(selected.event) {
 				importedTargets = append(importedTargets, forgottenHistoryIdentity(selected.event.EventKey))
 			}
 		}
-		_, nativeRemoved, err := reconcileForgottenNativeCounterparts(ctx, tx, nil, importedTargets)
+		_, nativeRemoved, err := reconcileForgottenNativeCounterparts(ctx, tx, nil, importedTargets, preserveLearning)
 		if err != nil {
 			return 0, err
 		}
 		canonicalRemoved = canonicalRemoved || nativeRemoved > 0
-		counterpartsRemoved, err := reconcileForgottenHistoryCounterparts(ctx, tx)
+		counterpartsRemoved, err := reconcileForgottenHistoryCounterparts(ctx, tx, preserveLearning)
 		if err != nil {
 			return 0, err
 		}
@@ -383,7 +389,13 @@ func rejectUnattributedHistoryFeedbackRemoval(ctx context.Context, tx *sql.Tx, e
 
 // Count retention and explicit forgetting must rebuild the same authoritative
 // projections. Do not maintain a second interpretation of retained evidence.
+// Mutation owners must run their learning guard before changing canonical rows;
+// the guard itself also uses this raw rebuild inside its rolled-back probe.
 func rebuildHistoryProjectionsAfterRemoval(ctx context.Context, tx *sql.Tx) error {
+	return rebuildHistoryProjectionsAfterRemovalAt(ctx, tx, time.Now())
+}
+
+func rebuildHistoryProjectionsAfterRemovalAt(ctx context.Context, tx *sql.Tx, projectedAt time.Time) error {
 	for _, statement := range []string{
 		`DELETE FROM history_entries`,
 		`INSERT INTO history_entries (cmd, cwd, count, last_used)
@@ -450,5 +462,5 @@ func rebuildHistoryProjectionsAfterRemoval(ctx context.Context, tx *sql.Tx) erro
 	if err := rebuildRetainedTransitions(ctx, tx); err != nil {
 		return err
 	}
-	return rebuildHistoryDirectorySource(ctx, tx, time.Now())
+	return rebuildHistoryDirectorySource(ctx, tx, projectedAt)
 }

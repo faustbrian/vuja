@@ -96,6 +96,7 @@ func historyForgetConfirmation(events []scoring.HistoryEvent) string {
 		}
 		_, _ = fmt.Fprintf(hash, "%t\n", event.Imported)
 		_, _ = fmt.Fprintf(hash, "%d\n", max(event.Occurrences, 1))
+		_, _ = fmt.Fprintf(hash, "%t\n", event.Aggregate || event.Occurrences > 1)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
