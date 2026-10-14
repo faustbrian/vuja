@@ -34,6 +34,7 @@ func (c *terminalCompositor) RefreshRunningStatus() {
 		return
 	}
 	c.renderCommandStatus()
+	c.checkpointRunningOutput()
 }
 
 func (c *terminalCompositor) commandStatusLines() (int, []string) {

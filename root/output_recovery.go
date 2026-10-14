@@ -23,9 +23,10 @@ const outputRecoveryByteLimit = 1024 * 1024
 const outputRecoveryPaneLimit = 64
 
 type outputRecoveryState struct {
-	Version int      `json:"version"`
-	Owner   string   `json:"owner"`
-	Rows    []string `json:"rows"`
+	Version int       `json:"version"`
+	Owner   string    `json:"owner"`
+	Rows    []string  `json:"rows"`
+	SavedAt time.Time `json:"saved_at,omitempty"`
 }
 
 type outputRecovery struct {
@@ -35,6 +36,11 @@ type outputRecovery struct {
 	restored         bool
 	failed           bool
 	superseded       bool
+	writer           *outputCheckpointWriter
+	dirty            bool
+	nextCheckpoint   time.Time
+	maxAge           time.Duration
+	maxPanes         int
 }
 
 // iTerm's positional prefix changes when panes move; its arrangement GUID does
@@ -57,12 +63,24 @@ func outputRecoveryPaneID(getenv func(string) string) string {
 	return ""
 }
 
-// ConfigureOutputRecovery is called only by the wrapper, not by constructors or
-// model tests. State is claimed before output starts, fencing older instances.
+// Recovery is explicitly configured before owned output starts. Constructors
+// and renderer previews never access storage implicitly.
 func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor func(string) string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.enabled || c.chatboxConfig.OutputViewport != "pinned" || pane == "" {
+	if c.closed {
+		return errors.New("cannot configure output recovery after close")
+	}
+	if c.outputRecovery != nil {
+		return errors.New("output recovery is already configured for this session")
+	}
+	if pane == "" {
+		return nil
+	}
+	if c.chatboxConfig.OutputCheckpoints == "off" {
+		return fenceDisabledOutputRecovery(dir, pane)
+	}
+	if !c.enabled || c.chatboxConfig.OutputViewport != "pinned" {
 		return nil
 	}
 	if info, err := os.Lstat(dir); err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
@@ -76,25 +94,102 @@ func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor f
 	if _, err := rand.Read(owner[:]); err != nil {
 		return err
 	}
-	r := &outputRecovery{dir: dir, path: filepath.Join(dir, hex.EncodeToString(key[:])+".json"), owner: hex.EncodeToString(owner[:]), linkFor: linkFor}
+	r := &outputRecovery{dir: dir, path: filepath.Join(dir, hex.EncodeToString(key[:])+".json"), owner: hex.EncodeToString(owner[:]), linkFor: linkFor,
+		maxAge: c.chatboxConfig.OutputCheckpointMaxAge, maxPanes: c.chatboxConfig.OutputCheckpointPanes}
+	if r.maxPanes == 0 {
+		r.maxPanes = outputRecoveryPaneLimit
+	}
+	now := c.checkpointNow()
 	if err := r.locked(func() error {
 		state, err := r.read()
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		if checkpointExpired(state.SavedAt, now, r.maxAge) {
+			state.Rows, state.SavedAt = nil, time.Time{}
+		}
 		r.rows = state.Rows
-		if err := r.write(r.rows); err != nil {
+		state.Version, state.Owner = 1, r.owner
+		if err := r.writeState(state); err != nil {
 			return err
 		}
-		return r.prune()
+		return r.prune(now)
 	}); err != nil {
 		return err
 	}
 	c.outputRecovery = r
+	r.writer = newOutputCheckpointWriter(func(snapshot outputCheckpointSnapshot) {
+		defer c.containVisualFailure()
+		c.mu.Lock()
+		allowed := c.outputRecovery == r && c.chatboxConfig.OutputCheckpoints != "off" && c.chatboxConfig.OutputViewport == "pinned" && !r.superseded
+		c.mu.Unlock()
+		if !allowed {
+			return
+		}
+		superseded, err := r.persist(snapshot)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		r.superseded = r.superseded || superseded
+		if c.closed || c.outputRecovery != r || c.chatboxConfig.OutputCheckpoints == "off" {
+			return
+		}
+		if err != nil && !r.superseded {
+			// A failed write must not consume quiet output's eligibility. Keep
+			// the existing interval deadline so retries remain bounded.
+			r.dirty = true
+		}
+		if err != nil && !r.failed {
+			r.failed = true
+			if c.viewport != nil {
+				c.viewport.write([]byte("\r\n[VUJA] output recovery unavailable; live output is unaffected\r\n"))
+				c.viewport.dirty = true
+				c.renderOutputViewport()
+			}
+		}
+	})
 	return nil
 }
 
+// Disabling capture does not erase prior saved output, but it must revoke an
+// older instance's publishing authority even when this session uses the native
+// terminal viewport. Missing storage stays missing; no capture worker starts.
+func fenceDisabledOutputRecovery(dir, pane string) error {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("unsafe output recovery directory")
+	}
+	r := &outputRecovery{dir: dir, path: filepath.Join(dir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(pane))))}
+	return r.withLock(func() error {
+		state, err := r.read()
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Enabled owners are random nonempty IDs. An empty owner is a
+		// disabled fence, not permission for any existing writer to reclaim it.
+		state.Owner = ""
+		return r.writeState(state)
+	})
+}
+
 func (r *outputRecovery) locked(fn func() error) error {
+	return r.withLock(func() error {
+		if err := r.removeInterruptedWrites(); err != nil {
+			return err
+		}
+		return fn()
+	})
+}
+
+func (r *outputRecovery) withLock(fn func() error) error {
 	fd, err := unix.Open(filepath.Join(r.dir, ".lock"), unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
@@ -118,9 +213,6 @@ func (r *outputRecovery) locked(fn func() error) error {
 		time.Sleep(5 * time.Millisecond)
 	}
 	defer unix.Flock(fd, unix.LOCK_UN)
-	if err := r.removeInterruptedWrites(); err != nil {
-		return err
-	}
 	return fn()
 }
 
@@ -132,8 +224,7 @@ func (r *outputRecovery) removeInterruptedWrites() error {
 		return err
 	}
 	for _, entry := range entries {
-		suffix, ok := strings.CutPrefix(entry.Name(), ".checkpoint-")
-		if !ok || suffix == "" || len(suffix) > 10 || strings.IndexFunc(suffix, func(c rune) bool { return c < '0' || c > '9' }) >= 0 || entry.Type()&os.ModeSymlink != 0 {
+		if !isInterruptedCheckpointName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		info, err := entry.Info()
@@ -149,9 +240,18 @@ func (r *outputRecovery) removeInterruptedWrites() error {
 	return nil
 }
 
+func isInterruptedCheckpointName(name string) bool {
+	suffix, ok := strings.CutPrefix(name, ".checkpoint-")
+	return ok && suffix != "" && len(suffix) <= 10 && strings.IndexFunc(suffix, func(c rune) bool { return c < '0' || c > '9' }) < 0
+}
+
 func (r *outputRecovery) read() (outputRecoveryState, error) {
+	return readOutputRecoveryState(r.path)
+}
+
+func readOutputRecoveryState(path string) (outputRecoveryState, error) {
 	var state outputRecoveryState
-	fd, err := unix.Open(r.path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return state, err
 	}
@@ -177,10 +277,18 @@ func (r *outputRecovery) read() (outputRecoveryState, error) {
 	for i, row := range state.Rows {
 		state.Rows[i] = recoveryRow(row, nil, false)
 	}
+	if state.SavedAt.IsZero() && len(state.Rows) > 0 {
+		state.SavedAt = info.ModTime()
+	}
 	return state, nil
 }
 
 func (r *outputRecovery) write(rows []string) error {
+	return r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: rows, SavedAt: time.Now().UTC()})
+}
+
+func (r *outputRecovery) writeState(state outputRecoveryState) error {
+	rows := state.Rows
 	// Account for JSON escaping once per row rather than repeatedly encoding a
 	// shrinking large transcript. Serialization work is linear in retained data.
 	budget := outputRecoveryByteLimit - 512
@@ -197,7 +305,7 @@ func (r *outputRecovery) write(rows []string) error {
 		start--
 	}
 	rows = rows[start:]
-	state := outputRecoveryState{Version: 1, Owner: r.owner, Rows: rows}
+	state.Rows = rows
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -228,7 +336,11 @@ func (r *outputRecovery) write(rows []string) error {
 	return dir.Sync()
 }
 
-func (r *outputRecovery) prune() error {
+func checkpointExpired(savedAt, now time.Time, maxAge time.Duration) bool {
+	return maxAge > 0 && !savedAt.IsZero() && savedAt.Before(now.Add(-maxAge))
+}
+
+func (r *outputRecovery) prune(now time.Time) error {
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return err
@@ -249,6 +361,15 @@ func (r *outputRecovery) prune() error {
 			continue
 		}
 		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
+			if r.maxAge > 0 {
+				state, readErr := readOutputRecoveryState(filepath.Join(r.dir, e.Name()))
+				if readErr == nil && checkpointExpired(state.SavedAt, now, r.maxAge) {
+					if err := os.Remove(filepath.Join(r.dir, e.Name())); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			checkpoints = append(checkpoints, checkpoint{e.Name(), info})
 		}
 	}
@@ -258,7 +379,7 @@ func (r *outputRecovery) prune() error {
 		}
 		return strings.Compare(a.name, b.name)
 	})
-	for len(checkpoints) > outputRecoveryPaneLimit-1 {
+	for len(checkpoints) > clamp(r.maxPanes, 1, outputRecoveryPaneLimit)-1 {
 		old := checkpoints[0]
 		checkpoints = checkpoints[1:]
 		if err := os.Remove(filepath.Join(r.dir, old.name)); err != nil {
@@ -274,6 +395,9 @@ func (c *terminalCompositor) restoreOutputRecovery() {
 		return
 	}
 	r.restored = true
+	if len(r.rows) > 0 {
+		c.viewport.write([]byte("[VUJA] Output restored; process not resumed\r\n"))
+	}
 	for i, row := range r.rows {
 		if i > 0 {
 			c.viewport.write([]byte("\r\n"))
@@ -283,12 +407,12 @@ func (c *terminalCompositor) restoreOutputRecovery() {
 	r.rows = nil
 }
 
-// Checkpoint completed commands, including native-app summaries, before the
-// next prompt. No Close write is needed: abrupt shutdown cannot lose this state,
-// and a late Close from an old process cannot overwrite a newer instance.
+// Snapshot under compositor ownership; persistence runs only on its bounded
+// writer. Close drains queued completed output outside the rendering lock.
 func (c *terminalCompositor) checkpointOutputRecovery() {
 	r := c.outputRecovery
-	if r == nil || c.viewport == nil || !r.restored || r.superseded {
+	if r == nil || r.writer == nil || c.viewport == nil || !r.restored || r.superseded ||
+		c.chatboxConfig.OutputCheckpoints == "off" || c.chatboxConfig.OutputViewport != "pinned" {
 		return
 	}
 	m := c.viewport.model
@@ -309,25 +433,65 @@ func (c *terminalCompositor) checkpointOutputRecovery() {
 		rows = append(rows, line)
 	}
 	slices.Reverse(rows)
-	err := r.locked(func() error {
+	r.dirty = false
+	now := c.checkpointNow()
+	r.nextCheckpoint = now.Add(c.outputCheckpointInterval())
+	r.writer.submit(outputCheckpointSnapshot{rows: rows, savedAt: now.UTC()})
+}
+
+func (c *terminalCompositor) checkpointNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *terminalCompositor) outputCheckpointInterval() time.Duration {
+	if c.chatboxConfig.OutputCheckpointInterval < time.Second {
+		return 5 * time.Second
+	}
+	return c.chatboxConfig.OutputCheckpointInterval
+}
+
+// The existing running-command scheduler owns the clock. No second timer or
+// polling worker is needed, and native applications remain outside capture.
+func (c *terminalCompositor) checkpointRunningOutput() {
+	r := c.outputRecovery
+	if r == nil || !r.dirty || c.chatboxConfig.OutputCheckpoints != "running" ||
+		!c.outputViewportEnabled() || !c.viewportCommand || c.commandStartedAt.IsZero() {
+		return
+	}
+	due := c.commandStartedAt.Add(c.outputCheckpointInterval())
+	if r.nextCheckpoint.After(due) {
+		due = r.nextCheckpoint
+	}
+	if !c.checkpointNow().Before(due) {
+		c.checkpointOutputRecovery()
+	}
+}
+
+func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded bool, err error) {
+	err = r.locked(func() error {
 		state, err := r.read()
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
+			// A writer owns only the state it explicitly claimed. Clearing or
+			// expiring that state must not allow a queued old write to recreate it.
+			superseded = true
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		if err == nil && state.Owner != r.owner {
-			r.superseded = true
+			superseded = true
 			return nil
 		}
-		if err := r.write(rows); err != nil {
+		if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: snapshot.rows, SavedAt: snapshot.savedAt}); err != nil {
 			return err
 		}
-		return r.prune()
+		return r.prune(snapshot.savedAt)
 	})
-	if err != nil && !r.failed {
-		r.failed = true
-		c.viewport.write([]byte("\r\n[VUJA] output recovery unavailable; live output is unaffected\r\n"))
-		c.viewport.dirty = true
-	}
+	return superseded, err
 }
 
 // Disk rows contain only text, SGR and credential-free observed Codex links.

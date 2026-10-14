@@ -95,8 +95,14 @@ func TestOutputViewportLineProgressStillYieldsToNativeApplications(t *testing.T)
 				c.WritePTY([]byte("› next"))
 				c.WritePTY(terminalMarkerBytes("viewport", "prompt-end"))
 				physical := applyTerminalOutput(t, out.Bytes(), 60, 12)
-				if !terminalContainsLine(physical, "application-result") || !terminalContainsLine(physical, "› next") || !c.ViewportNavigationActive() {
-					t.Fatal("native completion did not restore retained output and prompt ownership")
+				if !terminalContainsLine(physical, "OK") || !terminalContainsLine(physical, "› next") || !c.ViewportNavigationActive() {
+					t.Fatal("native completion did not restore owned output and prompt ownership")
+				}
+				// Only a matching observed alternate-screen exit establishes a
+				// text-summary boundary. A stray reset from a primary-screen
+				// application cannot make its private canvas a transcript.
+				if terminalContainsLine(physical, "application-result") != (control == "\x1b[?1049h") || terminalContainsLine(physical, "native-content") {
+					t.Fatal("native completion did not preserve the capture ownership boundary")
 				}
 			})
 		}

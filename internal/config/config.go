@@ -60,45 +60,49 @@ type UIConfig struct {
 }
 
 type ChatboxConfig struct {
-	Prompt            string              `toml:"prompt"`
-	Separator         string              `toml:"separator"`
-	Scrollback        string              `toml:"scrollback"`
-	SurfaceWidth      string              `toml:"surface-width"`
-	OutputViewport    string              `toml:"output-viewport"`
-	OutputMouse       string              `toml:"output-mouse"`
-	OutputLines       int                 `toml:"output-lines"`
-	PathColorMode     string              `toml:"path-color-mode"`
-	PathMaxSegments   int                 `toml:"path-max-segments"`
-	HistorySpacing    int                 `toml:"history-spacing"`
-	CodexAccount      bool                `toml:"codex-account"`
-	Status            []string            `toml:"status,omitempty"` // Legacy single-row layout.
-	TitleLeft         []string            `toml:"title-left"`
-	TitleCenter       []string            `toml:"title-center"`
-	TitleRight        []string            `toml:"title-right"`
-	StatusLeft        []string            `toml:"status-left"`
-	StatusCenter      []string            `toml:"status-center"`
-	StatusRight       []string            `toml:"status-right"`
-	RefreshInterval   Duration            `toml:"refresh-interval"`
-	MetricHysteresis  float64             `toml:"metric-hysteresis"`
-	CollapseVersions  bool                `toml:"collapse-versions"`
-	SnapshotMetadata  string              `toml:"snapshot-metadata"`
-	CompletedCommand  string              `toml:"completed-command"`
-	Metrics           string              `toml:"metrics"`
-	Versions          string              `toml:"versions"`
-	VersionAllow      []string            `toml:"version-allow"`
-	VersionDeny       []string            `toml:"version-deny"`
-	DockerContext     string              `toml:"docker-context"`
-	KubernetesContext string              `toml:"kubernetes-context"`
-	AWSContext        string              `toml:"aws-context"`
-	DurationFast      Duration            `toml:"duration-fast"`
-	DurationSlow      Duration            `toml:"duration-slow"`
-	CPUAverage        int                 `toml:"cpu-average"`
-	CPUHigh           int                 `toml:"cpu-high"`
-	CPUCritical       int                 `toml:"cpu-critical"`
-	MemoryAverage     int                 `toml:"memory-average"`
-	MemoryHigh        int                 `toml:"memory-high"`
-	MemoryCritical    int                 `toml:"memory-critical"`
-	Colors            ChatboxColorsConfig `toml:"colors"`
+	Prompt                   string              `toml:"prompt"`
+	Separator                string              `toml:"separator"`
+	Scrollback               string              `toml:"scrollback"`
+	SurfaceWidth             string              `toml:"surface-width"`
+	OutputViewport           string              `toml:"output-viewport"`
+	OutputMouse              string              `toml:"output-mouse"`
+	OutputLines              int                 `toml:"output-lines"`
+	OutputCheckpoints        string              `toml:"output-checkpoints"`
+	OutputCheckpointInterval Duration            `toml:"output-checkpoint-interval"`
+	OutputCheckpointMaxAge   Duration            `toml:"output-checkpoint-max-age"`
+	OutputCheckpointPanes    int                 `toml:"output-checkpoint-panes"`
+	PathColorMode            string              `toml:"path-color-mode"`
+	PathMaxSegments          int                 `toml:"path-max-segments"`
+	HistorySpacing           int                 `toml:"history-spacing"`
+	CodexAccount             bool                `toml:"codex-account"`
+	Status                   []string            `toml:"status,omitempty"` // Legacy single-row layout.
+	TitleLeft                []string            `toml:"title-left"`
+	TitleCenter              []string            `toml:"title-center"`
+	TitleRight               []string            `toml:"title-right"`
+	StatusLeft               []string            `toml:"status-left"`
+	StatusCenter             []string            `toml:"status-center"`
+	StatusRight              []string            `toml:"status-right"`
+	RefreshInterval          Duration            `toml:"refresh-interval"`
+	MetricHysteresis         float64             `toml:"metric-hysteresis"`
+	CollapseVersions         bool                `toml:"collapse-versions"`
+	SnapshotMetadata         string              `toml:"snapshot-metadata"`
+	CompletedCommand         string              `toml:"completed-command"`
+	Metrics                  string              `toml:"metrics"`
+	Versions                 string              `toml:"versions"`
+	VersionAllow             []string            `toml:"version-allow"`
+	VersionDeny              []string            `toml:"version-deny"`
+	DockerContext            string              `toml:"docker-context"`
+	KubernetesContext        string              `toml:"kubernetes-context"`
+	AWSContext               string              `toml:"aws-context"`
+	DurationFast             Duration            `toml:"duration-fast"`
+	DurationSlow             Duration            `toml:"duration-slow"`
+	CPUAverage               int                 `toml:"cpu-average"`
+	CPUHigh                  int                 `toml:"cpu-high"`
+	CPUCritical              int                 `toml:"cpu-critical"`
+	MemoryAverage            int                 `toml:"memory-average"`
+	MemoryHigh               int                 `toml:"memory-high"`
+	MemoryCritical           int                 `toml:"memory-critical"`
+	Colors                   ChatboxColorsConfig `toml:"colors"`
 }
 
 func (c ChatboxConfig) Segments() []string {
@@ -745,6 +749,18 @@ func validateChatbox(chatbox ChatboxConfig) error {
 	}
 	if chatbox.OutputLines < 1 || chatbox.OutputLines > 10000 {
 		return fmt.Errorf("ui.chatbox.output-lines: must be between 1 and 10000")
+	}
+	if !oneOf(chatbox.OutputCheckpoints, "off", "completed", "running") {
+		return fmt.Errorf("ui.chatbox.output-checkpoints: invalid value %q (want: off|completed|running)", chatbox.OutputCheckpoints)
+	}
+	if chatbox.OutputCheckpointInterval < Duration(time.Second) || chatbox.OutputCheckpointInterval > Duration(time.Hour) {
+		return fmt.Errorf("ui.chatbox.output-checkpoint-interval: must be between 1s and 1h")
+	}
+	if chatbox.OutputCheckpointMaxAge < 0 {
+		return fmt.Errorf("ui.chatbox.output-checkpoint-max-age: must not be negative (0s disables age retention)")
+	}
+	if chatbox.OutputCheckpointPanes < 1 || chatbox.OutputCheckpointPanes > 64 {
+		return fmt.Errorf("ui.chatbox.output-checkpoint-panes: must be between 1 and 64")
 	}
 	if chatbox.PathColorMode != "single" && chatbox.PathColorMode != "hierarchy" {
 		return fmt.Errorf("ui.chatbox.path-color-mode: invalid value %q (want: single|hierarchy)", chatbox.PathColorMode)

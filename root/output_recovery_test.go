@@ -33,13 +33,16 @@ func TestOutputRecoveryFencesOldInstancesAndLateClose(t *testing.T) {
 	a.WritePTY(terminalMarkerBytes("a", "command-start"))
 	a.WritePTY([]byte("first-result\r\n"))
 	a.WritePTY(terminalMarkerBytes("a", "command-end:0"))
+	awaitCheckpointRow(t, a.outputRecovery.path, "first-result")
 	b, _ := recoveryCompositor(t, dir, "pane", "b", nil)
 	b.WritePTY(terminalMarkerBytes("b", "command-start"))
 	b.WritePTY([]byte("newer-result\r\n"))
 	b.WritePTY(terminalMarkerBytes("b", "command-end:0"))
+	awaitCheckpointRow(t, b.outputRecovery.path, "newer-result")
 	a.WritePTY(terminalMarkerBytes("a", "command-start"))
 	a.WritePTY([]byte("stale-result\r\n"))
 	a.WritePTY(terminalMarkerBytes("a", "command-end:0"))
+	awaitCheckpointState(t, a, func(r *outputRecovery) bool { return r.superseded })
 	// Once displaced, the old instance must not reclaim a checkpoint even if
 	// retention subsequently removes the newer instance's file.
 	if err := os.Remove(b.outputRecovery.path); err != nil {
@@ -51,9 +54,13 @@ func TestOutputRecoveryFencesOldInstancesAndLateClose(t *testing.T) {
 	if _, err := os.Stat(b.outputRecovery.path); !os.IsNotExist(err) {
 		t.Fatal("displaced instance reclaimed the evicted pane")
 	}
-	b.WritePTY(terminalMarkerBytes("b", "command-start"))
-	b.WritePTY([]byte("newer-result\r\n"))
-	b.WritePTY(terminalMarkerBytes("b", "command-end:0"))
+	// A fresh explicit pane claim may save new output after the clear; an
+	// already configured writer may not silently recreate the deleted state.
+	fresh, _ := recoveryCompositor(t, dir, "pane", "fresh", nil)
+	fresh.WritePTY(terminalMarkerBytes("fresh", "command-start"))
+	fresh.WritePTY([]byte("newer-result\r\n"))
+	fresh.WritePTY(terminalMarkerBytes("fresh", "command-end:0"))
+	awaitCheckpointRow(t, fresh.outputRecovery.path, "newer-result")
 	a.Close()
 	a.Close()
 	_, out := recoveryCompositor(t, dir, "pane", "c", nil)
@@ -72,6 +79,7 @@ func TestOutputRecoveryRebindsObservedLinksWithoutPersistingCredentials(t *testi
 		a.WritePTY(l.Transform([]byte(text)))
 	}
 	a.WritePTY(terminalMarkerBytes("a", "command-end:0"))
+	awaitCheckpointRow(t, a.outputRecovery.path, testCodexResumeID)
 	data, err := os.ReadFile(a.outputRecovery.path)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +114,7 @@ func TestOutputRecoveryFreshActionDispatchesOnlyRecoveredID(t *testing.T) {
 	l := newCodexResumeLinkifier(old.Observe)
 	a.WritePTY(l.Transform([]byte("Session ID: " + testCodexResumeID + "\r\n")))
 	a.WritePTY(terminalMarkerBytes("a", "command-end:0"))
+	awaitCheckpointRow(t, a.outputRecovery.path, testCodexResumeID)
 	old.Close()
 	fresh, err := newCodexResumeActionServerIn(actions, "fedcba9876543210fedcba9876543210")
 	if err != nil {
@@ -145,6 +154,9 @@ func TestOutputRecoveryFailureDoesNotSuppressLiveOutput(t *testing.T) {
 	a.WritePTY(terminalMarkerBytes("a", "prompt-start"))
 	a.WritePTY([]byte("› next"))
 	a.WritePTY(terminalMarkerBytes("a", "prompt-end"))
+	awaitCheckpointState(t, a, func(r *outputRecovery) bool { return r.failed })
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if !strings.Contains(out.String(), "live-result") || !strings.Contains(out.String(), "output recovery unavailable") || !strings.Contains(out.String(), "next") {
 		t.Fatal("failed checkpoint suppressed output or the next prompt")
 	}
@@ -231,6 +243,7 @@ func TestOutputRecoveryRemovesInterruptedWritesWithoutLosingCheckpoint(t *testin
 	a.WritePTY(terminalMarkerBytes("a", "command-start"))
 	a.WritePTY([]byte("completed-before-interruption\r\n"))
 	a.WritePTY(terminalMarkerBytes("a", "command-end:0"))
+	awaitCheckpointRow(t, a.outputRecovery.path, "completed-before-interruption")
 	temp, err := os.CreateTemp(dir, ".checkpoint-")
 	if err != nil {
 		t.Fatal(err)
@@ -323,10 +336,18 @@ func TestOutputRecoveryPaneRetentionAndUnsafePaths(t *testing.T) {
 	first.WritePTY(terminalMarkerBytes("first", "command-start"))
 	first.WritePTY([]byte("recent-after-eviction\r\n"))
 	first.WritePTY(terminalMarkerBytes("first", "command-end:0"))
-	_, restored := recoveryCompositor(t, dir, "oldest", "restart", nil)
-	if !strings.Contains(restored.String(), "recent-after-eviction") {
-		t.Fatal("an evicted live pane cannot save its new completed output")
+	awaitCheckpointState(t, first, func(r *outputRecovery) bool { return r.superseded })
+	if _, err := os.Stat(first.outputRecovery.path); !os.IsNotExist(err) {
+		t.Fatal("an evicted writer reclaimed expired output without a new pane claim")
 	}
+	rejoined, restored := recoveryCompositor(t, dir, "oldest", "restart", nil)
+	if strings.Contains(restored.String(), "recent-after-eviction") {
+		t.Fatal("an evicted checkpoint was resurrected during restart")
+	}
+	rejoined.WritePTY(terminalMarkerBytes("restart", "command-start"))
+	rejoined.WritePTY([]byte("new-after-rejoin\r\n"))
+	rejoined.WritePTY(terminalMarkerBytes("restart", "command-end:0"))
+	awaitCheckpointRow(t, rejoined.outputRecovery.path, "new-after-rejoin")
 	entries, _ = filepath.Glob(filepath.Join(dir, "*.json"))
 	if len(entries) != outputRecoveryPaneLimit {
 		t.Fatal("re-entry exceeded pane retention")
@@ -350,6 +371,7 @@ func TestOutputRecoverySurvivesRestartWithoutClose(t *testing.T) {
 	a.WritePTY(terminalMarkerBytes("old", "command-start"))
 	a.WritePTY([]byte("retained-result\r\nTo reconnect, run:\r\n  codex resume " + testCodexResumeID + "\r\n"))
 	a.WritePTY(terminalMarkerBytes("old", "command-end:0"))
+	awaitCheckpointRow(t, a.outputRecovery.path, testCodexResumeID)
 	// A is deliberately still alive: a shutdown-only save cannot pass.
 	b, out := recoveryCompositor(t, dir, "pane-a", "new", func(id string) string { return "vuja://codex-resume/" + id + "?token=fresh" })
 	_ = b

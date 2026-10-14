@@ -18,6 +18,7 @@ import (
 // user's reading position. Both the live model and frozen view are bounded.
 type outputViewport struct {
 	model     *vt.Emulator
+	native    *nativeOutputTail
 	done      chan struct{}
 	frozen    []string
 	top       int
@@ -102,6 +103,9 @@ func (c *terminalCompositor) writeViewportOutput(data []byte) {
 
 func (c *terminalCompositor) recordViewportOutput(data []byte) {
 	c.viewport.write(data)
+	if c.outputRecovery != nil && len(data) > 0 {
+		c.outputRecovery.dirty = true
+	}
 	c.viewport.dirty = true
 	if c.viewport.frozen != nil {
 		c.viewport.newOutput = true
@@ -145,6 +149,9 @@ func (c *terminalCompositor) suspendOutputViewport() {
 	c.setViewportScreen(false)
 	c.viewportPassthrough = true
 	if c.viewport != nil {
+		if c.viewport.native == nil {
+			c.viewport.native = newNativeOutputTail()
+		}
 		c.viewport.frozen = nil
 		c.viewport.newOutput = false
 	}

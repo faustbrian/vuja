@@ -225,39 +225,43 @@ type terminalInputBoxTheme struct {
 }
 
 type terminalChatboxConfig struct {
-	Prompt            string
-	Separator         string
-	Scrollback        string
-	SurfaceWidth      string
-	OutputViewport    string
-	OutputMouse       string
-	OutputLines       int
-	PathColorMode     string
-	PathMaxSegments   int
-	HistorySpacing    int
-	Title             terminalChatboxBarConfig
-	Status            terminalChatboxBarConfig
-	Colors            map[string]string
-	CollapseVersions  bool
-	Density           string
-	Responsive        bool
-	SnapshotMetadata  string
-	CompletedCommand  string
-	Metrics           string
-	Versions          string
-	VersionAllow      []string
-	VersionDeny       []string
-	DockerContext     string
-	KubernetesContext string
-	AWSContext        string
-	DurationFast      time.Duration
-	DurationSlow      time.Duration
-	CPUAverage        int
-	CPUHigh           int
-	CPUCritical       int
-	MemoryAverage     int
-	MemoryHigh        int
-	MemoryCritical    int
+	Prompt                   string
+	Separator                string
+	Scrollback               string
+	SurfaceWidth             string
+	OutputViewport           string
+	OutputMouse              string
+	OutputLines              int
+	OutputCheckpoints        string
+	OutputCheckpointInterval time.Duration
+	OutputCheckpointMaxAge   time.Duration
+	OutputCheckpointPanes    int
+	PathColorMode            string
+	PathMaxSegments          int
+	HistorySpacing           int
+	Title                    terminalChatboxBarConfig
+	Status                   terminalChatboxBarConfig
+	Colors                   map[string]string
+	CollapseVersions         bool
+	Density                  string
+	Responsive               bool
+	SnapshotMetadata         string
+	CompletedCommand         string
+	Metrics                  string
+	Versions                 string
+	VersionAllow             []string
+	VersionDeny              []string
+	DockerContext            string
+	KubernetesContext        string
+	AWSContext               string
+	DurationFast             time.Duration
+	DurationSlow             time.Duration
+	CPUAverage               int
+	CPUHigh                  int
+	CPUCritical              int
+	MemoryAverage            int
+	MemoryHigh               int
+	MemoryCritical           int
 }
 
 type terminalChatboxBarConfig struct {
@@ -512,7 +516,11 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				c.viewportSuspended = false
 			}
 			if c.viewportCommand && c.viewport != nil {
-				c.recordViewportOutput(text)
+				if c.viewportPassthrough {
+					c.recordNativeOutput(text)
+				} else {
+					c.recordViewportOutput(text)
+				}
 			}
 			c.writeTerminal(text)
 			return
@@ -565,11 +573,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				}
 			}
 			if c.viewportCommand && c.viewportPassthrough && c.viewport != nil {
-				// Keep the output model current without painting over the native
-				// application. Alternate-screen exit restores its primary buffer,
-				// and subsequent summary/resume text survives the next prompt.
-				c.viewport.write(text)
-				c.viewport.dirty = true
+				c.recordNativeOutput(text)
 			}
 			lineOriented := c.commandOutputLineOpen || bytes.IndexByte(text, '\n') >= 0
 			switch {
@@ -590,6 +594,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 	}, func(event string) {
 		if !c.layout {
 			if strings.HasPrefix(event, "command-end") {
+				c.finishNativeOutput()
 				c.checkpointOutputRecovery()
 				c.commandStartedAt = time.Time{}
 				select {
@@ -816,44 +821,59 @@ func (c *terminalCompositor) SetInputBoxTheme(theme terminalInputBoxTheme) {
 func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 	defer c.containVisualFailure()
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var stopRecovery *outputCheckpointWriter
+	defer func() {
+		c.mu.Unlock()
+		// Policy changes may wait for storage, but never while owning the
+		// compositor. No queued write can outlive a completed disable.
+		if stopRecovery != nil {
+			stopRecovery.stop(false)
+		}
+	}()
 	if c.closed {
 		return
 	}
+	if r := c.outputRecovery; r != nil && (chatbox.OutputCheckpoints == "off" || chatbox.OutputViewport != "pinned") {
+		stopRecovery, r.writer = r.writer, nil
+	}
 	c.chatboxConfig = terminalChatboxConfig{
-		Prompt:            chatbox.Prompt,
-		Separator:         chatbox.Separator,
-		Scrollback:        chatbox.Scrollback,
-		SurfaceWidth:      chatbox.SurfaceWidth,
-		OutputViewport:    chatbox.OutputViewport,
-		OutputMouse:       chatbox.OutputMouse,
-		OutputLines:       chatbox.OutputLines,
-		PathColorMode:     chatbox.PathColorMode,
-		PathMaxSegments:   chatbox.PathMaxSegments,
-		HistorySpacing:    chatbox.HistorySpacing,
-		Title:             cloneTerminalChatboxBar(chatbox.Title),
-		Status:            cloneTerminalChatboxBar(chatbox.Status),
-		Colors:            cloneVersions(chatbox.Colors),
-		CollapseVersions:  chatbox.CollapseVersions,
-		Density:           chatbox.Density,
-		Responsive:        chatbox.Responsive,
-		SnapshotMetadata:  chatbox.SnapshotMetadata,
-		CompletedCommand:  chatbox.CompletedCommand,
-		Metrics:           chatbox.Metrics,
-		Versions:          chatbox.Versions,
-		VersionAllow:      append([]string(nil), chatbox.VersionAllow...),
-		VersionDeny:       append([]string(nil), chatbox.VersionDeny...),
-		DockerContext:     chatbox.DockerContext,
-		KubernetesContext: chatbox.KubernetesContext,
-		AWSContext:        chatbox.AWSContext,
-		DurationFast:      chatbox.DurationFast,
-		DurationSlow:      chatbox.DurationSlow,
-		CPUAverage:        chatbox.CPUAverage,
-		CPUHigh:           chatbox.CPUHigh,
-		CPUCritical:       chatbox.CPUCritical,
-		MemoryAverage:     chatbox.MemoryAverage,
-		MemoryHigh:        chatbox.MemoryHigh,
-		MemoryCritical:    chatbox.MemoryCritical,
+		Prompt:                   chatbox.Prompt,
+		Separator:                chatbox.Separator,
+		Scrollback:               chatbox.Scrollback,
+		SurfaceWidth:             chatbox.SurfaceWidth,
+		OutputViewport:           chatbox.OutputViewport,
+		OutputMouse:              chatbox.OutputMouse,
+		OutputLines:              chatbox.OutputLines,
+		OutputCheckpoints:        chatbox.OutputCheckpoints,
+		OutputCheckpointInterval: chatbox.OutputCheckpointInterval,
+		OutputCheckpointMaxAge:   chatbox.OutputCheckpointMaxAge,
+		OutputCheckpointPanes:    chatbox.OutputCheckpointPanes,
+		PathColorMode:            chatbox.PathColorMode,
+		PathMaxSegments:          chatbox.PathMaxSegments,
+		HistorySpacing:           chatbox.HistorySpacing,
+		Title:                    cloneTerminalChatboxBar(chatbox.Title),
+		Status:                   cloneTerminalChatboxBar(chatbox.Status),
+		Colors:                   cloneVersions(chatbox.Colors),
+		CollapseVersions:         chatbox.CollapseVersions,
+		Density:                  chatbox.Density,
+		Responsive:               chatbox.Responsive,
+		SnapshotMetadata:         chatbox.SnapshotMetadata,
+		CompletedCommand:         chatbox.CompletedCommand,
+		Metrics:                  chatbox.Metrics,
+		Versions:                 chatbox.Versions,
+		VersionAllow:             append([]string(nil), chatbox.VersionAllow...),
+		VersionDeny:              append([]string(nil), chatbox.VersionDeny...),
+		DockerContext:            chatbox.DockerContext,
+		KubernetesContext:        chatbox.KubernetesContext,
+		AWSContext:               chatbox.AWSContext,
+		DurationFast:             chatbox.DurationFast,
+		DurationSlow:             chatbox.DurationSlow,
+		CPUAverage:               chatbox.CPUAverage,
+		CPUHigh:                  chatbox.CPUHigh,
+		CPUCritical:              chatbox.CPUCritical,
+		MemoryAverage:            chatbox.MemoryAverage,
+		MemoryHigh:               chatbox.MemoryHigh,
+		MemoryCritical:           chatbox.MemoryCritical,
 	}
 	c.chatboxColorCodes = make(map[string]string, len(chatbox.Colors))
 	for name, color := range chatbox.Colors {
@@ -1223,7 +1243,14 @@ func (c *terminalCompositor) Close() {
 		c.closeBackdrop()
 	}
 	asyncOut := c.asyncOut
+	var recoveryWriter *outputCheckpointWriter
+	if c.outputRecovery != nil {
+		recoveryWriter = c.outputRecovery.writer
+	}
 	c.mu.Unlock()
+	if recoveryWriter != nil {
+		recoveryWriter.stop(true)
+	}
 	if asyncOut != nil {
 		asyncOut.Close()
 	}
@@ -1651,6 +1678,7 @@ func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
 			c.writeCompletedViewportOutput(c.viewportControlTail)
 			c.viewportControlTail = nil
 		}
+		c.finishNativeOutput()
 		c.appendViewportOutcome(exitCode)
 		c.writeCompletedViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))
 		c.lastCommandSnapshot = cloneStatusSnapshot(c.commandStatusSnapshot)

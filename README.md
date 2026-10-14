@@ -501,17 +501,71 @@ full-screen and cursor-addressed applications retain terminal ownership.
 Vuja releases its alternate screen before handing control to native applications
 and restores the original primary screen when it exits. Retained pinned output
 is separate from the primary terminal scrollback. For terminals exporting a
-stable `ITERM_SESSION_ID` or UUID `TERM_SESSION_ID`, completed command output
-is checkpointed before the next prompt and restored in the same pane after a
-process restart or reboot. iTerm pane moves do not change this identity.
-Checkpoints are owner-only files under Vuja's data directory (`terminal-output`),
-bounded to 1 MiB and 10000 rows per pane and the 64 most recently saved panes.
-They contain terminal text (which may include sensitive command output), not
-old resume-action tokens; restored Codex links receive fresh authorization.
-Live, unfinished command output is not checkpointed. Terminals without a stable
-session identifier do not guess ownership from the working directory. Native
-scrollback mode does not create these checkpoints. Recovery is disabled inside
-tmux because its panes inherit the outer terminal's session identifier.
+stable `ITERM_SESSION_ID` or UUID `TERM_SESSION_ID`, retained output can be
+checkpointed and restored in the same pane after a process restart or reboot.
+iTerm pane moves do not change this identity. Restore explicitly says
+`Output restored; process not resumed`: only display data is restored, never a
+running process or a full-screen application's private canvas.
+
+Cursor-driven application canvases are excluded from the retained pane as well
+as checkpoints. Text after an observed alternate-screen exit is retained until
+another native control takes ownership. For primary-screen applications, only
+recognised Codex continuation/session-ID metadata is retained, as a bounded,
+credential-free resume instruction; arbitrary application text is not captured.
+
+```toml
+[ui.chatbox]
+output-checkpoints = "completed" # off | completed | running
+output-checkpoint-interval = "5s" # running mode; 1s–1h
+output-checkpoint-max-age = "0s"  # disabled; e.g. "168h" for seven days
+output-checkpoint-panes = 64      # 1–64 retained panes
+```
+
+The default queues a snapshot when a command completes. Opt-in `running` also
+saves changed Vuja-owned output periodically while the command runs. One writer
+and at most one newer pending snapshot keep disk work off input/rendering;
+unchanged output is not repeatedly saved. Failed running saves retry at the
+configured interval, including when no more output arrives. These are best-effort output snapshots:
+abrupt termination can lose a pending snapshot or output since the latest save.
+Canonical command-history durability is separate. Checkpoints are owner-only
+files under Vuja's data directory (`terminal-output`), bounded to 1 MiB and
+10000 rows per pane. Age retention removes saves strictly older than the cutoff
+on startup/save; claiming a pane does not renew its output's original age.
+
+Checkpoints can contain sensitive command output. They do not retain old resume
+action tokens; restored Codex links receive fresh authorization. `off` disables
+checkpoint writing and restoration but does not delete previously saved files.
+It also revokes older instances' authority to save this pane's queued output.
+Apply configuration changes in a new terminal session. Inspect or explicitly
+clear checkpoints without starting Vuja's interactive session:
+
+```sh
+vuja output checkpoints list
+vuja output checkpoints clear       # preview this pane only
+vuja output checkpoints clear --all # preview every retained pane
+```
+
+Before relying on clear/disable/expiry fences after updating, restart every
+session still running a pre-update Vuja binary. Those older writers treat a
+missing checkpoint as permission to recreate it; bounded retention cannot
+permanently fence unmodified old code. Clear refuses confirmation without
+`--old-sessions-restarted`, your explicit acknowledgement of that prerequisite.
+It does not detect or stop other processes. Only acknowledge after doing so;
+until then, older sessions can republish captured output.
+
+Clearing requires repeating the printed command with its confirmation token
+and restart acknowledgement.
+Preview does not print captured text. Clear fences queued old writers and
+leaves command history and explicit output exports unchanged. History deletion
+does not erase these checkpoints. All-pane clearing includes recognized
+interrupted-write files; current-pane clearing leaves those unattributed files
+alone and explicitly directs you to `--all` for their removal. A new session can create a new checkpoint
+if recording remains enabled; an already configured writer cannot recreate a
+cleared or expired checkpoint without a fresh session claim.
+Terminals without a stable session identifier do not guess ownership from the
+working directory. Native scrollback mode does not create these checkpoints.
+Recovery is disabled inside tmux because its panes inherit the outer terminal's
+session identifier.
 Completed commands default to `scrollback = "output"`, which omits the submitted
 chatbox from retained history and leaves only the command's output.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen
