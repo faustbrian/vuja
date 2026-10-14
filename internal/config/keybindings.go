@@ -46,6 +46,8 @@ func KeySequences(binding string) ([][]byte, error) {
 		return [][]byte{{0x1b, '[', 'H'}, {0x1b, 'O', 'H'}, {0x1b, '[', '1', '~'}}, nil
 	case "end":
 		return [][]byte{{0x1b, '[', 'F'}, {0x1b, 'O', 'F'}, {0x1b, '[', '4', '~'}}, nil
+	case "f4":
+		return [][]byte{[]byte("\x1bOS"), []byte("\x1b[14~")}, nil
 	case "f5":
 		return [][]byte{[]byte("\x1b[15~")}, nil
 	case "f6":
@@ -74,6 +76,7 @@ func validateKeybindings(bindings KeybindingsConfig) error {
 	}{
 		{name: "history-search", bindings: []string{bindings.HistorySearch}},
 		{name: "history-success-only", bindings: []string{bindings.HistorySuccessOnly}},
+		{name: "history-pause", bindings: []string{bindings.HistoryPause}},
 		{name: "suggestion-pin", bindings: []string{bindings.SuggestionPin}},
 		{name: "suggestion-block", bindings: []string{bindings.SuggestionBlock}},
 		{name: "suggestion-explain", bindings: []string{bindings.SuggestionExplain}},

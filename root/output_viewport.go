@@ -288,11 +288,15 @@ func (c *terminalCompositor) appendViewportSnapshot() {
 	if c.inputBoxTitleEnabled() && c.completedSnapshotMetadataVisible() {
 		lines = append(lines, c.completedExecutionHeaderLine())
 	}
-	lines = append(lines, c.completedInputBoxPaddingLine())
-	for _, cells := range c.surfaceContentCells {
-		lines = append(lines, c.completedInputBoxContent(c.completedSurfaceContentLine(cells)))
+	if c.inputBoxPadded() {
+		lines = append(lines, c.completedInputBoxPaddingLine())
+		for _, cells := range c.surfaceContentCells {
+			lines = append(lines, c.completedInputBoxContent(c.completedSurfaceContentLine(cells)))
+		}
+		lines = append(lines, c.completedInputBoxPaddingLine())
+	} else {
+		lines = append(lines, c.surfaceContentLines...)
 	}
-	lines = append(lines, c.completedInputBoxPaddingLine())
 	if c.inputBoxStatusEnabled() && c.completedSnapshotMetadataVisible() {
 		lines = append(lines, c.completedExecutionContextLines()...)
 	}

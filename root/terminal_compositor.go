@@ -111,6 +111,7 @@ type terminalCompositor struct {
 	chatboxConfigured       bool
 	statusSnapshot          statusSnapshot
 	sessionHealth           healthBadge
+	historyRecordingPaused  bool
 	titleLinesCache         []string
 	statusLinesCache        []string
 	chatboxColorCodes       map[string]string
@@ -1162,7 +1163,7 @@ func (c *terminalCompositor) Resize(width, height int) {
 		for _, line := range c.surfaceContentLines {
 			span := ansi.StringWidth(strings.TrimRight(ansi.Strip(line), " "))
 			line = ansi.Cut(line, 0, span)
-			content = append(content, strings.Split(ansi.Hardwrap(line, max(width-2*terminalInputHorizontalPadding, 1), true), "\n")...)
+			content = append(content, strings.Split(ansi.Hardwrap(line, c.inputBoxContentWidth(), true), "\n")...)
 		}
 		limit := max(height-1-c.inputBoxDecorationRows(), 1)
 		if len(content) > limit {
@@ -1170,7 +1171,7 @@ func (c *terminalCompositor) Resize(width, height int) {
 		}
 		spans := make([]int, len(content))
 		for i := range content {
-			content[i] = ansi.Cut(content[i], 0, max(width-2*terminalInputHorizontalPadding, 1))
+			content[i] = ansi.Cut(content[i], 0, c.inputBoxContentWidth())
 			spans[i] = ansi.StringWidth(content[i])
 		}
 		c.renderedLines = c.inputBoxLines(content, spans)
@@ -1474,7 +1475,7 @@ func (c *terminalCompositor) enterCommandOutput() {
 		targetTop := c.height - c.surfaceRows
 		contentTop := targetTop
 		completedContextRows := 0
-		if c.inputBoxDecorationRows() > 0 {
+		if c.inputBoxPadded() {
 			showMetadata := c.completedSnapshotMetadataVisible()
 			if c.inputBoxTitleEnabled() && showMetadata {
 				fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[2K%s\x1b[0m", contentTop+1, c.completedExecutionHeaderLine())
@@ -1522,11 +1523,11 @@ func (c *terminalCompositor) enterCommandOutput() {
 		targetRow := contentTop + cursorAbs - sourceStartAbs
 		targetRow = clamp(targetRow, contentTop, contentTop+c.surfaceContentRows-1)
 		cursorColumn := cursor.X + 1
-		if c.inputBoxDecorationRows() > 0 {
+		if c.inputBoxPadded() {
 			cursorColumn += terminalInputHorizontalPadding
 		}
 		if c.pendingLineBreak {
-			if c.inputBoxDecorationRows() > 0 {
+			if c.inputBoxPadded() {
 				targetRow = contentTop + c.surfaceContentRows + completedContextRows
 				cursorColumn = 1
 			}
@@ -1569,7 +1570,7 @@ func (c *terminalCompositor) renderPendingRawCommand() {
 	}
 
 	contentRows := max(c.surfaceContentRows, 1)
-	decorated := c.inputBoxDecorationRows() > 0
+	decorated := c.inputBoxPadded()
 	cardLines := make([]string, 0, contentRows+c.inputBoxDecorationRows())
 	if decorated {
 		if c.inputBoxTitleEnabled() {
@@ -1881,8 +1882,9 @@ func (c *terminalCompositor) renderPinned() {
 	c.updateSurfaceBottom()
 
 	decorationRows := c.inputBoxDecorationRows()
+	padded := c.inputBoxPadded()
 	contentRows := c.surfaceBottomAbs - c.promptStartAbs + 1
-	contentRows = clamp(contentRows, 1, c.height-1-decorationRows)
+	contentRows = clamp(contentRows, 1, max(c.height-1-decorationRows, 1))
 	sourceStartAbs := c.surfaceBottomAbs - contentRows + 1
 	rows := contentRows + decorationRows
 	targetTop := c.height - rows
@@ -1896,15 +1898,12 @@ func (c *terminalCompositor) renderPinned() {
 	contentCells := make([]uv.Line, contentRows)
 	contentSpans := make([]int, contentRows)
 	scrollback := c.emulator.ScrollbackLen()
-	contentWidth := c.width
+	contentWidth := c.inputBoxContentWidth()
 	surfaceColor := ansi.XParseColor(c.inputBoxTheme.SurfaceBackground)
 	promptColor := ansi.XParseColor(c.inputBoxTheme.Accent)
 	promptWidth := ansi.StringWidth(strings.TrimSpace(c.chatboxConfig.Prompt))
 	if surfaceColor == nil {
 		surfaceColor = ansi.XParseColor(c.inputBoxTheme.Background)
-	}
-	if decorationRows > 0 {
-		contentWidth -= 2 * terminalInputHorizontalPadding
 	}
 	for offset := range contentRows {
 		sourceAbs := sourceStartAbs + offset
@@ -1924,7 +1923,7 @@ func (c *terminalCompositor) renderPinned() {
 					normalized.Link = terminalModelHyperlink(normalized.Link)
 				}
 				normalized.Content = norm.NFC.String(normalized.Content)
-				if decorationRows > 0 && surfaceColor != nil {
+				if padded && surfaceColor != nil {
 					normalized.Style.Bg = surfaceColor
 					normalized.Style.Attrs &^= uv.AttrReverse
 				}
@@ -1982,7 +1981,7 @@ func (c *terminalCompositor) renderPinned() {
 			c.viewport.dirty = true
 		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H", targetTop+offset+1)
-		if decorationRows > 0 && offset > 0 && offset <= contentRows {
+		if padded && offset > 0 && offset <= contentRows {
 			frame.WriteString(c.inputBoxBackground())
 		}
 		frame.WriteString("\x1b[2K")
@@ -1994,7 +1993,7 @@ func (c *terminalCompositor) renderPinned() {
 	targetRow := contentTop + cursorAbs - sourceStartAbs
 	targetRow = clamp(targetRow, contentTop, contentTop+contentRows-1)
 	cursorColumn := cursor.X + 1
-	if decorationRows > 0 {
+	if padded {
 		cursorColumn += terminalInputHorizontalPadding
 	}
 	fmt.Fprintf(&frame, "\x1b[%d;%dH", targetRow+1, clamp(cursorColumn, 1, c.width-1))
@@ -2033,7 +2032,24 @@ func (c *terminalCompositor) renderPinned() {
 	}
 }
 
+// Vertical chrome may be only a compact warning. It must not imply an inset
+// for editable cells, completed snapshots, or running-command reflow.
+func (c *terminalCompositor) inputBoxPadded() bool {
+	return c.inputBoxDecorationRows() > 0 && !c.compactHistoryPauseWarning()
+}
+
+func (c *terminalCompositor) inputBoxContentWidth() int {
+	width := c.width
+	if c.inputBoxPadded() {
+		width -= 2 * terminalInputHorizontalPadding
+	}
+	return max(width, 1)
+}
+
 func (c *terminalCompositor) inputBoxDecorationRows() int {
+	if c.compactHistoryPauseWarning() {
+		return 1
+	}
 	if c.inputBoxTheme.SurfaceBackground == "" || c.width < 12 || c.height < 4 {
 		return 0
 	}
@@ -2048,6 +2064,9 @@ func (c *terminalCompositor) inputBoxDecorationRows() int {
 }
 
 func (c *terminalCompositor) inputBoxTopRows() int {
+	if c.compactHistoryPauseWarning() {
+		return 1
+	}
 	if c.inputBoxDecorationRows() == 0 {
 		return 0
 	}
@@ -2059,6 +2078,9 @@ func (c *terminalCompositor) inputBoxTopRows() int {
 }
 
 func (c *terminalCompositor) inputBoxLines(content []string, contentSpans []int) []string {
+	if c.compactHistoryPauseWarning() {
+		return append([]string{c.historyPauseWarningLine()}, content...)
+	}
 	if c.inputBoxDecorationRows() == 0 {
 		return content
 	}
@@ -2090,11 +2112,14 @@ func (c *terminalCompositor) inputBoxSurfaceWidth(contentSpans []int) int {
 }
 
 func (c *terminalCompositor) inputBoxTitleEnabled() bool {
+	if c.compactHistoryPauseWarning() {
+		return false
+	}
 	if !c.chatboxConfigured || !chatboxBarConfigured(c.chatboxConfig.Title) {
 		return false
 	}
 	minimumHeight := 5
-	if chatboxBarConfigured(c.chatboxConfig.Status) {
+	if chatboxBarConfigured(c.chatboxConfig.Status) || c.historyRecordingPaused {
 		minimumHeight++
 	}
 	return c.height >= minimumHeight
@@ -2105,6 +2130,12 @@ func (c *terminalCompositor) inputBoxStatusEnabled() bool {
 }
 
 func (c *terminalCompositor) inputBoxStatusRowLimit() int {
+	if c.compactHistoryPauseWarning() {
+		return 0
+	}
+	if c.historyRecordingPaused && c.chatboxConfigured && c.height >= 5 {
+		return 1
+	}
 	if !c.chatboxConfigured || !chatboxBarConfigured(c.chatboxConfig.Status) || c.height < 6 {
 		return 0
 	}
@@ -2498,6 +2529,7 @@ func (c *terminalCompositor) inputBoxStatusLines() []string {
 		rowLimit := max(c.inputBoxStatusRowLimit(), 1)
 		segments := c.inputBoxBarSegments(c.chatboxConfig.Status)
 		segments = appendSessionHealthSegment(segments, c.statusSnapshot.Health)
+		segments = c.appendHistoryRecordingWarning(segments)
 		c.statusLinesCache = c.renderBarLinesWithBackground(
 			segments,
 			rowLimit,

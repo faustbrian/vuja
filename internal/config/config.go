@@ -290,6 +290,7 @@ type KeybindingsConfig struct {
 	DeleteWord         string   `toml:"delete-word"`
 	HistorySearch      string   `toml:"history-search"`
 	HistorySuccessOnly string   `toml:"history-success-only"`
+	HistoryPause       string   `toml:"history-pause"`
 	SuggestionPin      string   `toml:"suggestion-pin"`
 	SuggestionBlock    string   `toml:"suggestion-block"`
 	SuggestionExplain  string   `toml:"suggestion-explain"`

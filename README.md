@@ -199,6 +199,7 @@ accepts the same optional flag.
 | <kbd>←</kbd> / <kbd>→</kbd> | Move within the input buffer |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd> | Open rich history search; press again to cycle directory, project, global, machine, and current-session scopes |
 | <kbd>Ctrl</kbd> + <kbd>S</kbd> | Toggle successful commands while history search is open |
+| <kbd>F4</kbd> | Pause or resume Vuja history recording at the managed bottom prompt |
 | <kbd>F5</kbd> | Pin or unpin the selected command |
 | <kbd>F6</kbd> | Hide the selected command from suggestion menus; retain its recorded history |
 | <kbd>F9</kbd> | Toggle the selected row's ranking explanation |
@@ -486,6 +487,36 @@ shell/Atuin files are separate and remain unchanged.
 Restart pre-update Vuja sessions before relying on selective forgetting across
 all panes. Older running versions do not know these exclusions and cannot be
 made to honor them by a newer history command.
+
+### Temporarily pause recording
+
+At the managed bottom prompt, press **F4** to toggle recording. Override
+`keybindings.history-pause` or set it to `"none"` to disable the shortcut.
+The status row displays **History paused** until recording resumes. Short or
+undecorated panes reserve a compact warning row; narrow panes show **PAUSED**.
+At classic
+shell prompts, use the foreground shell functions below; Vuja leaves the
+shell's native F4 binding alone:
+
+```sh
+vuja_history_pause
+vuja_history_resume
+```
+
+These functions also work with the managed prompt. They wait for Vuja's
+acknowledgement and return a failure status if it is unavailable. Classic
+prompts show `[History paused]` at the next prompt. The pause is local to this
+Vuja session and resets when the session ends; existing history remains
+searchable.
+
+Recording admission is fixed when you press Enter. A command submitted before
+pausing may finish recording; one submitted while paused remains excluded even
+if you resume before it finishes. Paused submissions create no Vuja history
+event, recovery-journal entry, ranking/transition/feedback evidence, publication,
+or optional shell mirror. This is not an incognito mode: terminal output and
+output checkpoints follow their separate settings, and shell history, Atuin,
+or other independently enabled tools may still record commands. Optional
+imports can subsequently read those external histories.
 
 Commands beginning with whitespace, commands excluded by the active shell's
 history-ignore policy, and commands matching Vuja's sensitive-data policy are
@@ -802,6 +833,7 @@ does not place the shell session in an alternate screen or repaint foreground
 command output through the model.
 
 Keybindings accept `tab`, `shift+tab`, `up`, `down`, `page-up`, `page-down`,
+`f4`, `f5`, `f6`, `f9`,
 `ctrl+a` through `ctrl+z`, `home`, `end`, `alt+right`, `ctrl+right`, and
 `meta+right`. Set `keymap = "emacs"` or
 `keymap = "vi"` for the finite line-editing preset. `move-beginning`,

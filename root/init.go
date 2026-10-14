@@ -57,7 +57,38 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
   fi
 
   _vuja_send_lbuffer() {
-    print -u $VUJA_FD -N -r -- "$LBUFFER" 2>/dev/null
+    local _vuja_editor_query=${LBUFFER//\\/\\\\}
+    _vuja_editor_query=${_vuja_editor_query//$'\0'/'\0'}
+    print -u $VUJA_FD -N -r -- %q"$_vuja_editor_query" 2>/dev/null
+  }
+
+  _vuja_history_recording() {
+    (( ${ZSH_SUBSHELL:-0} == 0 )) || return 1
+    [[ -n ${VUJA_HISTORY_ACK_FD-} ]] || return 1
+    local _vuja_request _vuja_reply
+    case "$1" in
+      pause) _vuja_request=VUJA_HISTORY_RECORDING_PAUSE ;;
+      resume) _vuja_request=VUJA_HISTORY_RECORDING_RESUME ;;
+      *) return 1 ;;
+    esac
+    print -u "$VUJA_FD" -N -r -- "$_vuja_request" 2>/dev/null || return 1
+    read -u "$VUJA_HISTORY_ACK_FD" -k 1 _vuja_reply 2>/dev/null || return 1
+    [[ $_vuja_reply == [01] ]] || return 1
+    typeset -g _vuja_history_paused=$_vuja_reply
+  }
+  vuja_history_pause() { _vuja_history_recording pause; }
+  vuja_history_resume() { _vuja_history_recording resume; }
+
+  _vuja_apply_history_recording_prompt() {
+    if [[ ${_vuja_history_pause_prefix_applied:-0} == 1 ]]; then
+      PS1=${PS1#'[History paused] '}
+    fi
+    typeset -g _vuja_history_pause_prefix_applied=0
+    if [[ ${_vuja_history_paused:-0} == 1 ]] &&
+       [[ -z ${VUJA_MARKER-} || ${VUJA_MANAGED_PROMPT-} != ${VUJA_MARKER-} ]]; then
+      PS1="[History paused] ${PS1-}"
+      typeset -g _vuja_history_pause_prefix_applied=1
+    fi
   }
 
   _vuja_unmark_prompts() {
@@ -158,6 +189,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     done
     _vuja_unmark_prompts
     _vuja_apply_managed_prompt
+    _vuja_apply_history_recording_prompt
     if [[ -n $VUJA_MARKER ]]; then
       PS1="${_vuja_prompt_start}${PS1}${_vuja_prompt_end}"
       PS2="${_vuja_continuation_start}${PS2}${_vuja_continuation_end}"
@@ -206,7 +238,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
   add-zsh-hook precmd _vuja_precmd
   add-zsh-hook preexec _vuja_preexec
 fi
-`, binaryPath)
+`, binaryPath, shellEditorQueryPrefix)
 	case "bash":
 		return fmt.Sprintf(`
 # Vuja Autostart Hook
@@ -263,11 +295,40 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     printf 'VUJA_FUNCTIONS_END\0' >&"$VUJA_FD" 2>/dev/null
   }
 
+  _vuja_history_recording() {
+    [[ ${BASH_SUBSHELL:-0} == 0 && -n ${VUJA_HISTORY_ACK_FD-} ]] || return 1
+    local _vuja_request _vuja_reply
+    case "$1" in
+      pause) _vuja_request=VUJA_HISTORY_RECORDING_PAUSE ;;
+      resume) _vuja_request=VUJA_HISTORY_RECORDING_RESUME ;;
+      *) return 1 ;;
+    esac
+    printf '%%s\0' "$_vuja_request" >&"$VUJA_FD" 2>/dev/null || return 1
+    IFS= read -r -n 1 -u "$VUJA_HISTORY_ACK_FD" _vuja_reply 2>/dev/null || return 1
+    [[ $_vuja_reply == [01] ]] || return 1
+    _vuja_history_paused=$_vuja_reply
+  }
+  vuja_history_pause() { _vuja_history_recording pause; }
+  vuja_history_resume() { _vuja_history_recording resume; }
+
+  _vuja_apply_history_recording_prompt() {
+    if [[ ${_vuja_history_pause_prefix_applied:-0} == 1 ]]; then
+      PS1=${PS1#'[History paused] '}
+    fi
+    _vuja_history_pause_prefix_applied=0
+    if [[ ${_vuja_history_paused:-0} == 1 ]] &&
+       [[ -z ${VUJA_MARKER-} || ${VUJA_MANAGED_PROMPT-} != ${VUJA_MARKER-} ]]; then
+      PS1="[History paused] ${PS1-}"
+      _vuja_history_pause_prefix_applied=1
+    fi
+  }
+
   _vuja_precmd() {
     local _vuja_exit_code=$?
     local -a _vuja_job_ids=($(jobs -p 2>/dev/null))
     local -a _vuja_stopped_job_ids=($(jobs -s -p 2>/dev/null))
     _vuja_unmark_prompts
+    _vuja_apply_history_recording_prompt
     if [[ -n "$VUJA_MARKER" ]]; then
       PS1="${_VUJA_PROMPT_START}${PS1}${_VUJA_PROMPT_END}"
       PS2="${_VUJA_CONTINUATION_START}${PS2}${_VUJA_CONTINUATION_END}"
@@ -363,6 +424,31 @@ if set -q VUJA_PID; and set -q VUJA_FD
         set --unexport VUJA_MARKER "$VUJA_MARKER"
     end
 
+    function _vuja_history_recording
+        status is-command-substitution; and return 1
+        set -q VUJA_HISTORY_ACK_FD; or return 1
+        switch "$argv[1]"
+            case pause
+                printf 'VUJA_HISTORY_RECORDING_PAUSE\0' >&$VUJA_FD 2>/dev/null; or return 1
+            case resume
+                printf 'VUJA_HISTORY_RECORDING_RESUME\0' >&$VUJA_FD 2>/dev/null; or return 1
+            case '*'
+                return 1
+        end
+        read --nchars 1 --local _vuja_reply <&$VUJA_HISTORY_ACK_FD 2>/dev/null; or return 1
+        contains -- "$_vuja_reply" 0 1; or return 1
+        set -g _vuja_history_paused "$_vuja_reply"
+    end
+    function vuja_history_pause
+        _vuja_history_recording pause
+    end
+    function vuja_history_resume
+        _vuja_history_recording resume
+    end
+    function _vuja_restore_prompt_status
+        return $argv[1]
+    end
+
     if set -q _vuja_fish_history_policy_wrapped
         if functions -q fish_should_add_to_history; and functions -q _vuja_installed_fish_should_add_to_history
             # The functions builtin includes the function name in its first line. Normalize
@@ -421,13 +507,22 @@ if set -q VUJA_PID; and set -q VUJA_FD
         set -e _vuja_fish_markers_installed
     end
 
-    if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
+    # Keep the shell-owned prompt wrapper in classic mode too. Only managed
+    # mode emits compositor markers; classic adds text solely while paused.
+    begin
         function _vuja_setup_prompt_markers --on-event fish_prompt
-            printf '\e]777;vuja;%%s;prompt-start\a' "$VUJA_MARKER"
+            set -l _vuja_prompt_status $status
+            if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
+                printf '\e]777;vuja;%%s;prompt-start\a' "$VUJA_MARKER"
+            end
             functions -e _vuja_setup_prompt_markers
 
             function _vuja_prompt_start --on-event fish_prompt
-                printf '\e]777;vuja;%%s;prompt-start\a' "$VUJA_MARKER"
+                set -l _vuja_prompt_status $status
+                if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
+                    printf '\e]777;vuja;%%s;prompt-start\a' "$VUJA_MARKER"
+                end
+                return $_vuja_prompt_status
             end
 
             if functions -q fish_mode_prompt
@@ -441,24 +536,41 @@ if set -q VUJA_PID; and set -q VUJA_FD
             end
 
             function fish_mode_prompt
+                set -l _vuja_prompt_status $status
                 if functions -q _vuja_original_fish_mode_prompt
+                    _vuja_restore_prompt_status $_vuja_prompt_status
                     _vuja_original_fish_mode_prompt $argv
                 end
             end
 
             function fish_prompt
+                set -l _vuja_prompt_status $status
+                if test "$_vuja_history_paused" = 1
+                    if not set -q VUJA_MARKER; or test -z "$VUJA_MARKER"; or test "$VUJA_MANAGED_PROMPT" != "$VUJA_MARKER"
+                        printf '[History paused] '
+                    end
+                end
                 if functions -q _vuja_original_fish_prompt
+                    _vuja_restore_prompt_status $_vuja_prompt_status
                     _vuja_original_fish_prompt $argv
                 end
             end
 
             function fish_right_prompt
+                set -l _vuja_prompt_status $status
+                set -l _vuja_prompt_result 0
                 if functions -q _vuja_original_fish_right_prompt
+                    _vuja_restore_prompt_status $_vuja_prompt_status
                     _vuja_original_fish_right_prompt $argv
+                    set _vuja_prompt_result $status
                 end
-                printf '\e]777;vuja;%%s;prompt-end\a' "$VUJA_MARKER"
+                if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
+                    printf '\e]777;vuja;%%s;prompt-end\a' "$VUJA_MARKER"
+                end
+                return $_vuja_prompt_result
             end
             set -g _vuja_fish_markers_installed 1
+            return $_vuja_prompt_status
         end
     end
 

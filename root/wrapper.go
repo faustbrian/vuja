@@ -64,6 +64,18 @@ func appendPromptTrackingBytes(current, data []byte) []byte {
 	return append(current, data...)
 }
 
+const shellEditorQueryPrefix = "VUJA_EDITOR:"
+
+var shellEditorUnescape = strings.NewReplacer(`\\`, `\`, `\0`, "\x00")
+
+func decodeShellEditorQuery(message string) string {
+	encoded, framed := strings.CutPrefix(message, shellEditorQueryPrefix)
+	if !framed {
+		return message
+	}
+	return shellEditorUnescape.Replace(encoded)
+}
+
 func readShellMessage(reader *bufio.Reader, limit int) ([]byte, bool, error) {
 	if reader == nil {
 		return nil, false, io.EOF
@@ -203,6 +215,8 @@ func runWrapper() {
 	var naiveBuffer string
 	var lastSubmittedCommand string
 	var lastCommandHistoryIgnored bool
+	var historyRecording historyRecordingSession
+	var lastHistoryAdmission historySubmissionAdmission
 	var pendingFeedback []suggestionFeedbackEvent
 	var pendingFeedbackCWD string
 	var feedback suggestionFeedbackSession
@@ -639,6 +653,13 @@ func runWrapper() {
 				continue
 			}
 			query := string(message)
+			if handled, controlErr := handleHistoryRecordingMessage(query, &historyRecording, historyAckWriter); handled {
+				if controlErr != nil {
+					logger.Errorf("history recording control acknowledgement failed: %v", controlErr)
+				}
+				display.SetHistoryRecordingPaused(historyRecording.paused.Load())
+				continue
+			}
 			if loadedShellFunctions.Handle(query) {
 				if query == shellFunctionsEnd {
 					spec.NotifyCompletionUpdate()
@@ -662,9 +683,10 @@ func runWrapper() {
 			if commandStart, ignored := parseCommandStartMessage(query); commandStart {
 				bufferMu.Lock()
 				rawCommand := lastSubmittedCommand
+				admission := lastHistoryAdmission
 				lastCommandHistoryIgnored = ignored
 				bufferMu.Unlock()
-				command, recordable := historyRecordableCommand(rawCommand, ignored)
+				command, recordable := admission.command(rawCommand, ignored)
 				entry := executionTracker.StartRaw(rawCommand, command, spec.GetCWD(), shellName)
 				activeHistoryJournaled = false
 				if recordable && historyStore == nil {
@@ -686,7 +708,7 @@ func runWrapper() {
 					}
 				}
 				if recordable {
-					activeHistoryPersisted, activeHistoryJournaled = persistHistorySubmissionDurablyObserved(historyStore, entry, healthProjection.submissionObserver(entry))
+					activeHistoryPersisted, activeHistoryJournaled = admission.persist(historyStore, entry, ignored, healthProjection.submissionObserver(entry))
 				} else {
 					activeHistoryPersisted = false
 				}
@@ -733,6 +755,7 @@ func runWrapper() {
 				historyIgnored := lastCommandHistoryIgnored
 				feedbackEvents := pendingFeedback
 				feedbackCWD := pendingFeedbackCWD
+				admission := lastHistoryAdmission
 				lastSubmittedCommand = ""
 				lastCommandHistoryIgnored = false
 				pendingFeedback = nil
@@ -745,7 +768,7 @@ func runWrapper() {
 						status.SetCommandResult(exitCode, historyEntry.Duration)
 						status.RefreshAfterCommand(cwd)
 					}
-					cmdToRecord, recordable := historyRecordableCommand(rawCommand, historyIgnored)
+					cmdToRecord, recordable := admission.command(rawCommand, historyIgnored)
 					if recordable && activeHistoryPersisted {
 						historyCleared := isHistoryClearCommand(cmdToRecord)
 						historyCompleted := false
@@ -827,6 +850,9 @@ func runWrapper() {
 				continue
 			}
 
+			// Decode editor data only after all control dispatch has finished.
+			// A control-looking LBUFFER is still data, never a second dispatch.
+			query = decodeShellEditorQuery(query)
 			isCommandActive.Store(false)
 			status.SetCommandActive(false)
 			display.SetCommandContext(query)
@@ -1369,6 +1395,16 @@ inputLoop:
 					continue
 				}
 				b := inputSlice[i]
+				if display.Managed() {
+					if length := handleHistoryRecordingControl(inputSlice, i, inputBindings, &historyRecording, inputShell, inBracketedPaste); length > 0 {
+						display.SetHistoryRecordingPaused(historyRecording.paused.Load())
+						if display.Enabled() {
+							presentOverlay(overlay.Render)
+						}
+						i += length - 1
+						continue
+					}
+				}
 				if length := handleSuggestionControl(inputSlice, i, inputBindings, overlay, suggestionPreferences.enqueue); length > 0 {
 					presentOverlay(overlay.Render)
 					i += length - 1
@@ -1768,8 +1804,9 @@ inputLoop:
 						cmdToSubmit = naiveBuffer
 					}
 					lastSubmittedCommand = cmdToSubmit
+					lastHistoryAdmission = historyRecording.capture()
 					lastCommandHistoryIgnored = false
-					if strings.TrimSpace(cmdToSubmit) == "" {
+					if strings.TrimSpace(cmdToSubmit) == "" || lastHistoryAdmission.paused {
 						feedback.reset()
 						pendingFeedback = nil
 						pendingFeedbackCWD = ""

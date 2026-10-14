@@ -161,6 +161,7 @@ func DefaultConfig() *Config {
 			Keymap:             "emacs",
 			HistorySearch:      "ctrl+r",
 			HistorySuccessOnly: "ctrl+s",
+			HistoryPause:       "f4",
 			SuggestionPin:      "f5",
 			SuggestionBlock:    "f6",
 			SuggestionExplain:  "f9",

@@ -200,7 +200,25 @@ func TestGeneratedShellHooksAreSyntacticallyValid(t *testing.T) {
 			if err := os.WriteFile(hookPath, []byte(shellInitScript(shellName, "/tmp/vuja")), 0600); err != nil {
 				t.Fatal(err)
 			}
-			command := exec.CommandContext(t.Context(), shellPath, "-n", hookPath)
+			// Parse only. Do not load user startup files or execute this hook:
+			// it contains the Vuja autostart entry point.
+			args := []string{"-f", "-n", hookPath}
+			switch shellName {
+			case "bash":
+				args = []string{"--noprofile", "--norc", "-n", hookPath}
+			case "fish":
+				args = []string{"--no-config", "--no-execute", hookPath}
+			}
+			command := exec.CommandContext(t.Context(), shellPath, args...)
+			for _, entry := range os.Environ() {
+				key, _, _ := strings.Cut(entry, "=")
+				switch key {
+				case "BASH_ENV", "ENV", "ZDOTDIR", "VUJA_PID", "VUJA_FD", "VUJA_HISTORY_ACK_FD", "VUJA_IS_CHILD", "VUJA_MANAGED_PROMPT":
+					continue
+				}
+				command.Env = append(command.Env, entry)
+			}
+			command.Env = append(command.Env, "ZDOTDIR="+t.TempDir())
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("generated %s hook is invalid: %v: %s", shellName, err, output)
 			}
