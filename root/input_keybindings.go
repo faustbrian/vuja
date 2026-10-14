@@ -10,6 +10,9 @@ type inputAction string
 const (
 	inputHistorySearch      inputAction = "history-search"
 	inputHistorySuccessOnly inputAction = "history-success-only"
+	inputSuggestionPin      inputAction = "suggestion-pin"
+	inputSuggestionBlock    inputAction = "suggestion-block"
+	inputSuggestionExplain  inputAction = "suggestion-explain"
 	inputAccept             inputAction = "accept"
 	inputToggleOverlay      inputAction = "toggle-overlay"
 	inputAcceptToken        inputAction = "accept-token"
@@ -42,6 +45,9 @@ func newInputKeybindings(bindings config.KeybindingsConfig) inputKeybindings {
 
 	add(inputHistorySearch, bindings.HistorySearch)
 	add(inputHistorySuccessOnly, bindings.HistorySuccessOnly)
+	add(inputSuggestionPin, bindings.SuggestionPin)
+	add(inputSuggestionBlock, bindings.SuggestionBlock)
+	add(inputSuggestionExplain, bindings.SuggestionExplain)
 	add(inputAccept, bindings.Accept)
 	add(inputToggleOverlay, bindings.ToggleOverlay)
 	add(inputAcceptToken, bindings.AcceptToken...)

@@ -69,3 +69,19 @@ func TestInputKeybindingsResolveViNavigationAndOverrides(t *testing.T) {
 		t.Fatalf("expected vi end binding to use terminal End key, got %d", got)
 	}
 }
+
+func TestSuggestionControlBindingsRecognizeTerminalFunctionKeys(t *testing.T) {
+	bindings := newInputKeybindings(config.DefaultConfig().Keybindings)
+	for _, test := range []struct {
+		action inputAction
+		bytes  string
+	}{
+		{inputAction("suggestion-pin"), "\x1b[15~"},
+		{inputAction("suggestion-block"), "\x1b[17~"},
+		{inputAction("suggestion-explain"), "\x1b[20~"},
+	} {
+		if got := bindings.match(test.action, []byte(test.bytes), 0); got != len(test.bytes) {
+			t.Fatalf("suggestion control %q is not recognized: consumed %d bytes", test.action, got)
+		}
+	}
+}

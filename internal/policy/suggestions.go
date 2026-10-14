@@ -73,7 +73,20 @@ func IsDestructive(command string) bool {
 }
 
 func Blocked(command string) bool {
-	for _, pattern := range config.Get().Suggestions.Blocks {
+	preferences := config.Get().Suggestions
+	return BlockedBy(preferences.Blocks, preferences.ExactBlocks, command)
+}
+
+func BlockedBy(patterns, literals []string, command string) bool {
+	command = strings.TrimSpace(command)
+	for _, literal := range literals {
+		if command != "" && strings.TrimSpace(literal) == command {
+			return true
+		}
+	}
+	// Manual blocks retain the existing exact-or-glob meaning. UI-created
+	// blocks have separate literal storage, so escaping cannot hide a neighbor.
+	for _, pattern := range patterns {
 		if matches(pattern, command) {
 			return true
 		}

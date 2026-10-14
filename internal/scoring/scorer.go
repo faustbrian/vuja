@@ -212,6 +212,12 @@ func isLiveFilesystemMatch(suggestion spec.Suggestion, query string) bool {
 	return query != "" && strings.HasPrefix(strings.ToLower(suggestion.Cmd), strings.ToLower(query))
 }
 
+// VerifiedPathPrefix reports the actual placement predicate used by the
+// scorer. Presentation must not infer this override merely from a source badge.
+func VerifiedPathPrefix(suggestion spec.Suggestion, query string) bool {
+	return isLiveFilesystemMatch(suggestion, query)
+}
+
 func frecencyScoreMap(entries []FrecencyEntry, directoryRanking string, now time.Time) map[string]float64 {
 	scores := make(map[string]float64, len(entries))
 	for _, entry := range entries {

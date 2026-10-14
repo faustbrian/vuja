@@ -5,6 +5,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/internal/logger"
+	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/spec"
 	"golang.org/x/term"
 	"os"
@@ -231,6 +232,8 @@ type Overlay struct {
 	TerminalWidth      int
 	TerminalHeight     int
 	NavigationWrapped  bool
+	explainRanking     bool
+	controlNotice      string
 }
 
 func (o *Overlay) SetPromptRows(rows int) {
@@ -349,6 +352,8 @@ func (o *Overlay) UpdateItems(items []spec.Suggestion) {
 	o.Cursor = noOverlaySelection
 	o.StartIdx = 0
 	o.NavigationWrapped = false
+	o.explainRanking = false
+	o.controlNotice = ""
 }
 
 func (o *Overlay) IsVisible() bool {
@@ -464,6 +469,8 @@ func (o *Overlay) SetQueryAndItems(query string, items []spec.Suggestion) {
 	o.Cursor = noOverlaySelection
 	o.StartIdx = 0
 	o.NavigationWrapped = false
+	o.explainRanking = false
+	o.controlNotice = ""
 }
 
 func (o *Overlay) RefreshQueryAndItems(query string, items []spec.Suggestion) {
@@ -511,6 +518,10 @@ func (o *Overlay) SetHistorySearch(query string, label string, items []spec.Sugg
 	selectedID := ""
 	selectedCommand := ""
 	sameSearch := !o.RichHistory && o.ContextLabel == contextLabel && o.TypedQuery == query
+	if !sameSearch {
+		o.explainRanking = false
+		o.controlNotice = ""
+	}
 	navigated := o.UserNavigated
 	if sameSearch && o.Cursor >= 0 && o.Cursor < len(o.Items) {
 		selectedID = o.Items[o.Cursor].ID
@@ -545,6 +556,10 @@ func (o *Overlay) SetRichHistorySearch(query string, label string, results []Ric
 	selectedID := ""
 	selectedCommand := ""
 	sameSearch := o.RichHistory && !o.RecentHistory && o.TypedQuery == query && o.ContextLabel == contextLabel
+	if !sameSearch {
+		o.explainRanking = false
+		o.controlNotice = ""
+	}
 	navigated := o.UserNavigated
 	if sameSearch && o.Cursor >= 0 && o.Cursor < len(o.Items) {
 		selectedCommand = o.Items[o.Cursor].Cmd
@@ -588,6 +603,8 @@ func (o *Overlay) SetRecentHistory(results []RichHistoryResult) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.TypedQuery = ""
+	o.explainRanking = false
+	o.controlNotice = ""
 	o.ContextLabel = "history"
 	o.UserNavigated = len(results) > 0
 	o.RichHistory = true
@@ -648,6 +665,11 @@ func (o *Overlay) InjectAISuggestion(sugg spec.Suggestion) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	// The provider's earlier policy check can precede a successful block save.
+	// Decide again while holding the same lock as preference refresh.
+	if policy.Blocked(sugg.Cmd) {
+		return false
+	}
 	if o.TypedQuery == "" {
 		return false
 	}
@@ -1242,6 +1264,9 @@ func (o *Overlay) draw() string {
 	if scrollInfo != "" {
 		scrollInfo = " " + truncateToWidth(scrollInfo, inner-4) + " "
 	}
+	if o.controlNotice != "" {
+		scrollInfo = " " + truncateToWidth(o.controlNotice, inner-4) + " "
+	}
 	leftDash := 3
 	if isClassic && scrollInfo != "" {
 		leftDash = (inner - len(scrollInfo)) / 2
@@ -1388,32 +1413,7 @@ func (o *Overlay) draw() string {
 	}
 
 	// Footer with shortcut hints.
-	footerInfo := ""
-	if !isClassic {
-		keyStyle := o.footerKeyStyle
-		textStyle := o.footerTextStyle
-		var hints []string
-		runTarget := " Run typed"
-		if o.Cursor >= 0 {
-			runTarget = " Run selected"
-		}
-		hints = append(hints, keyStyle.Render("<Enter>")+textStyle.Render(runTarget))
-		if label := keybindingLabel(config.Get().Keybindings.Accept); label != "" {
-			action := " Select"
-			if len(o.Items) == 1 {
-				action = " Accept"
-			} else if o.Cursor >= 0 {
-				action = " Next"
-			}
-			hints = append(hints, keyStyle.Render(label)+textStyle.Render(action))
-		}
-		if label := keybindingLabel(config.Get().Keybindings.HistorySearch); label != "" {
-			hints = append(hints, keyStyle.Render(label)+textStyle.Render(" Mode"))
-		}
-		if len(hints) > 0 {
-			footerInfo = " " + strings.Join(hints, textStyle.Render(" • ")) + " "
-		}
-	}
+	footerInfo := o.renderControlFooter(inner-4, isClassic)
 
 	footerRunes := lipgloss.Width(footerInfo)
 	rightDash = 2
@@ -1509,6 +1509,11 @@ func overlayPromptMarker() string {
 }
 
 func suggestionBadgeLabel(suggestion spec.Suggestion) string {
+	for _, pin := range config.Get().Suggestions.Pins {
+		if strings.TrimSpace(pin) == strings.TrimSpace(suggestion.Cmd) {
+			return "pinned"
+		}
+	}
 	switch suggestion.Source {
 	case "history":
 		return "history"

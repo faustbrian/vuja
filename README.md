@@ -199,6 +199,9 @@ accepts the same optional flag.
 | <kbd>←</kbd> / <kbd>→</kbd> | Move within the input buffer |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd> | Open rich history search; press again to cycle directory, project, global, machine, and current-session scopes |
 | <kbd>Ctrl</kbd> + <kbd>S</kbd> | Toggle successful commands while history search is open |
+| <kbd>F5</kbd> | Pin or unpin the selected command |
+| <kbd>F6</kbd> | Hide the selected command from suggestion menus; retain its recorded history |
+| <kbd>F9</kbd> | Toggle the selected row's ranking explanation |
 | <kbd>Ctrl</kbd> + <kbd>A</kbd> | Move to the beginning of the line |
 | <kbd>Ctrl</kbd> + <kbd>E</kbd> | Move to the end of the line |
 | <kbd>Ctrl</kbd> + <kbd>L</kbd> | Clear the terminal and redraw the input |
@@ -210,6 +213,23 @@ As suggestions are enriched, a selection follows the same identity and command,
 not its row number. If it disappears, changes command, or becomes ambiguous,
 selection clears and the footer returns to **Run typed**. Choose a row again
 to execute a replacement; ghost text alone is never an execution selection.
+
+Row controls require a selected row, not just ghost text. They do not insert or
+execute commands. Pin/block preferences are saved asynchronously in the private
+configuration; one pending save is allowed, and a single private
+`config.toml.suggestions.bak` retains the preceding configuration. UI-created
+blocks are stored in `suggestions.exact-blocks` and match only that command,
+even when it contains glob characters. Existing
+manually configured block patterns retain their pattern semantics. Other running
+sessions load the preferences when restarted. `suggestion-pin`,
+`suggestion-block` and `suggestion-explain` can override the keys or use `none`.
+The UI allows at most 512 combined pins/blocks; existing larger lists can still
+be reduced. Invalid configurations and failed saves leave active preferences
+unchanged. The settings writer retains raw key references, not resolved secrets.
+
+Ranking explanations report the actual score and normalized signal values, not
+usage counts or probabilities. Cached evidence is labeled; unscored rows do not
+invent evidence. Recent-execution history remains chronological, not score-ranked.
 
 Vuja handles line-editing shortcuts directly while the terminal is in raw mode
 so its input buffer and suggestion menu remain synchronized. The table shows

@@ -46,6 +46,12 @@ func KeySequences(binding string) ([][]byte, error) {
 		return [][]byte{{0x1b, '[', 'H'}, {0x1b, 'O', 'H'}, {0x1b, '[', '1', '~'}}, nil
 	case "end":
 		return [][]byte{{0x1b, '[', 'F'}, {0x1b, 'O', 'F'}, {0x1b, '[', '4', '~'}}, nil
+	case "f5":
+		return [][]byte{[]byte("\x1b[15~")}, nil
+	case "f6":
+		return [][]byte{[]byte("\x1b[17~")}, nil
+	case "f9":
+		return [][]byte{[]byte("\x1b[20~")}, nil
 	default:
 		if strings.HasPrefix(normalized, "ctrl+") && len(normalized) == len("ctrl+a") {
 			letter := normalized[len(normalized)-1]
@@ -68,6 +74,9 @@ func validateKeybindings(bindings KeybindingsConfig) error {
 	}{
 		{name: "history-search", bindings: []string{bindings.HistorySearch}},
 		{name: "history-success-only", bindings: []string{bindings.HistorySuccessOnly}},
+		{name: "suggestion-pin", bindings: []string{bindings.SuggestionPin}},
+		{name: "suggestion-block", bindings: []string{bindings.SuggestionBlock}},
+		{name: "suggestion-explain", bindings: []string{bindings.SuggestionExplain}},
 		{name: "accept", bindings: []string{bindings.Accept}},
 		{name: "toggle-overlay", bindings: []string{bindings.ToggleOverlay}},
 		{name: "accept-token", bindings: bindings.AcceptToken},

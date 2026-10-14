@@ -46,15 +46,16 @@ type Option struct {
 
 // Suggestion represents an item in the suggestion menu
 type Suggestion struct {
-	ID                string // stable provider identity; command text remains the fallback
-	Cmd               string
-	Desc              string
-	Icon              string
-	Source            string // "history", "spec", "filesystem", "ai"
-	Live              bool   // true when the candidate was verified against the current filesystem
-	Confidence        int    // 0-100
-	Priority          int    // static author priority
-	HistoryConfidence int    // query-local history recall priority; zero without history evidence
+	ID                 string // stable provider identity; command text remains the fallback
+	Cmd                string
+	Desc               string
+	Icon               string
+	Source             string // "history", "spec", "filesystem", "ai"
+	Live               bool   // true when the candidate was verified against the current filesystem
+	Confidence         int    // 0-100
+	Priority           int    // static author priority
+	HistoryConfidence  int    // query-local history recall priority; zero without history evidence
+	RankingExplanation string // actual ranking contributions; empty when evidence was not collected
 }
 
 var Registry = map[string]*Spec{}

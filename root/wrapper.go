@@ -29,6 +29,7 @@ import (
 	"github.com/faustbrian/vuja/internal/ai"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/internal/logger"
+	"github.com/faustbrian/vuja/internal/policy"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/internal/workspace"
 	"github.com/faustbrian/vuja/spec"
@@ -873,6 +874,12 @@ func runWrapper() {
 	var suggestionWorkCancel context.CancelFunc
 	suggestionComputeSlot := make(chan struct{}, 1)
 	var acceptedUndo suggestionUndo
+	var pendingPreferenceNotice atomic.Pointer[string]
+	showPreferenceNotice := func() {
+		if notice := pendingPreferenceNotice.Swap(nil); notice != nil {
+			overlay.SetControlNotice(*notice)
+		}
+	}
 	cancelSuggestionWork := func() {
 		suggestionWorkMu.Lock()
 		if suggestionWorkCancel != nil {
@@ -882,8 +889,8 @@ func runWrapper() {
 		suggestionWorkMu.Unlock()
 	}
 
-	renderSuggestionResults := func(request suggestionRequest, offset int, results []spec.Suggestion, updating bool) {
-		uiPresenter.Update(func(compose func(func() []byte)) {
+	renderSuggestionResults := func(request suggestionRequest, generation uint64, offset int, results []spec.Suggestion, updating bool) {
+		presentSuggestionGeneration(uiPresenter, suggestionResults, generation, func(compose func(func() []byte)) {
 			if isExecuting() {
 				return
 			}
@@ -922,6 +929,7 @@ func runWrapper() {
 					overlay.SetQueryAndItems(request.query, results)
 				}
 				overlay.SetUpdating(updating)
+				showPreferenceNotice()
 				if !disableGhostText.Load() {
 					output.WriteString(overlay.RenderGhostText(request.query, navigated, offset == 0))
 				}
@@ -995,7 +1003,7 @@ func runWrapper() {
 				}
 				env := ai.NewEnvSnapshot(cwd, lastCmd, 0, recentCmds)
 				sugg, err := GetAIEngine().Suggest(ctx, queryTarget, env, "")
-				if err != nil || sugg == nil || ctx.Err() != nil {
+				if err != nil || sugg == nil || ctx.Err() != nil || policy.Blocked(sugg.Cmd) {
 					return
 				}
 				SetCurrentAISuggestion(sugg)
@@ -1034,7 +1042,7 @@ func runWrapper() {
 		if immediate, hit := suggestionResults.immediate(request); hit {
 			immediateHit = true
 			immediateResults = append([]spec.Suggestion(nil), immediate...)
-			renderSuggestionResults(request, offsetCopy, immediate, false)
+			renderSuggestionResults(request, generation, offsetCopy, immediate, false)
 			if suggestionsVisibleForQuery(immediate, request.query) {
 				elapsed := time.Since(requestStarted)
 				suggestionLatency.record("first-paint", elapsed)
@@ -1051,7 +1059,7 @@ func runWrapper() {
 			if suggestionsVisibleForQuery(fastResults, request.query) {
 				immediateHit = true
 				immediateResults = append([]spec.Suggestion(nil), fastResults...)
-				renderSuggestionResults(request, offsetCopy, fastResults, false)
+				renderSuggestionResults(request, generation, offsetCopy, fastResults, false)
 				elapsed := time.Since(requestStarted)
 				suggestionLatency.record("first-paint", elapsed)
 				suggestionLatency.record("first-suggestion", elapsed)
@@ -1065,10 +1073,13 @@ func runWrapper() {
 		updatingDone := make(chan struct{})
 		updatingTimer := time.AfterFunc(100*time.Millisecond, func() {
 			defer close(updatingDone)
-			if suggestionResults.current(generation) {
+			presentSuggestionGeneration(uiPresenter, suggestionResults, generation, func(compose func(func() []byte)) {
+				if isExecuting() {
+					return
+				}
 				overlay.SetUpdating(true)
-				uiPresenter.Present(func() []byte { return []byte(overlay.Render()) })
-			}
+				compose(func() []byte { return []byte(overlay.Render()) })
+			})
 		})
 		stopUpdatingTimer := func() {
 			if !updatingTimer.Stop() {
@@ -1103,7 +1114,7 @@ func runWrapper() {
 			if immediateHit && sameSuggestionResults(immediateResults, finalResults) && !overlay.IsUpdating() {
 				return
 			}
-			renderSuggestionResults(request, offsetCopy, finalResults, false)
+			renderSuggestionResults(request, generation, offsetCopy, finalResults, false)
 			if !immediateHit && suggestionsVisibleForQuery(finalResults, request.query) {
 				elapsed := time.Since(requestStarted)
 				suggestionLatency.record("first-paint", elapsed)
@@ -1152,12 +1163,14 @@ func runWrapper() {
 				Host:           host,
 				SessionID:      executionTracker.sessionID,
 			})
+			results = filterBlockedHistorySuggestions(results)
 			compose(func() []byte {
 				var output strings.Builder
 				if overlay.IsVisible() {
 					output.WriteString(overlay.Clear())
 				}
 				overlay.SetRichHistorySearch(state.Query, state.Label(), results)
+				showPreferenceNotice()
 				historyNav.Select(overlay.GetCurrentCmd())
 				output.WriteString(overlay.Render())
 				return []byte(output.String())
@@ -1168,6 +1181,9 @@ func runWrapper() {
 	renderOverlay()
 
 	// reads from stdin and decides what to forward or intercept
+	preferencePath, _ := config.ConfigPath()
+	suggestionPreferences := newSuggestionPreferenceWorker(preferencePath)
+	defer suggestionPreferences.close()
 	inBracketedPaste := false
 	var pastedText strings.Builder
 	var terminalReports terminalInputFilter
@@ -1206,6 +1222,45 @@ inputLoop:
 			queuedInput = queuedInput[1:]
 		} else {
 			select {
+			case preference := <-suggestionPreferences.results:
+				suggestionPreferences.acknowledge()
+				if preference.err != nil {
+					notice := "Preference not saved; check config validity and permissions"
+					pendingPreferenceNotice.Store(&notice)
+					if isExecuting() {
+						continue
+					}
+					presentOverlay(func() string {
+						showPreferenceNotice()
+						return overlay.Render()
+					})
+					continue
+				}
+				cancelSuggestionWork()
+				suggestionResults.publishPreferences(preference.preferences)
+				notice := "Pin preference saved"
+				if preference.request.action == inputSuggestionBlock {
+					notice = "Suggestion blocked; recorded history is unchanged"
+				}
+				pendingPreferenceNotice.Store(&notice)
+				if isExecuting() {
+					continue
+				}
+				presentOverlay(func() string {
+					cleared := overlay.Clear()
+					overlay.RefreshPreferences(policy.Blocked)
+					showPreferenceNotice()
+					return cleared + overlay.Render()
+				})
+				if historySearch.Active() {
+					renderHistorySearch()
+				} else if !historyNav.Mirrored() {
+					userNavigated.Store(false)
+					renderOverlay()
+				} else {
+					historyNav.Select(overlay.GetCurrentCmd())
+				}
+				continue
 			case <-display.runningStatusWake:
 				resetRunningStatusTimer()
 				continue
@@ -1310,6 +1365,11 @@ inputLoop:
 					continue
 				}
 				b := inputSlice[i]
+				if length := handleSuggestionControl(inputSlice, i, inputBindings, overlay, suggestionPreferences.enqueue); length > 0 {
+					presentOverlay(overlay.Render)
+					i += length - 1
+					continue
+				}
 				intercepted := false
 				acceptBindingLength := inputBindings.match(inputAccept, inputSlice, i)
 				moveBeginningLength := inputBindings.match(inputMoveBeginning, inputSlice, i)
@@ -1434,11 +1494,12 @@ inputLoop:
 						if !integration.HistoryLoaded() {
 							_ = integration.EnsureHistoryLoaded(context.Background())
 						}
-						results := integration.CurrentRecentRichHistory(time.Now(), config.Get().UI.MaxSuggestions)
+						results := filterBlockedHistorySuggestions(integration.CurrentRecentRichHistory(time.Now(), config.Get().UI.MaxSuggestions))
 						if len(results) > 0 {
 							selected := ""
 							uiPresenter.Update(func(_ func(func() []byte)) {
 								overlay.SetRecentHistory(results)
+								showPreferenceNotice()
 								if len(navigationActions) > 1 {
 									overlay.NavigateMany(navigationActions[1:])
 								}

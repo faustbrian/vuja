@@ -63,6 +63,7 @@ func mergeFastResultsProfiled(query string, mode string) ([]spec.Suggestion, map
 			candidates[index].Cmd = segment.Prefix + candidates[index].Cmd
 		}
 	}
+	candidates = applySuggestionPolicy(query, candidates)
 	if mode == "history" {
 		boostHistoryRecall(candidates)
 	}
@@ -86,6 +87,7 @@ func limitScoredSuggestions(scored []scoring.ScoredSuggestion, limit int, query 
 	results := make([]spec.Suggestion, visible)
 	for index := range visible {
 		results[index] = scored[index].Suggestion
+		results[index].RankingExplanation = rankingExplanation(scored[index], query)
 	}
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
@@ -102,6 +104,7 @@ func limitScoredSuggestions(scored []scoring.ScoredSuggestion, limit int, query 
 	for index := visible; index < len(scored); index++ {
 		if isExactPrefixHistory(scored[index].Suggestion) {
 			results[visible-1] = scored[index].Suggestion
+			results[visible-1].RankingExplanation = "history prefix retained • " + rankingExplanation(scored[index], query)
 			break
 		}
 	}
@@ -283,6 +286,7 @@ func scoreResultsProfiledContext(ctx context.Context, query string, mode string)
 		seen[strings.TrimSpace(suggestion.Cmd)] = true
 	}
 	injectAISuggestion(&deduped, seen, normalizedQuery)
+	deduped = applySuggestionPolicy(normalizedQuery, deduped)
 
 	tokens := spec.Tokenize(activeQuery)
 	rootCmd := ""
@@ -383,6 +387,10 @@ func canonicalDirectorySuggestion(command string) string {
 
 func applySuggestionPolicy(query string, suggestions []spec.Suggestion) []spec.Suggestion {
 	cfg := config.Get().Suggestions
+	pins := make(map[string]bool, len(cfg.Pins))
+	for _, command := range cfg.Pins {
+		pins[strings.TrimSpace(command)] = true
+	}
 	seen := make(map[string]bool, len(suggestions))
 	filtered := make([]spec.Suggestion, 0, len(suggestions)+len(cfg.Pins))
 	for _, suggestion := range suggestions {
@@ -394,6 +402,9 @@ func applySuggestionPolicy(query string, suggestions []spec.Suggestion) []spec.S
 			continue
 		}
 		seen[command] = true
+		if pins[command] {
+			suggestion.Priority = 100
+		}
 		filtered = append(filtered, suggestion)
 	}
 	for _, command := range cfg.Pins {

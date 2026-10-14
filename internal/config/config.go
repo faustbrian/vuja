@@ -267,6 +267,7 @@ type AIConfig struct {
 type SuggestionsConfig struct {
 	Pins                []string `toml:"pins"`
 	Blocks              []string `toml:"blocks"`
+	ExactBlocks         []string `toml:"exact-blocks"`
 	IgnorePatterns      []string `toml:"ignore-patterns"`
 	SuppressDestructive bool     `toml:"suppress-destructive"`
 	HistoryRanking      string   `toml:"history-ranking"`
@@ -284,6 +285,9 @@ type KeybindingsConfig struct {
 	DeleteWord         string   `toml:"delete-word"`
 	HistorySearch      string   `toml:"history-search"`
 	HistorySuccessOnly string   `toml:"history-success-only"`
+	SuggestionPin      string   `toml:"suggestion-pin"`
+	SuggestionBlock    string   `toml:"suggestion-block"`
+	SuggestionExplain  string   `toml:"suggestion-explain"`
 	Accept             string   `toml:"accept"`
 	ToggleOverlay      string   `toml:"toggle-overlay"`
 	AcceptToken        []string `toml:"accept-token"`
@@ -346,21 +350,45 @@ type Config struct {
 
 var (
 	activeConfig *Config
+	activeMu     sync.RWMutex
 	once         sync.Once
 )
 
 func Get() *Config {
 	once.Do(func() {
+		activeMu.Lock()
+		defer activeMu.Unlock()
 		if activeConfig == nil {
 			activeConfig = DefaultConfig()
 		}
 	})
+	activeMu.RLock()
+	defer activeMu.RUnlock()
 	return activeConfig
 }
 
 func Init(cfg *Config) {
+	activeMu.Lock()
 	activeConfig = cfg
+	activeMu.Unlock()
 	once.Do(func() {})
+}
+
+// PublishSuggestionPreferences replaces only the saved preference lists.
+// Readers keep their previous immutable snapshot; runtime overrides, resolved
+// credentials and unrelated settings are never written back to disk here.
+func PublishSuggestionPreferences(preferences SuggestionsConfig) {
+	_ = Get()
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	if activeConfig == nil {
+		return
+	}
+	updated := *activeConfig
+	updated.Suggestions.Pins = slices.Clone(preferences.Pins)
+	updated.Suggestions.Blocks = slices.Clone(preferences.Blocks)
+	updated.Suggestions.ExactBlocks = slices.Clone(preferences.ExactBlocks)
+	activeConfig = &updated
 }
 
 func Load() (*Config, error) {

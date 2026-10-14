@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/spec"
 )
 
@@ -57,7 +58,7 @@ func (p *suggestionPipeline) immediate(request suggestionRequest) ([]spec.Sugges
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if results, ok := p.exact[request]; ok {
-		return clonePipelineSuggestions(results), true
+		return cachedRankingSuggestions(results), true
 	}
 	if request.mode != p.last.request.mode || request.cwd != p.last.request.cwd ||
 		!strings.HasPrefix(strings.ToLower(request.query), strings.ToLower(p.last.request.query)) {
@@ -67,6 +68,9 @@ func (p *suggestionPipeline) immediate(request suggestionRequest) ([]spec.Sugges
 	filtered := make([]spec.Suggestion, 0, len(p.last.results))
 	for _, result := range p.last.results {
 		if suggestionMatchesQuery(result.Cmd, query) {
+			if result.RankingExplanation != "" && !strings.HasPrefix(result.RankingExplanation, "cached ranking • ") {
+				result.RankingExplanation = "cached ranking • " + result.RankingExplanation
+			}
 			filtered = append(filtered, result)
 		}
 	}
@@ -131,6 +135,16 @@ func clonePipelineSuggestions(results []spec.Suggestion) []spec.Suggestion {
 	return append([]spec.Suggestion(nil), results...)
 }
 
+func cachedRankingSuggestions(results []spec.Suggestion) []spec.Suggestion {
+	cloned := clonePipelineSuggestions(results)
+	for index := range cloned {
+		if cloned[index].RankingExplanation != "" && !strings.HasPrefix(cloned[index].RankingExplanation, "cached ranking • ") {
+			cloned[index].RankingExplanation = "cached ranking • " + cloned[index].RankingExplanation
+		}
+	}
+	return cloned
+}
+
 func sameSuggestionResults(left, right []spec.Suggestion) bool {
 	if len(left) != len(right) {
 		return false
@@ -141,11 +155,24 @@ func sameSuggestionResults(left, right []spec.Suggestion) bool {
 			left[index].Live != right[index].Live ||
 			left[index].Confidence != right[index].Confidence ||
 			left[index].HistoryConfidence != right[index].HistoryConfidence ||
+			left[index].RankingExplanation != right[index].RankingExplanation ||
 			left[index].Priority != right[index].Priority {
 			return false
 		}
 	}
 	return true
+}
+
+func (p *suggestionPipeline) publishPreferences(preferences config.SuggestionsConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// A request must not begin between cache invalidation and publication and
+	// capture old preferences with the new generation.
+	config.PublishSuggestionPreferences(preferences)
+	p.generation++
+	p.exact = make(map[suggestionRequest][]spec.Suggestion)
+	p.order = nil
+	p.last = suggestionCacheEntry{}
 }
 
 func suggestionsVisibleForQuery(results []spec.Suggestion, query string) bool {
