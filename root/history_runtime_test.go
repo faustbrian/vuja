@@ -91,6 +91,11 @@ func TestSubmittedLongRunningCommandAppearsBeforeCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	// A managed session publishes its canonical snapshot before accepting
+	// submissions. Do not append this isolated store to another test's recall.
+	if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
 	started := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	entry := integration.HistoryEntry{
 		ID: "vuja:running-ssh", Command: "ssh forge@long-running", NormalizedCommand: "ssh forge@long-running",
@@ -818,9 +823,9 @@ func TestRecoveryJournalPublicationFailureRetainsCheckpointForRetry(t *testing.T
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	canonicalHistoryMutationMu.Lock()
-	_, replayErr := replayHistoryRecoveryJournalBatchObserved(ctx, store, 1, func(ctx context.Context, store *scoring.FrecencyStore, keys []string) error {
+	_, replayErr := replayHistoryRecoveryJournalBatchObserved(ctx, store, 1, func(ctx context.Context, store *scoring.FrecencyStore, keys []string, retentionChanged bool) error {
 		cancel() // Completion committed; the real publication query now fails.
-		return publishRecoveredHistoryLocked(ctx, store, keys)
+		return publishRecoveredHistoryLocked(ctx, store, keys, retentionChanged)
 	})
 	canonicalHistoryMutationMu.Unlock()
 	if !errors.Is(replayErr, context.Canceled) {

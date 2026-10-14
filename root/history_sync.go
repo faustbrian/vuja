@@ -7,13 +7,22 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
 )
 
 const canonicalHistorySyncInterval = 500 * time.Millisecond
+
+// canonicalHistoryView is the read/publication boundary shared by snapshots
+// and incremental synchronization. It does not grant canonical write access.
+type canonicalHistoryView interface {
+	QueryHistoryChanges(context.Context, int64, int) (scoring.HistoryChangeBatch, error)
+	QueryAllHistoryEvents(context.Context) ([]scoring.HistoryEvent, error)
+	QueryHistoryEventsByKeys(context.Context, []string) ([]scoring.HistoryEvent, error)
+	HistoryEventForgotten(context.Context, string) (bool, error)
+	SetHistorySnapshotSequence(int64)
+}
 
 func historySyncStartCursor(store *scoring.FrecencyStore) int64 {
 	if store == nil {
@@ -24,7 +33,7 @@ func historySyncStartCursor(store *scoring.FrecencyStore) int64 {
 
 func syncCanonicalHistoryOnce(
 	ctx context.Context,
-	store *scoring.FrecencyStore,
+	store canonicalHistoryView,
 	sessionID string,
 	cursor int64,
 ) (int64, bool, error) {
@@ -70,10 +79,17 @@ func syncCanonicalHistoryOnce(
 		}
 		if len(events) == len(keys) {
 			canonicalHistoryMutationMu.Lock()
+			var publicationErr error
 			for _, event := range events {
-				integration.PublishCanonicalHistoryEntry(historyEventEntry(event))
+				if _, err := publishCanonicalEntryLocked(ctx, store, historyEventEntry(event)); err != nil {
+					publicationErr = err
+					break
+				}
 			}
 			canonicalHistoryMutationMu.Unlock()
+			if publicationErr != nil {
+				return cursor, false, publicationErr
+			}
 			scoring.InvalidateSignalCache()
 			spec.NotifyCompletionUpdate()
 			return next, true, nil

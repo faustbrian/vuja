@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/logger"
 	"github.com/faustbrian/vuja/internal/scoring"
 	"github.com/faustbrian/vuja/spec"
@@ -75,7 +74,11 @@ func retryHistoryRecoveryOnce(ctx context.Context, store *scoring.FrecencyStore)
 	return true, nil
 }
 
-func publishRecoveredHistoryLocked(ctx context.Context, store *scoring.FrecencyStore, keys []string) error {
+func publishRecoveredHistoryLocked(ctx context.Context, store *scoring.FrecencyStore, keys []string, retentionChanged bool) error {
+	if retentionChanged {
+		_, err := publishCanonicalStoreHistoryLocked(ctx, store)
+		return err
+	}
 	events, err := store.QueryHistoryEventsByKeys(ctx, keys)
 	if err != nil {
 		return err
@@ -91,7 +94,9 @@ func publishRecoveredHistoryLocked(ctx context.Context, store *scoring.FrecencyS
 		return err
 	}
 	for _, event := range events {
-		integration.PublishCanonicalHistoryEntry(historyEventEntry(event))
+		if _, err := publishCanonicalEntryLocked(ctx, store, historyEventEntry(event)); err != nil {
+			return err
+		}
 	}
 	scoring.InvalidateSignalCache()
 	spec.NotifyCompletionUpdate()
@@ -132,7 +137,11 @@ func startHistoryRecoveryRetryObserved(store *scoring.FrecencyStore, begin func(
 				}
 				retryCancel()
 				if err != nil && ctx.Err() == nil {
-					logger.Errorf("failed to retry canonical history recovery: %v", err)
+					if errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
+						recordHistoryRetentionFailure(err)
+					} else {
+						logger.Errorf("failed to retry canonical history recovery: %v", err)
+					}
 				}
 			}
 		}

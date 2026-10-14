@@ -1,14 +1,116 @@
 package root
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/scoring"
 )
+
+type gatedCanonicalHistoryView struct {
+	*scoring.FrecencyStore
+	once    sync.Once
+	loaded  chan struct{}
+	release chan struct{}
+}
+
+func (view *gatedCanonicalHistoryView) QueryHistoryEventsByKeys(ctx context.Context, keys []string) ([]scoring.HistoryEvent, error) {
+	events, err := view.FrecencyStore.QueryHistoryEventsByKeys(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	view.once.Do(func() {
+		close(view.loaded)
+		select {
+		case <-view.release:
+		case <-ctx.Done():
+		}
+	})
+	return events, ctx.Err()
+}
+
+func TestCanonicalHistorySyncCannotRepublishAForgottenLoadedExecution(t *testing.T) {
+	for _, selection := range []string{"native target", "imported target with native alias"} {
+		t.Run(selection, func(t *testing.T) {
+			original := integration.RichHistorySnapshot()
+			t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
+			store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			store.SetHistoryChangeOrigin("foreign-session")
+			at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+			target, cursor := "forget-loaded", int64(0)
+			if selection == "imported target with native alias" {
+				target = "atuin:forget-loaded"
+				if err := store.ReplaceImportedHistoryEvents(t.Context(), []scoring.HistoryEvent{{
+					EventKey: target, Command: "ssh forge@forget-loaded", Cwd: "/repo", Source: "atuin",
+					StartedAt: at, Imported: true, State: "completed", HasExitCode: true,
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				// Real imports emit reset, not upsert. Consume that boundary first;
+				// the paused incremental query below loads only the native alias.
+				batch, err := store.QueryHistoryChanges(t.Context(), 0, 256)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cursor = batch.Latest
+			}
+			for index, id := range []string{"forget-loaded", "keep-loaded"} {
+				if err := store.RecordHistorySubmission(t.Context(), scoring.HistoryEvent{
+					EventKey: id, Command: "ssh forge@" + id, Cwd: "/repo", Source: "vuja",
+					StartedAt: at.Add(time.Duration(index) * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			view := &gatedCanonicalHistoryView{FrecencyStore: store, loaded: make(chan struct{}), release: make(chan struct{})}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, _, err := syncCanonicalHistoryOnce(ctx, view, "local-session", cursor)
+				result <- err
+			}()
+			var release sync.Once
+			defer release.Do(func() { close(view.release) })
+			select {
+			case <-view.loaded:
+			case <-ctx.Done():
+				t.Fatal("incremental sync did not reach the controlled loaded-row boundary")
+			}
+			if _, err := store.ForgetHistoryEvents(t.Context(), []string{target}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			release.Do(func() { close(view.release) })
+			select {
+			case err := <-result:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("incremental synchronization did not complete")
+			}
+			entries := integration.RichHistorySnapshot()
+			if len(entries) != 1 || entries[0].ID != "keep-loaded" {
+				t.Fatalf("queued cross-session publication restored a forgotten execution: %+v", entries)
+			}
+		})
+	}
+}
 
 func TestCanonicalHistorySynchronizesExecutionsFromAnotherManagedSession(t *testing.T) {
 	original := integration.RichHistorySnapshot()

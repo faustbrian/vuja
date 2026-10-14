@@ -245,6 +245,7 @@ func collectDiagnosticReport(ctx context.Context) diagnosticReport {
 				report.Health["history"] = observed.History
 			}
 			report.Health["recovery_pending"] = observed.RecoveryPending
+			report.Health["retention_deferred"] = observed.RetentionDeferred
 			report.Health["lost_submissions"] = observed.LostSubmissions
 			report.Health["lost_outcomes"] = observed.LostOutcomes
 			providers := make(map[string]any)

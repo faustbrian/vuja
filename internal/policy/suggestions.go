@@ -23,10 +23,49 @@ func HistoryCommand(raw string, shellIgnored bool) (string, bool) {
 		return "", false
 	}
 	command := strings.TrimSpace(raw)
+	// A forgetting request can contain the very command text the user wants
+	// removed. Apply this exclusion to native recording, imports and feedback.
+	if historyForgettingText(command) {
+		return "", false
+	}
 	if command == "" || strings.IndexFunc(command, unsafeHistoryControl) != -1 || IsSensitive(command) {
 		return "", false
 	}
 	return command, true
+}
+
+// This is intentionally a conservative text exclusion, not a shell parser.
+// Quoted examples, comments and nonexecuting arguments can contain the same
+// private target text. Root options and wrapper words do not weaken the rule.
+// Do not evaluate expansions or load aliases/functions to classify a command.
+func historyForgettingText(command string) bool {
+	plain := strings.Map(func(r rune) rune {
+		if r == '\'' || r == '"' || r == '\\' {
+			return -1
+		}
+		return r
+	}, command)
+	words := strings.FieldsFunc(plain, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>#`", r)
+	})
+	stage := 0
+	for _, word := range words {
+		switch stage {
+		case 0:
+			if filepath.Base(word) == "vuja" {
+				stage = 1
+			}
+		case 1:
+			if word == "history" {
+				stage = 2
+			}
+		case 2:
+			if word == "forget" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func unsafeHistoryControl(value rune) bool {

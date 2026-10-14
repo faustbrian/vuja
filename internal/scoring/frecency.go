@@ -98,17 +98,18 @@ type RecentFailure struct {
 }
 
 type FrecencyStore struct {
-	db                      *sql.DB
-	dbPath                  string
-	writeGate               chan struct{}
-	recordSequence          atomic.Uint64
-	historySnapshotSequence atomic.Int64
-	historyOriginMu         sync.RWMutex
-	historyOrigin           string
-	checkpointCancel        context.CancelFunc
-	checkpointDone          chan struct{}
-	closeOnce               sync.Once
-	closeErr                error
+	db                       *sql.DB
+	dbPath                   string
+	writeGate                chan struct{}
+	recordSequence           atomic.Uint64
+	historySnapshotSequence  atomic.Int64
+	historyRetentionDeferred atomic.Bool
+	historyOriginMu          sync.RWMutex
+	historyOrigin            string
+	checkpointCancel         context.CancelFunc
+	checkpointDone           chan struct{}
+	closeOnce                sync.Once
+	closeErr                 error
 }
 
 const walCheckpointInterval = 10 * time.Minute
@@ -334,6 +335,39 @@ CREATE TABLE IF NOT EXISTS history_events (
 CREATE INDEX IF NOT EXISTS idx_history_events_started_at
 ON history_events(started_at DESC);
 
+-- Opaque identity/provenance exclusions survive resets, retention and refreshes.
+-- Do not retain forgotten command text or identifying event keys here.
+CREATE TABLE IF NOT EXISTS forgotten_history_events (
+    identity_hash TEXT PRIMARY KEY,
+    occurrences INTEGER NOT NULL DEFAULT 1
+);
+
+-- Execution IDs differ between optional shell/Atuin sources. Keep only opaque
+-- matching fields so deleting command/path text does not discard the
+-- one-to-one counterpart slot needed to exclude those external copies.
+CREATE TABLE IF NOT EXISTS forgotten_native_history (
+    identity_hash TEXT PRIMARY KEY,
+    command_hash TEXT NOT NULL,
+    cwd_hash TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    duration_ns INTEGER NOT NULL DEFAULT 0,
+    exit_code INTEGER,
+    origin_source_hash TEXT NOT NULL DEFAULT '',
+    native_identity_hash TEXT NOT NULL DEFAULT '',
+    forgotten_at TEXT NOT NULL DEFAULT ''
+);
+
+-- One observed counterpart per execution/source. These opaque memberships
+-- survive forgetting so a later partial snapshot cannot reuse a consumed
+-- source slot for an independent repetition. No command/path text is stored.
+CREATE TABLE IF NOT EXISTS history_counterpart_sources (
+    owner_hash TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    identity_hash TEXT NOT NULL,
+    provenance_hash TEXT NOT NULL,
+    PRIMARY KEY (owner_hash, source_hash)
+);
+
 CREATE TABLE IF NOT EXISTS suggestion_feedback (
     cmd       TEXT NOT NULL,
     cwd       TEXT NOT NULL,
@@ -349,6 +383,29 @@ CREATE INDEX IF NOT EXISTS idx_suggestion_feedback_cwd_cmd
 ON suggestion_feedback(cwd, cmd);
 CREATE INDEX IF NOT EXISTS idx_suggestion_feedback_cmd_nocase
 ON suggestion_feedback(cmd COLLATE NOCASE);
+
+-- Preserve pre-attribution learning separately from the disposable aggregate.
+CREATE TABLE IF NOT EXISTS legacy_suggestion_feedback (
+    cmd TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    typed INTEGER NOT NULL DEFAULT 0,
+    edited INTEGER NOT NULL DEFAULT 0,
+    dismissed INTEGER NOT NULL DEFAULT 0,
+    last_used TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(cmd, cwd)
+);
+
+-- Feedback can concern an offered/edited command, not just the executed one.
+-- Its parent execution owns every contribution, including dismissals.
+CREATE TABLE IF NOT EXISTS history_feedback_events (
+    event_key TEXT NOT NULL,
+    cmd TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    last_used TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(event_key, cmd, cwd, kind)
+);
 
 CREATE TABLE IF NOT EXISTS command_outcomes (
     cmd       TEXT NOT NULL,
@@ -403,6 +460,15 @@ CREATE TABLE IF NOT EXISTS directory_navigation_sources (
 
 CREATE INDEX IF NOT EXISTS idx_directory_navigation_sources_path
 ON directory_navigation_sources(path);
+
+-- Successful native navigation is a projection of canonical executions.
+CREATE TABLE IF NOT EXISTS directory_navigation_visits (
+    event_key TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    inferred INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_directory_navigation_visits_path
+ON directory_navigation_visits(path);
 
 CREATE TABLE IF NOT EXISTS argument_values (
     scope     TEXT NOT NULL,
@@ -533,6 +599,78 @@ CREATE TABLE IF NOT EXISTS history_changes (
 		return err
 	}
 	var schemaVersion string
+	// The preceding updates hold SQLite's writer lock. Inspect/extend this
+	// additive projection only after that boundary, including older dev stores.
+	var hasForgottenOccurrences bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('forgotten_history_events') WHERE name = 'occurrences')`).Scan(&hasForgottenOccurrences); err != nil {
+		return err
+	}
+	if !hasForgottenOccurrences {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE forgotten_history_events ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return err
+		}
+	}
+	var hasVisitOrigin bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('directory_navigation_visits') WHERE name = 'inferred')`).Scan(&hasVisitOrigin); err != nil {
+		return err
+	}
+	if !hasVisitOrigin {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE directory_navigation_visits ADD COLUMN inferred INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	var hasCounterpartOrigin bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('forgotten_native_history') WHERE name = 'origin_source_hash')`).Scan(&hasCounterpartOrigin); err != nil {
+		return err
+	}
+	if !hasCounterpartOrigin {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE forgotten_native_history ADD COLUMN origin_source_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	for _, column := range []string{"native_identity_hash", "forgotten_at"} {
+		var present bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('forgotten_native_history') WHERE name = ?)`, column).Scan(&present); err != nil {
+			return err
+		}
+		if !present {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE forgotten_native_history ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+	}
+	// Older development rows have no deletion clock. Fence them at this
+	// upgrade boundary, rather than treating future submissions as old copies.
+	if _, err := tx.ExecContext(ctx, `UPDATE forgotten_native_history SET forgotten_at = ? WHERE forgotten_at = ''`, canonicalTimestamp(time.Now())); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_forgotten_native_command_time
+ON forgotten_native_history(command_hash, started_at)
+WHERE origin_source_hash <> '' AND native_identity_hash = ''`); err != nil {
+		return err
+	}
+	var feedbackMigrated bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM metadata WHERE key = 'history_feedback_attribution_version')`).Scan(&feedbackMigrated); err != nil {
+		return err
+	}
+	if !feedbackMigrated {
+		// Validate both raw feedback authorities before preserving unattributed
+		// learning. Lifecycle-v2 stores can still predate feedback attribution;
+		// waiting for the lifecycle migration would leave those rows untouched.
+		if err := purgeLegacyHistoryPolicyViolations(ctx, tx, "suggestion_feedback", "legacy_suggestion_feedback"); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO legacy_suggestion_feedback (cmd, cwd, accepted, typed, edited, dismissed, last_used)
+SELECT cmd, cwd, accepted, typed, edited, dismissed, last_used
+FROM suggestion_feedback
+WHERE NOT EXISTS (SELECT 1 FROM metadata WHERE key = 'history_feedback_attribution_version');
+INSERT INTO metadata (key, value) VALUES ('history_feedback_attribution_version', '1')
+ON CONFLICT(key) DO NOTHING;
+`); err != nil {
+		return err
+	}
 	versionErr := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key = 'history_schema_version'`).Scan(&schemaVersion)
 	if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
 		return versionErr
@@ -617,6 +755,21 @@ func publishHistoryMigrationBackup(temporaryPath, backupPath string) error {
 }
 
 func (f *FrecencyStore) RecordFeedback(ctx context.Context, cmd, cwd, event string) error {
+	return f.recordFeedback(ctx, "", cmd, cwd, event)
+}
+
+// RecordExecutionFeedback records one idempotent contribution owned by a
+// completed native execution. Unlike legacy feedback, it cannot outlive its
+// parent or re-enter after forgetting.
+func (f *FrecencyStore) RecordExecutionFeedback(ctx context.Context, eventKey, cmd, cwd, event string) error {
+	eventKey = strings.TrimSpace(eventKey)
+	if eventKey == "" {
+		return errors.New("feedback requires an execution identity")
+	}
+	return f.recordFeedback(ctx, eventKey, cmd, cwd, event)
+}
+
+func (f *FrecencyStore) recordFeedback(ctx context.Context, eventKey, cmd, cwd, event string) error {
 	if f == nil {
 		return nil
 	}
@@ -644,12 +797,63 @@ func (f *FrecencyStore) RecordFeedback(ctx context.Context, cmd, cwd, event stri
 		return err
 	}
 	defer f.releaseWrite()
+	tx, err := f.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Serialize the parent/exclusion check with writers in other panes too.
+	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
+		return err
+	}
+	if eventKey != "" {
+		forgotten, err := historyIdentityForgotten(ctx, tx, eventKey)
+		if err != nil {
+			return err
+		}
+		if forgotten {
+			return ErrHistoryForgotten
+		}
+		var eligible bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM history_events
+            WHERE event_key = ? AND imported = 0 AND cwd = ? AND state IN ('completed', 'failed'))`, eventKey, cwd).Scan(&eligible); err != nil {
+			return err
+		}
+		if !eligible {
+			return errors.New("feedback execution is absent, incomplete or belongs to another directory")
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO history_feedback_events (event_key, cmd, cwd, kind)
+            VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, eventKey, cmd, cwd, event)
+		if err != nil {
+			return err
+		}
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if inserted == 0 {
+			return tx.Commit()
+		}
+	} else {
+		query := fmt.Sprintf(`INSERT INTO legacy_suggestion_feedback (cmd, cwd, %s) VALUES (?, ?, 1)
+            ON CONFLICT(cmd, cwd) DO UPDATE SET %s = %s + 1, last_used = CURRENT_TIMESTAMP`, column, column, column)
+		if _, err := tx.ExecContext(ctx, query, cmd, cwd); err != nil {
+			return err
+		}
+	}
 	query := fmt.Sprintf(`
 INSERT INTO suggestion_feedback (cmd, cwd, %s) VALUES (?, ?, 1)
 ON CONFLICT(cmd, cwd) DO UPDATE SET %s = %s + 1, last_used = CURRENT_TIMESTAMP
 `, column, column, column)
-	_, err := f.db.ExecContext(ctx, query, cmd, cwd)
-	return err
+	if _, err := tx.ExecContext(ctx, query, cmd, cwd); err != nil {
+		return err
+	}
+	if eventKey != "" {
+		if err := f.recordHistoryChange(ctx, tx, "upsert", eventKey); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (f *FrecencyStore) QueryFeedback(ctx context.Context, cwd, root, prefix string, limit int) ([]FeedbackEntry, error) {
@@ -1276,9 +1480,15 @@ func (f *FrecencyStore) QueryDirectories(ctx context.Context, fragment string, l
 	shortlistPerSignal := max(shortlist/2, limit)
 	query := `
 WITH candidates AS (
-	SELECT path, 'vuja' AS source, count, recent_count, last_used FROM directory_navigation_index
+	SELECT legacy.path, 'vuja' AS source,
+           legacy.count + COALESCE(actual.count, 0) AS count,
+           legacy.recent_count + COALESCE(actual.recent_count, 0) AS recent_count,
+           CASE WHEN COALESCE(julianday(actual.last_used), -1) > COALESCE(julianday(legacy.last_used), -1)
+                THEN actual.last_used ELSE legacy.last_used END AS last_used
+    FROM directory_navigation_index legacy
+    LEFT JOIN directory_navigation_sources actual ON actual.path = legacy.path AND actual.source = 'native-visits'
 	UNION ALL
-	SELECT path, source, count, recent_count, last_used FROM directory_navigation_sources
+	SELECT path, source, count, recent_count, last_used FROM directory_navigation_sources WHERE source != 'native-visits'
 ), frequent_candidates AS (
 	SELECT path, source, count, recent_count, last_used
 	FROM candidates
@@ -1414,7 +1624,7 @@ func directoryEvidenceScore(entry DirectoryImport, ranking string, now time.Time
 			// history refresh. Cap it so a long-running installation cannot rebuild
 			// the lifetime-frequency dominance the rolling history window removes.
 			count = min(count, 20)
-		} else if ranking == "balanced" && (entry.RecentCount > 0 || entry.Source == "history") {
+		} else if ranking == "balanced" && (entry.RecentCount > 0 || entry.Source == "history" || entry.Source == "native-visits") {
 			count = entry.RecentCount
 		}
 		return directoryRankingScore(count, entry.LastUsed, directoryFrequencyOnlyScore(count), ranking, now)

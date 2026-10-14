@@ -220,6 +220,7 @@ func runWrapper() {
 	)
 	historyStore, historyStoreErr := initializeCanonicalHistory(executionTracker.sessionID)
 	healthProjection := newSessionHealthProjection(time.Now)
+	healthProjection.setHistoryStore(historyStore)
 	if historyStoreErr != nil {
 		healthProjection.observeHistoryUnavailable()
 		recordHistoryPersistenceFailure()
@@ -676,6 +677,7 @@ func runWrapper() {
 						logger.Errorf("failed to recover canonical history: %v", recoverErr)
 					} else {
 						historyStore = recoveredStore
+						healthProjection.setHistoryStore(historyStore)
 						if recovered {
 							historySync.Restart(historyStore, executionTracker.sessionID)
 							historyRecovery.Restart(historyStore)
@@ -694,7 +696,7 @@ func runWrapper() {
 				}
 				_, _ = historyAckWriter.Write([]byte{acknowledgement})
 				if activeHistoryPersisted {
-					publishHistorySubmission(entry)
+					publishHistorySubmission(historyStore, entry)
 				}
 				if activeHistoryPersisted && !activeHistoryJournaled && config.Get().History.Integrations.Shell.Mirror {
 					if err := mirrorHistorySubmission(entry.Command, shellName, entry.SubmittedAt); err != nil {
@@ -755,12 +757,14 @@ func runWrapper() {
 							}
 						} else if activeHistoryJournaled {
 							if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, historyEntry); err != nil {
-								observeCompletion(false, false)
-								recordHistoryDerivedFailure("recovery completion", err)
+								if !errors.Is(err, scoring.ErrHistoryForgotten) {
+									observeCompletion(false, false)
+									recordHistoryDerivedFailure("recovery completion", err)
+								}
 							} else {
 								observeCompletion(true, true)
 								historyCompleted = true
-								publishHistorySubmission(historyEntry)
+								publishHistorySubmission(historyStore, historyEntry)
 								if historyStore != nil {
 									if err := replayHistoryRecoveryJournalWithHealth(historyStore, healthProjection.recoveryObserver(historyStore)); err != nil {
 										logger.Errorf("failed to replay completed history recovery event: %v", err)
@@ -770,13 +774,13 @@ func runWrapper() {
 						} else {
 							historyCompleted, completionJournaled = completeHistoryEventDurablyObserved(historyStore, historyEntry, observeCompletion)
 							if completionJournaled {
-								publishHistorySubmission(historyEntry)
+								publishHistorySubmission(historyStore, historyEntry)
 							}
 						}
 						if historyCompleted {
 							ctxRecord, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 							if exitCode == 0 && isDirectoryNavigationCommand(cmdToRecord) {
-								if err := historyStore.RecordDirectory(ctxRecord, cwd); err != nil {
+								if err := historyStore.RecordHistoryDirectory(ctxRecord, historyEntry.ID, cwd); err != nil && !errors.Is(err, scoring.ErrHistoryForgotten) {
 									recordHistoryDerivedFailure("directory", err)
 								}
 							}
@@ -787,7 +791,7 @@ func runWrapper() {
 						if historyCleared {
 							setPrevRecordedInfo("", "")
 						} else if historyCompleted {
-							recordSuggestionFeedback(feedbackEvents, feedbackCWD)
+							recordSuggestionFeedback(feedbackEvents, feedbackCWD, historyEntry.ID)
 							setPrevRecordedInfo(cmdToRecord, cwd)
 						} else {
 							setPrevRecordedInfo("", "")

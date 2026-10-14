@@ -16,7 +16,7 @@ import (
 	"github.com/faustbrian/vuja/spec"
 )
 
-const directoryRecentWindow = 14 * 24 * time.Hour
+const directoryRecentWindow = scoring.DirectoryRecentWindow
 
 func parseZoxideDirectories(output string) []scoring.DirectoryImport {
 	entries := make([]scoring.DirectoryImport, 0)
@@ -100,38 +100,7 @@ func historyNavigationDirectoryImports(events []integration.HistoryEntry, now ti
 }
 
 func importedNavigationDestination(command, cwd string) (string, bool) {
-	tokens := spec.Tokenize(strings.TrimSpace(command))
-	if len(tokens) == 1 && tokens[0] == "cd" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		return filepath.Clean(home), true
-	}
-	if len(tokens) == 3 && tokens[0] == "cd" && tokens[1] == "--" {
-		tokens = []string{"cd", tokens[2]}
-	}
-	if len(tokens) != 2 || tokens[0] != "cd" {
-		return "", false
-	}
-	base := filepath.Clean(strings.TrimSpace(cwd))
-	if !filepath.IsAbs(base) {
-		return "", false
-	}
-	target := strings.TrimSpace(tokens[1])
-	if target == "" || target == "-" || strings.ContainsAny(target, "$`*?{}[]") {
-		return "", false
-	}
-	if target == "~" || strings.HasPrefix(target, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		target = filepath.Join(home, strings.TrimPrefix(target, "~/"))
-	} else if !filepath.IsAbs(target) {
-		target = filepath.Join(base, target)
-	}
-	return filepath.Clean(target), true
+	return scoring.HistoryNavigationDestination(command, cwd)
 }
 
 func isDirectoryNavigationCommand(command string) bool {

@@ -392,6 +392,7 @@ unlock no core capability and are disabled for new installations:
 [history]
 retention = "unlimited" # unlimited | bounded
 max-events = 0
+max-age = "0s" # disabled; e.g. "2160h" for 90 days, independent of the count cap
 
 [history.integrations.atuin]
 enabled = false
@@ -426,10 +427,77 @@ occurrences represented compactly by a legacy migration, rather than database
 rows or displayed suggestions. `prune` and `clear --confirm` update canonical
 events and derived ranking data transactionally.
 
+Optional `history.max-age` expires finished native and imported executions
+whose known start time is strictly older than the cutoff; an execution exactly
+at the cutoff remains. Unknown timestamps and running/submitted commands are
+preserved. Compact legacy rows follow their single recorded timestamp; Vuja
+does not invent the dates of their individual occurrences. The existing count
+cap still applies only to finished native executions. Age and count limits are
+reconciled together at startup, completion, import refresh and recovery before
+recovered history is published. Saved exports, external history files and output
+checkpoints are not erased by history retention.
+
+Legacy navigation or suggestion-learning aggregates may lack execution
+attribution. If retention cannot reconcile them without resetting unrelated
+learning, it removes nothing and shows `History retention not applied`.
+Canonical command recording stays available; pending journal records are kept
+for retry rather than discarded. `vuja history doctor` and sanitized health
+diagnostics distinguish this maintenance refusal from database/write failure.
+
+Selective forgetting starts with a non-mutating preview:
+
+```sh
+vuja history forget --id 'execution-id'
+vuja history forget --command 'ssh example-host' --cwd '/example/project'
+```
+
+Repeat the same selection with the printed `--confirm` token to remove it.
+Command matching is exact, not a prefix or pattern. It ignores surrounding
+Unicode whitespace but does not match alias-expanded text. The preview reports
+stored records and their represented occurrence counts; a compact legacy
+record can represent multiple executions. Confirmation rejects changed identities or
+occurrence scope, while allowing a running command to finish. Forgetting
+also reconciles known native and external representations already stored in
+Vuja and excludes later reimports through the existing one-to-one matching
+rule. Matching requires equal normalized commands, known start times within one second, and
+non-conflicting directory, duration and outcome evidence. Imported targets use
+exact provenance within their originating source; approximate matching applies
+only across sources, with stronger retained-execution evidence taking priority.
+Independent repeats and unknown-time imports are not guessed away.
+An implicitly matched compact legacy group is not a single-execution alias:
+if removing it would exceed the confirmed occurrence scope, the transaction
+refuses without changing history. Preview an exact command selection including
+the whole group instead. Later imports cannot expand a forgotten record's
+confirmed occurrence scope either.
+An imported exclusion can consume only one native identity; that binding
+survives restart so later journal replay cannot use the same slot to discard a
+second nearby execution. New submissions after forgetting are not old copies.
+Native counterparts follow the same transactional feedback/navigation safety
+checks as explicitly selected native executions.
+Selective removal refuses to reset matching feedback that cannot be attributed
+to the selected execution. It does not silently discard learning from other
+executions; no separate legacy-reset action is implied. While legacy
+path-only learning exists, forgetting or pruning a navigation execution without
+an actual execution-attributed visit is refused, even for a literal `cd`:
+commands and matching counts cannot identify the old visit owners. This leaves
+the transaction unchanged. Output checkpoints, saved exports and external
+shell/Atuin files are separate and remain unchanged.
+
+Restart pre-update Vuja sessions before relying on selective forgetting across
+all panes. Older running versions do not know these exclusions and cannot be
+made to honor them by a newer history command.
+
 Commands beginning with whitespace, commands excluded by the active shell's
 history-ignore policy, and commands matching Vuja's sensitive-data policy are
 rejected before persistence. They do not enter events, ranking aggregates,
 transitions, feedback, debug logs, or external mirroring.
+
+Forgetting-command text is excluded conservatively too: after removing literal
+quote/backslash characters, commands containing the words `vuja`, `history`,
+and `forget` in that order are not recorded. Intervening options, wrapper words,
+comments, arguments and quoted examples do not make that text recordable. This
+deliberately favors privacy over preserving benign mentions; it is not shell
+evaluation and does not resolve dynamic expansions or aliases.
 
 Existing history databases receive lifecycle and occurrence columns through an
 additive, transactional, restart-safe migration. Pre-lifecycle Vuja and import

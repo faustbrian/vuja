@@ -28,47 +28,94 @@ func TestResolveShellHistoryPathUsesAnExplicitConfiguredLocation(t *testing.T) {
 	}
 }
 
-func TestPreferVujaExecutionsDeduplicatesOneToOneAndPreservesRepeats(t *testing.T) {
+func TestExternalHistoryImportDeduplicatesOneToOneAndPreservesRepeats(t *testing.T) {
 	started := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	native := []scoring.HistoryEvent{{
 		EventKey: "vuja:1", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api",
 		Cwd: "/repo", StartedAt: started, Duration: time.Second, ExitCode: 0, HasExitCode: true, Source: "vuja",
 	}}
 	imported := []integration.HistoryEntry{
-		{ID: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started.Add(100 * time.Millisecond), Duration: time.Second, ExitCode: 0, HasExitCode: true},
-		{ID: "atuin:2", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started.Add(200 * time.Millisecond), Duration: time.Second, ExitCode: 0, HasExitCode: true},
+		{ID: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started.Add(100 * time.Millisecond), Duration: time.Second, ExitCode: 0, HasExitCode: true, Source: "atuin"},
+		{ID: "atuin:2", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started.Add(200 * time.Millisecond), Duration: time.Second, ExitCode: 0, HasExitCode: true, Source: "atuin"},
 	}
-	kept := preferVujaExecutions(imported, native)
-	if len(kept) != 1 || kept[0].ID != "atuin:2" {
+	kept := retainedExternalHistoryFixture(t, native, imported)
+	if len(kept) != 1 || kept[0].EventKey != "atuin:2" {
 		t.Fatalf("expected one imported counterpart removed and the repeat preserved, got %+v", kept)
 	}
 }
 
-func TestPreferVujaExecutionsTreatsMigratedNativeHistoryAsAuthoritative(t *testing.T) {
+func TestExternalHistoryImportTreatsMigratedNativeHistoryAsAuthoritative(t *testing.T) {
 	started := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	native := []scoring.HistoryEvent{{
 		EventKey: "legacy:1", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api",
 		Cwd: "/repo", StartedAt: started, Source: "legacy-vuja", Imported: false,
 	}}
 	imported := []integration.HistoryEntry{{
-		ID: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started,
+		ID: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started, Source: "atuin",
 	}}
-	if kept := preferVujaExecutions(imported, native); len(kept) != 0 {
+	if kept := retainedExternalHistoryFixture(t, native, imported); len(kept) != 0 {
 		t.Fatalf("expected migrated Vuja history to win over an imported duplicate, got %+v", kept)
 	}
 }
 
+func retainedExternalHistoryFixture(t *testing.T, native []scoring.HistoryEvent, imported []integration.HistoryEntry) []scoring.HistoryEvent {
+	t.Helper()
+	store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, event := range native {
+		if err := store.RecordHistorySubmission(t.Context(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	converted := make([]scoring.HistoryEvent, len(imported))
+	for index, event := range imported {
+		converted[index] = scoringHistoryEvent(event)
+	}
+	if err := store.ReplaceExternalHistoryEvents(t.Context(), converted); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.QueryAllHistoryEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []scoring.HistoryEvent
+	for _, event := range events {
+		if event.Imported {
+			kept = append(kept, event)
+		}
+	}
+	return kept
+}
+
 func TestPreferExternalExecutionsUsesRicherMetadataAndPreservesExtraRepeats(t *testing.T) {
 	started := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
-	imported := []integration.HistoryEntry{
-		{ID: "zsh:1", Command: "ssh forge@api", StartedAt: started, Source: "zsh"},
-		{ID: "zsh:2", Command: "ssh forge@api", StartedAt: started, Source: "zsh"},
-		{ID: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started, ExitCode: 0, HasExitCode: true, Source: "atuin"},
+	imported := []scoring.HistoryEvent{
+		{EventKey: "zsh:1", Command: "ssh forge@api", StartedAt: started, Source: "zsh"},
+		{EventKey: "zsh:2", Command: "ssh forge@api", StartedAt: started, Source: "zsh"},
+		{EventKey: "atuin:1", Command: "ssh forge@api", Cwd: "/repo", StartedAt: started, ExitCode: 0, HasExitCode: true, Source: "atuin"},
 	}
 
-	kept := preferExternalExecutions(imported)
+	store, err := scoring.NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.ReplaceAdapterHistoryEvents(t.Context(), imported); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := store.QueryAllHistoryEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if len(kept) != 2 || kept[0].ID != "atuin:1" || kept[1].ID != "zsh:2" {
+	ids := make(map[string]bool)
+	for _, event := range kept {
+		ids[event.EventKey] = true
+	}
+	if len(kept) != 2 || !ids["atuin:1"] || !ids["zsh:2"] {
 		t.Fatalf("expected Atuin metadata plus one legitimate shell repeat, got %+v", kept)
 	}
 }

@@ -257,6 +257,12 @@ func appendHistoryRecoveryRecord(kind string, entry integration.HistoryEntry) er
 		return err
 	}
 	defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
+	// Check after taking the append/replay lock. A check made before waiting
+	// for that lock could become stale while another client finishes forgetting
+	// and cleans the journal. Do not copy known-forgotten raw text back to disk.
+	if historyFallbackIdentityForgotten(ctx, entry.ID) {
+		return scoring.ErrHistoryForgotten
+	}
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -315,12 +321,25 @@ func replayHistoryRecoveryJournalBatch(ctx context.Context, store *scoring.Frece
 	return replayHistoryRecoveryJournalBatchObserved(ctx, store, maxRecords, nil)
 }
 
-func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scoring.FrecencyStore, maxRecords int, publish func(context.Context, *scoring.FrecencyStore, []string) error) (bool, error) {
+func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scoring.FrecencyStore, maxRecords int, publish func(context.Context, *scoring.FrecencyStore, []string, bool) error) (bool, error) {
 	if store == nil {
 		return true, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// Retention is part of the shared recovery/acknowledgement owner, not
+	// an optional publication callback. Plain CLI and health replay must
+	// obey the same policy as bounded retry, including on an empty journal.
+	reconcile := func(keys []string) error {
+		removed, err := applyConfiguredHistoryRetention(ctx, store, config.Get().History, time.Now())
+		if err != nil {
+			return err
+		}
+		if publish != nil && (len(keys) > 0 || removed > 0) {
+			return publish(ctx, store, keys, removed > 0)
+		}
+		return nil
 	}
 	path, err := historyRecoveryJournalPath()
 	if err != nil {
@@ -328,7 +347,7 @@ func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scori
 	}
 	file, err := config.OpenPrivateFile(path, os.O_RDWR)
 	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
+		return true, reconcile(nil)
 	}
 	if err != nil {
 		return false, err
@@ -371,12 +390,10 @@ func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scori
 		malformed = 0
 	}
 	checkpoint := func() error {
-		if publish != nil && len(recoveredKeys) > 0 {
-			if err := publish(ctx, store, recoveredKeys); err != nil {
-				return err
-			}
-			recoveredKeys = nil
+		if err := reconcile(recoveredKeys); err != nil {
+			return err
 		}
+		recoveredKeys = nil
 		if err := writeHistoryRecoveryOffset(processedOffset); err != nil {
 			return err
 		}
@@ -424,10 +441,8 @@ func replayHistoryRecoveryJournalBatchObserved(ctx context.Context, store *scori
 		}
 	}
 	reportMalformed()
-	if publish != nil && len(recoveredKeys) > 0 {
-		if err := publish(ctx, store, recoveredKeys); err != nil {
-			return false, err
-		}
+	if err := reconcile(recoveredKeys); err != nil {
+		return false, err
 	}
 	// Reset the checkpoint durably before truncation. If the process exits
 	// between these writes, a later replay can only repeat idempotent records;
@@ -505,6 +520,9 @@ func replayHistoryRecoveryRecord(ctx context.Context, store *scoring.FrecencySto
 		submission.HasExitCode = false
 		submission.State = integration.HistoryStateRunning
 		if err := store.RecordHistorySubmission(ctx, scoringHistoryEvent(submission)); err != nil {
+			if errors.Is(err, scoring.ErrHistoryForgotten) {
+				return nil
+			}
 			return err
 		}
 	}
@@ -655,8 +673,12 @@ func prepareCanonicalHistory(store *scoring.FrecencyStore, sessionID string) (*s
 	if err := replayHistoryRecoveryJournal(store); err != nil {
 		// Retain the journal for retry without making a healthy database
 		// unavailable to new submissions and existing-history reads.
-		recordHistoryPersistenceFailure()
-		logger.Errorf("failed to replay history recovery during initialization: %v", err)
+		if errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
+			recordHistoryRetentionFailure(err)
+		} else {
+			recordHistoryPersistenceFailure()
+			logger.Errorf("failed to replay history recovery during initialization: %v", err)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -670,17 +692,20 @@ func prepareCanonicalHistory(store *scoring.FrecencyStore, sessionID string) (*s
 		return nil, err
 	}
 	cfg := config.Get().History
-	if cfg.Retention == "bounded" && cfg.MaxEvents > 0 {
-		if _, err := store.PruneHistoryEvents(ctx, cfg.MaxEvents); err != nil {
+	if _, err := applyConfiguredHistoryRetention(ctx, store, cfg, time.Now()); err != nil {
+		if !errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
 			return nil, err
 		}
+		// The canonical store is healthy; preserve both the unpruned data and
+		// new-command durability. The health projection discloses deferral.
+		recordHistoryRetentionFailure(err)
 	}
 	entries, err := publishCanonicalStoreHistory(ctx, store)
 	if err != nil {
 		return nil, err
 	}
 	historyDirectories := historyNavigationDirectoryImports(entries, time.Now())
-	if err := store.ReplaceDirectorySource(ctx, "history", historyDirectories); err != nil {
+	if err := store.RefreshHistoryDirectories(ctx); err != nil {
 		recordHistoryDerivedFailure("directory source", err)
 	}
 	zoxideDirectories := loadOptionalZoxideDirectories(ctx, config.Get().Suggestions.ImportZoxide, func(parent context.Context) []scoring.DirectoryImport {
@@ -734,13 +759,13 @@ func historyProcessAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func publishCanonicalStoreHistory(ctx context.Context, store *scoring.FrecencyStore) ([]integration.HistoryEntry, error) {
+func publishCanonicalStoreHistory(ctx context.Context, store canonicalHistoryView) ([]integration.HistoryEntry, error) {
 	canonicalHistoryMutationMu.Lock()
 	defer canonicalHistoryMutationMu.Unlock()
 	return publishCanonicalStoreHistoryLocked(ctx, store)
 }
 
-func publishCanonicalStoreHistoryLocked(ctx context.Context, store *scoring.FrecencyStore) ([]integration.HistoryEntry, error) {
+func publishCanonicalStoreHistoryLocked(ctx context.Context, store canonicalHistoryView) ([]integration.HistoryEntry, error) {
 	changeBoundary, err := store.QueryHistoryChanges(ctx, 0, 1)
 	if err != nil {
 		return nil, err
@@ -847,23 +872,33 @@ func recordHistorySubmission(store *scoring.FrecencyStore, entry integration.His
 	if !persistHistorySubmission(store, entry) {
 		return false
 	}
-	publishHistorySubmission(entry)
+	publishHistorySubmission(store, entry)
 	return true
 }
 
 func persistHistorySubmission(store *scoring.FrecencyStore, entry integration.HistoryEntry) bool {
+	return persistHistorySubmissionResult(store, entry) == nil
+}
+
+func persistHistorySubmissionResult(store *scoring.FrecencyStore, entry integration.HistoryEntry) error {
 	if store == nil {
+		if historyFallbackIdentityForgotten(context.Background(), entry.ID) {
+			return scoring.ErrHistoryForgotten
+		}
 		recordHistoryPersistenceFailure()
-		return false
+		return errors.New("canonical history store is unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := store.RecordHistorySubmission(ctx, scoringHistoryEvent(entry)); err != nil {
+		if errors.Is(err, scoring.ErrHistoryForgotten) {
+			return err
+		}
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to persist submitted history event: %v", err)
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 func persistHistorySubmissionDurably(store *scoring.FrecencyStore, entry integration.HistoryEntry) (persisted, journaled bool) {
@@ -871,15 +906,26 @@ func persistHistorySubmissionDurably(store *scoring.FrecencyStore, entry integra
 }
 
 func persistHistorySubmissionDurablyObserved(store *scoring.FrecencyStore, entry integration.HistoryEntry, observe func(bool, bool)) (persisted, journaled bool) {
+	err := persistHistorySubmissionResult(store, entry)
+	if errors.Is(err, scoring.ErrHistoryForgotten) {
+		// Privacy rejection is not an unhealthy write. In particular, neither
+		// the recovery journal nor health observations may resurrect its text.
+		return false, false
+	}
+	privacyRejected := false
 	defer func() {
-		if observe != nil {
+		if observe != nil && !privacyRejected {
 			observe(persisted, journaled)
 		}
 	}()
-	if persistHistorySubmission(store, entry) {
+	if err == nil {
 		return true, false
 	}
 	if err := appendHistoryRecoveryRecord(historyRecoverySubmission, entry); err != nil {
+		if errors.Is(err, scoring.ErrHistoryForgotten) {
+			privacyRejected = true
+			return false, false
+		}
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to persist history recovery submission: %v", err)
 		return false, false
@@ -887,14 +933,60 @@ func persistHistorySubmissionDurablyObserved(store *scoring.FrecencyStore, entry
 	return true, true
 }
 
-func publishHistorySubmission(entry integration.HistoryEntry) {
+// A failed canonical writer can still read the existing exclusion authority.
+// Unknown state is not proof of forgetting: keep normal recovery durability,
+// while publication separately waits until exclusions can be inspected. No
+// second persisted exclusion list or cache can diverge from canonical history.
+func historyFallbackIdentityForgotten(parent context.Context, eventKey string) bool {
+	path, err := scoring.DefaultHistoryPath()
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(parent, historyRecoveryLockTimeout)
+	defer cancel()
+	forgotten, err := scoring.InspectHistoryEventForgotten(ctx, path, eventKey)
+	return err == nil && forgotten
+}
+
+func publishHistorySubmission(store *scoring.FrecencyStore, entry integration.HistoryEntry) {
 	canonicalHistoryMutationMu.Lock()
+	defer canonicalHistoryMutationMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if store == nil {
+		path, err := scoring.DefaultHistoryPath()
+		if err != nil {
+			return
+		}
+		forgotten, err := scoring.InspectHistoryEventForgotten(ctx, path, entry.ID)
+		if err == nil && !forgotten {
+			integration.PublishCanonicalHistoryEntry(entry)
+		}
+		// If even read-only inspection is unavailable, keep the durable journal
+		// but defer recall until recovery can check the exclusion. A fallback
+		// must never assume that an unavailable database has no privacy state.
+		return
+	}
+	_, _ = publishCanonicalEntryLocked(ctx, store, entry)
+}
+
+// All delayed entry publication shares this exclusion check while holding the
+// local generation mutex. An old loaded payload cannot bypass forgetting just
+// because it arrived through synchronization or recovery instead of submission.
+func publishCanonicalEntryLocked(ctx context.Context, store canonicalHistoryView, entry integration.HistoryEntry) (bool, error) {
+	forgotten, err := store.HistoryEventForgotten(ctx, entry.ID)
+	if err != nil || forgotten {
+		return false, err
+	}
 	integration.PublishCanonicalHistoryEntry(entry)
-	canonicalHistoryMutationMu.Unlock()
+	return true, nil
 }
 
 func completeHistoryEvent(store *scoring.FrecencyStore, entry integration.HistoryEntry) (bool, error) {
 	if store == nil {
+		if historyFallbackIdentityForgotten(context.Background(), entry.ID) {
+			return false, scoring.ErrHistoryForgotten
+		}
 		recordHistoryPersistenceFailure()
 		return false, errors.New("canonical history store is unavailable")
 	}
@@ -910,11 +1002,11 @@ func completeHistoryEvent(store *scoring.FrecencyStore, entry integration.Histor
 		return false, nil
 	}
 	cfg := config.Get().History
-	if cfg.Retention == "bounded" && cfg.MaxEvents > 0 {
+	if historyRetentionEnabled(cfg) {
 		retentionCtx, retentionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		removed, err := store.PruneHistoryEvents(retentionCtx, cfg.MaxEvents)
+		removed, err := applyConfiguredHistoryRetention(retentionCtx, store, cfg, time.Now())
 		if err != nil {
-			recordHistoryDerivedFailure("retention", err)
+			recordHistoryRetentionFailure(err)
 		} else if removed > 0 {
 			if _, err := publishCanonicalStoreHistory(retentionCtx, store); err != nil {
 				recordHistoryDerivedFailure("retention snapshot", err)
@@ -924,9 +1016,7 @@ func completeHistoryEvent(store *scoring.FrecencyStore, entry integration.Histor
 		}
 		retentionCancel()
 	}
-	canonicalHistoryMutationMu.Lock()
-	integration.PublishCanonicalHistoryEntry(entry)
-	canonicalHistoryMutationMu.Unlock()
+	publishHistorySubmission(store, entry)
 	return true, nil
 }
 
@@ -943,6 +1033,9 @@ func completeHistoryEventDurably(
 
 func completeHistoryEventDurablyObserved(store *scoring.FrecencyStore, entry integration.HistoryEntry, observe func(bool, bool)) (completed, journaled bool) {
 	completed, err := completeHistoryEvent(store, entry)
+	if errors.Is(err, scoring.ErrHistoryForgotten) {
+		return false, false
+	}
 	if err == nil {
 		if completed && observe != nil {
 			observe(true, false)
@@ -958,6 +1051,9 @@ func completeHistoryEventDurablyObserved(store *scoring.FrecencyStore, entry int
 		return true, false
 	}
 	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+		if errors.Is(err, scoring.ErrHistoryForgotten) {
+			return false, false
+		}
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to persist history recovery completion: %v", err)
 		if observe != nil {

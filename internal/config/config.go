@@ -187,6 +187,7 @@ type HistoryUIConfig struct {
 type HistoryConfig struct {
 	Retention    string                    `toml:"retention"`
 	MaxEvents    int                       `toml:"max-events"`
+	MaxAge       Duration                  `toml:"max-age"`
 	Integrations HistoryIntegrationsConfig `toml:"integrations"`
 	// ImportAtuin is retained as a migration-only compatibility switch.
 	ImportAtuin bool `toml:"import-atuin,omitempty"`
@@ -661,6 +662,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.History.MaxEvents < 0 {
 		return fmt.Errorf("history.max-events: must be zero or greater")
+	}
+	if cfg.History.MaxAge < 0 {
+		return fmt.Errorf("history.max-age: must be zero or greater")
 	}
 	if cfg.History.Retention == "bounded" && cfg.History.MaxEvents == 0 {
 		return fmt.Errorf("history.max-events: must be greater than zero when retention is bounded")

@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -19,6 +20,11 @@ func historyCommandStore() (*scoring.FrecencyStore, context.Context, context.Can
 	store, err := scoring.GetFrecencyStore()
 	if err == nil {
 		err = replayHistoryRecoveryJournal(store)
+		if errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
+			// Inspection/explicit management must remain available even when
+			// automatic retention cannot safely divide legacy learning.
+			err = nil
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	return store, ctx, cancel, err
@@ -127,6 +133,9 @@ var historyDoctorCmd = &cobra.Command{
 		fmt.Fprintln(cmd.OutOrStdout(), "canonical-source vuja")
 		fmt.Fprintf(cmd.OutOrStdout(), "unfinished %d\n", stats.Unfinished)
 		fmt.Fprintf(cmd.OutOrStdout(), "persistence-failures %d\n", historyPersistenceFailureCount())
+		if store.HistoryRetentionDeferred() {
+			fmt.Fprintln(cmd.OutOrStdout(), "retention not-applied: legacy learning lacks execution attribution; canonical recording remains available")
+		}
 		importFailures := 0
 		for _, failure := range stats.ImportFailures {
 			importFailures += failure.Count
@@ -232,11 +241,11 @@ var historyPruneCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		entries, err := publishCanonicalStoreHistory(ctx, store)
+		_, err = publishCanonicalStoreHistory(ctx, store)
 		if err != nil {
 			return err
 		}
-		if err := store.ReplaceDirectorySource(ctx, "history", historyNavigationDirectoryImports(entries, time.Now())); err != nil {
+		if err := store.RefreshHistoryDirectories(ctx); err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d\n", removed)
@@ -274,5 +283,6 @@ func init() {
 	historyPruneCmd.Flags().IntVar(&historyPruneMax, "max", 0, "maximum completed events to retain")
 	historyClearCmd.Flags().BoolVar(&historyClearConfirm, "confirm", false, "confirm irreversible history deletion")
 	historyCmd.AddCommand(historyStatsCmd, historySourcesCmd, historyDoctorCmd, historyExplainCmd, historyImportCmd, historyPruneCmd, historyClearCmd)
+	historyCmd.AddCommand(newHistoryForgetCommand())
 	rootCmd.AddCommand(historyCmd)
 }

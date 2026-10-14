@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -124,26 +123,31 @@ func importSelectedHistoryContext(
 	if err != nil {
 		return returnAdapterFailure(err)
 	}
-	imported = preferExternalExecutions(imported)
-	imported = preferVujaExecutions(imported, stored)
-	events := make([]scoring.HistoryEvent, 0, len(stored)+len(imported))
+	// Prefer richer representations over the complete effective snapshot,
+	// including retained sources which were disabled or failed to refresh.
+	// Comparing fresh inputs alone duplicates those sources' shell copies.
+	combined := make([]integration.HistoryEntry, 0, len(stored)+len(imported))
 	for _, event := range stored {
 		if event.Imported && replacedSources[event.Source] {
 			continue
 		}
 		if event.Imported {
-			events = append(events, event)
+			combined = append(combined, historyEventEntry(event))
 		}
 	}
 	for _, entry := range imported {
 		if policy.IsSensitive(entry.Command) {
 			continue
 		}
+		combined = append(combined, entry)
+	}
+	events := make([]scoring.HistoryEvent, 0, len(combined))
+	for _, entry := range combined {
 		event := scoringHistoryEvent(entry)
 		event.Imported = true
 		events = append(events, event)
 	}
-	if err := store.ReplaceImportedHistoryEvents(ctx, events); err != nil {
+	if err := store.ReplaceAdapterHistoryEvents(ctx, events); err != nil {
 		return returnAdapterFailure(err)
 	}
 	for source := range replacedSources {
@@ -152,16 +156,19 @@ func importSelectedHistoryContext(
 		}
 	}
 	historyConfig := config.Get().History
-	if historyConfig.Retention == "bounded" && historyConfig.MaxEvents > 0 {
-		if _, err := store.PruneHistoryEvents(ctx, historyConfig.MaxEvents); err != nil {
-			return returnAdapterFailure(err)
+	if _, err := applyConfiguredHistoryRetention(ctx, store, historyConfig, time.Now()); err != nil {
+		if errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
+			// Acquisition and persistence succeeded. Do not count a separate
+			// atomic maintenance refusal as an external-source import failure.
+			return err
 		}
+		return returnAdapterFailure(err)
 	}
-	entries, err := publishCanonicalStoreHistory(ctx, store)
+	_, err = publishCanonicalStoreHistory(ctx, store)
 	if err != nil {
 		return returnAdapterFailure(err)
 	}
-	if err := store.ReplaceDirectorySource(ctx, "history", historyNavigationDirectoryImports(entries, time.Now())); err != nil {
+	if err := store.RefreshHistoryDirectories(ctx); err != nil {
 		return returnAdapterFailure(err)
 	}
 	if len(importErrors) > 0 {
@@ -193,106 +200,6 @@ func recordOptionalHistoryImportFailure(store *scoring.FrecencyStore, source str
 	if err := store.RecordHistoryImportFailure(ctx, source, time.Now()); err != nil {
 		logger.Errorf("failed to persist optional history import failure metadata: %v", err)
 	}
-}
-
-// preferExternalExecutions preserves repeats within a source while removing
-// one lower-fidelity counterpart for each matching execution from a richer
-// source. Atuin metadata wins over native shell-file metadata.
-func preferExternalExecutions(imported []integration.HistoryEntry) []integration.HistoryEntry {
-	ordered := append([]integration.HistoryEntry(nil), imported...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return externalHistoryPriority(ordered[i].Source) > externalHistoryPriority(ordered[j].Source)
-	})
-	kept := make([]integration.HistoryEntry, 0, len(ordered))
-	usedBySource := make(map[string]map[int]bool)
-	for _, candidate := range ordered {
-		used := usedBySource[candidate.Source]
-		if used == nil {
-			used = make(map[int]bool)
-			usedBySource[candidate.Source] = used
-		}
-		matched := false
-		for index, richer := range kept {
-			if used[index] || externalHistoryPriority(richer.Source) <= externalHistoryPriority(candidate.Source) ||
-				!sameImportedHistoryExecution(candidate, richer) {
-				continue
-			}
-			used[index] = true
-			matched = true
-			break
-		}
-		if !matched {
-			kept = append(kept, candidate)
-		}
-	}
-	return kept
-}
-
-func externalHistoryPriority(source string) int {
-	if source == "atuin" {
-		return 2
-	}
-	return 1
-}
-
-func sameImportedHistoryExecution(left, right integration.HistoryEntry) bool {
-	return sameHistoryExecution(left, scoringHistoryEvent(right))
-}
-
-// preferVujaExecutions removes only one imported counterpart for each richer
-// Vuja-owned execution. One-to-one matching preserves legitimate repeats.
-func preferVujaExecutions(imported []integration.HistoryEntry, stored []scoring.HistoryEvent) []integration.HistoryEntry {
-	native := make([]scoring.HistoryEvent, 0, len(stored))
-	for _, event := range stored {
-		if !event.Imported {
-			native = append(native, event)
-		}
-	}
-	used := make([]bool, len(native))
-	kept := make([]integration.HistoryEntry, 0, len(imported))
-	for _, candidate := range imported {
-		matched := false
-		for index, event := range native {
-			if used[index] || !sameHistoryExecution(candidate, event) {
-				continue
-			}
-			used[index] = true
-			matched = true
-			break
-		}
-		if !matched {
-			kept = append(kept, candidate)
-		}
-	}
-	return kept
-}
-
-func sameHistoryExecution(imported integration.HistoryEntry, native scoring.HistoryEvent) bool {
-	command := strings.TrimSpace(imported.NormalizedCommand)
-	if command == "" {
-		command = strings.TrimSpace(imported.Command)
-	}
-	nativeCommand := strings.TrimSpace(native.NormalizedCommand)
-	if nativeCommand == "" {
-		nativeCommand = strings.TrimSpace(native.Command)
-	}
-	importedCwd := strings.TrimSpace(imported.Cwd)
-	nativeCwd := strings.TrimSpace(native.Cwd)
-	if command != nativeCommand || importedCwd != "" && nativeCwd != "" && importedCwd != nativeCwd ||
-		imported.StartedAt.IsZero() || native.StartedAt.IsZero() || absDuration(imported.StartedAt.Sub(native.StartedAt)) > time.Second {
-		return false
-	}
-	if imported.HasExitCode && native.HasExitCode && imported.ExitCode != native.ExitCode {
-		return false
-	}
-	return imported.Duration <= 0 || native.Duration <= 0 || absDuration(imported.Duration-native.Duration) <= time.Second
-}
-
-func absDuration(value time.Duration) time.Duration {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
 
 func startConfiguredHistoryImport(store *scoring.FrecencyStore, shellName string) func() {

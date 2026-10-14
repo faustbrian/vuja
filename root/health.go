@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -34,12 +35,13 @@ type providerHealthSnapshot struct {
 }
 
 type sessionHealthSnapshot struct {
-	Revision        uint64                                     `json:"revision"`
-	History         string                                     `json:"history"`
-	RecoveryPending bool                                       `json:"recovery_pending"`
-	LostSubmissions uint64                                     `json:"lost_submissions"`
-	LostOutcomes    uint64                                     `json:"lost_outcomes"`
-	Providers       [health.SourceCount]providerHealthSnapshot `json:"providers"`
+	Revision          uint64                                     `json:"revision"`
+	History           string                                     `json:"history"`
+	RecoveryPending   bool                                       `json:"recovery_pending"`
+	RetentionDeferred bool                                       `json:"retention_deferred"`
+	LostSubmissions   uint64                                     `json:"lost_submissions"`
+	LostOutcomes      uint64                                     `json:"lost_outcomes"`
+	Providers         [health.SourceCount]providerHealthSnapshot `json:"providers"`
 }
 
 // Only the latest unresolved effect is retained, not command text or a second
@@ -121,6 +123,8 @@ type sessionHealthProjection struct {
 	pendingSubmissionWarning            bool
 	pendingOutcomeWarning               bool
 	fallbackTarget                      healthHistoryTarget
+	historyStore                        *scoring.FrecencyStore
+	retentionDeferred                   bool
 }
 
 func newSessionHealthProjection(now func() time.Time) *sessionHealthProjection {
@@ -199,6 +203,11 @@ func (h *sessionHealthProjection) observeRecoveryLocked(pending, recovered bool,
 	h.revision++
 	h.historyRevision++
 	previous := h.historyCondition()
+	if errors.Is(err, scoring.ErrHistoryUnattributedLearning) {
+		// The journal is deliberately still pending, not failed or lost.
+		// A policy refusal proves neither a recovery nor a failed write.
+		err, recovered = nil, false
+	}
 	if err != nil {
 		h.recoveryFailed = true
 		h.historyRestored(previous)
@@ -224,6 +233,9 @@ func (h *sessionHealthProjection) beginRecoveryObservation() func(bool, bool, er
 
 func (h *sessionHealthProjection) beginRecoveryObservationWithStore(store *scoring.FrecencyStore) func(bool, bool, error) {
 	h.mu.Lock()
+	if store != nil {
+		h.historyStore = store
+	}
 	revision := h.historyRevision
 	h.mu.Unlock()
 	return func(pending, recovered bool, err error) {
@@ -260,6 +272,21 @@ func (h *sessionHealthProjection) beginRecoveryObservationWithStore(store *scori
 		} else {
 			h.observeRecoveryLocked(freshPending, confirmed, nil)
 		}
+	}
+}
+
+func (h *sessionHealthProjection) setHistoryStore(store *scoring.FrecencyStore) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.historyStore = store
+	h.refreshRetentionLocked()
+}
+
+func (h *sessionHealthProjection) refreshRetentionLocked() {
+	deferred := h.historyStore.HistoryRetentionDeferred()
+	if deferred != h.retentionDeferred {
+		h.retentionDeferred = deferred
+		h.revision++
 	}
 }
 
@@ -328,6 +355,12 @@ func providerHealthLabel(source health.Source) string {
 func (h *sessionHealthProjection) sourceBadge(source health.Source, now time.Time) healthBadge {
 	switch source {
 	case health.HistoryPersistence:
+		if h.retentionDeferred {
+			switch h.historyCondition() {
+			case "unknown", "canonical", "recovering":
+				return healthBadge{Label: "History retention not applied"}
+			}
+		}
 		switch h.historyCondition() {
 		case "unrecorded":
 			return healthBadge{Label: "History not recorded", Critical: true}
@@ -383,6 +416,7 @@ func badgePriority(badge healthBadge) int {
 }
 
 func (h *sessionHealthProjection) badgeLocked() (healthBadge, health.Source) {
+	h.refreshRetentionLocked()
 	var selected healthBadge
 	var source health.Source
 	now := h.now()
@@ -411,7 +445,8 @@ func (h *sessionHealthProjection) badge() healthBadge {
 func (h *sessionHealthProjection) snapshot() sessionHealthSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return sessionHealthSnapshot{Revision: h.revision, History: h.historyCondition(), RecoveryPending: h.pending, LostSubmissions: h.lostSubmissions, LostOutcomes: h.lostOutcomes, Providers: h.providers}
+	h.refreshRetentionLocked()
+	return sessionHealthSnapshot{Revision: h.revision, History: h.historyCondition(), RecoveryPending: h.pending, RetentionDeferred: h.retentionDeferred, LostSubmissions: h.lostSubmissions, LostOutcomes: h.lostOutcomes, Providers: h.providers}
 }
 
 func (h *sessionHealthProjection) warning() string {
@@ -445,6 +480,9 @@ func (h *sessionHealthProjection) warning() string {
 	}
 	switch source {
 	case health.HistoryPersistence:
+		if badge.Label == "History retention not applied" {
+			return "[VUJA] history retention was not applied: older learning lacks execution attribution; command recording remains available; use vuja history doctor"
+		}
 		switch h.historyCondition() {
 		case "unrecorded":
 			return "[VUJA] history persistence failed; one or more commands were not recorded"

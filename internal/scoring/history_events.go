@@ -269,7 +269,10 @@ func migrateLegacyHistoryAggregates(ctx context.Context, tx *sql.Tx) error {
 	return migrateLegacyImportedSummary(ctx, tx, existing)
 }
 
-func purgeLegacyHistoryPolicyViolations(ctx context.Context, tx *sql.Tx) error {
+// A selected inventory is used before preserving legacy feedback even when the
+// broader lifecycle migration has already completed. With no selection, every
+// raw legacy authority is reconciled by the one-time lifecycle migration.
+func purgeLegacyHistoryPolicyViolations(ctx context.Context, tx *sql.Tx, selectedTables ...string) error {
 	tables := []struct {
 		name    string
 		first   string
@@ -282,12 +285,22 @@ func purgeLegacyHistoryPolicyViolations(ctx context.Context, tx *sql.Tx) error {
 		{name: "imported_history", first: "cmd"},
 		{name: "command_outcomes", first: "cmd"},
 		{name: "suggestion_feedback", first: "cmd"},
+		{name: "legacy_suggestion_feedback", first: "cmd"},
 		{name: "recent_failures", first: "cmd"},
 		{name: "exact_command_transitions", first: "prev_command", second: "next_command"},
 		{name: "command_transitions", first: "prev_skeleton", second: "next_skeleton"},
 		{name: "argument_values", first: "scope", second: "value", combine: true},
 	}
 	for _, table := range tables {
+		if len(selectedTables) > 0 {
+			selected := false
+			for _, name := range selectedTables {
+				selected = selected || name == table.name
+			}
+			if !selected {
+				continue
+			}
+		}
 		second := "''"
 		if table.second != "" {
 			second = table.second
@@ -616,6 +629,36 @@ func (f *FrecencyStore) RecordHistoryEvent(ctx context.Context, event HistoryEve
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Native counterpart admission must share the cross-pane writer boundary
+	// with forgetting and imports, including when the input is a journal replay.
+	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
+		return err
+	}
+	if forgotten, err := historyIdentityForgotten(ctx, tx, event.EventKey); err != nil {
+		return err
+	} else if forgotten {
+		return ErrHistoryForgotten
+	}
+	forgotten, removed, err := reconcileForgottenNativeCounterparts(ctx, tx, &event, nil)
+	if err != nil {
+		return err
+	}
+	if removed > 0 {
+		if err := rebuildHistoryProjectionsAfterRemoval(ctx, tx); err != nil {
+			return err
+		}
+		if err := f.recordHistoryChange(ctx, tx, "reset", ""); err != nil {
+			return err
+		}
+	}
+	if forgotten {
+		// Commit the consumed alias even though no command row is admitted.
+		// Otherwise a second nearby execution could consume this slot again.
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return ErrHistoryForgotten
+	}
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
@@ -700,6 +743,11 @@ func (f *FrecencyStore) CompleteHistoryEvent(ctx context.Context, event HistoryE
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if forgotten, err := historyIdentityForgotten(ctx, tx, event.EventKey); err != nil {
+		return false, err
+	} else if forgotten {
+		return false, tx.Commit()
+	}
 	var currentRowID int64
 	var command, normalizedCommand, cwd, state, startedAtRaw, sessionID string
 	if err := tx.QueryRowContext(ctx, `
@@ -1109,7 +1157,23 @@ ORDER BY started_at DESC, event_key DESC
 }
 
 func (f *FrecencyStore) PruneHistoryEvents(ctx context.Context, maxEvents int) (int64, error) {
-	if f == nil || maxEvents <= 0 {
+	return f.PruneHistoryEventsWithRetention(ctx, maxEvents, time.Time{})
+}
+
+// HistoryRetentionDeferred exposes only the last observed policy refusal.
+// Canonical history remains the data owner; this is not a second ledger or a
+// persisted assertion that retention succeeded. A successful retry clears it.
+func (f *FrecencyStore) HistoryRetentionDeferred() bool {
+	return f != nil && f.historyRetentionDeferred.Load()
+}
+
+// PruneHistoryEventsWithRetention combines the existing native logical-count
+// cap with an optional strict started-before cutoff. Age applies to finished
+// native and imported events with known timestamps; unknown time and unfinished
+// executions are never guessed expired. A compact legacy row follows its one
+// known representative timestamp. Zero cutoff disables age retention.
+func (f *FrecencyStore) PruneHistoryEventsWithRetention(ctx context.Context, maxEvents int, before time.Time) (removed int64, err error) {
+	if f == nil || maxEvents <= 0 && before.IsZero() {
 		return 0, nil
 	}
 	if ctx == nil {
@@ -1119,34 +1183,50 @@ func (f *FrecencyStore) PruneHistoryEvents(ctx context.Context, maxEvents int) (
 		return 0, err
 	}
 	defer f.releaseWrite()
+	// Publish the observed outcome before releasing writer ownership; a later
+	// attempt must not have its result overwritten by this attempt's defer.
+	defer func() {
+		if err == nil {
+			f.historyRetentionDeferred.Store(false)
+		} else if errors.Is(err, ErrHistoryUnattributedLearning) {
+			f.historyRetentionDeferred.Store(true)
+		}
+	}()
 	tx, err := f.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, `
-SELECT event_key, occurrences
+SELECT event_key, occurrences, imported, CAST(started_at AS TEXT)
 FROM history_events
-WHERE imported = 0 AND state NOT IN ('submitted', 'running')
+WHERE state NOT IN ('submitted', 'running') AND (imported = 0 OR ?)
 ORDER BY started_at DESC, history_order DESC, event_key DESC
-`)
+`, !before.IsZero())
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = rows.Close() }()
 	remaining := maxEvents
-	var removed int64
 	var deleteKeys []string
 	partialKey := ""
 	partialOccurrences := 0
 	for rows.Next() {
 		var eventKey string
 		var occurrences int
-		if err := rows.Scan(&eventKey, &occurrences); err != nil {
+		var imported bool
+		var timestamp string
+		if err := rows.Scan(&eventKey, &occurrences, &imported, &timestamp); err != nil {
 			return 0, err
 		}
 		occurrences = max(occurrences, 1)
+		started := parseKnownTimestamp(timestamp)
 		switch {
+		case !before.IsZero() && !started.IsZero() && started.Before(before):
+			deleteKeys = append(deleteKeys, eventKey)
+			removed += int64(occurrences)
+		case imported || maxEvents <= 0:
+			continue
 		case remaining <= 0:
 			deleteKeys = append(deleteKeys, eventKey)
 			removed += int64(occurrences)
@@ -1159,18 +1239,36 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 			remaining = 0
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
 	if partialKey != "" {
+		if err := removeLegacyNavigationEvidence(ctx, tx, partialKey); err != nil {
+			return 0, err
+		}
+		if err := rejectUnattributedHistoryFeedbackRemoval(ctx, tx, partialKey); err != nil {
+			return 0, err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE history_events SET occurrences = ? WHERE event_key = ?`, partialOccurrences, partialKey); err != nil {
 			return 0, err
 		}
 	}
 	for _, eventKey := range deleteKeys {
+		if err := removeLegacyNavigationEvidence(ctx, tx, eventKey); err != nil {
+			return 0, err
+		}
+		if err := rejectUnattributedHistoryFeedbackRemoval(ctx, tx, eventKey); err != nil {
+			return 0, err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM history_events WHERE event_key = ?`, eventKey); err != nil {
 			return 0, err
 		}
+	}
+	if err := removeHistoryCounterpartSources(ctx, tx, deleteKeys); err != nil {
+		return 0, err
 	}
 	if removed == 0 {
 		if err := tx.Commit(); err != nil {
@@ -1178,73 +1276,7 @@ ORDER BY started_at DESC, history_order DESC, event_key DESC
 		}
 		return 0, nil
 	}
-	for _, statement := range []string{
-		`DELETE FROM history_entries`,
-		`INSERT INTO history_entries (cmd, cwd, count, last_used)
-	     SELECT normalized_command, cwd,
-	            SUM(occurrences),
-	            MAX(completed_at)
-	     FROM history_events
-	     WHERE imported = 0 AND state IN ('completed', 'failed')
-	     GROUP BY normalized_command, cwd`,
-		`DELETE FROM command_outcomes`,
-		`INSERT INTO command_outcomes (cmd, cwd, successes, failures, last_used)
-	     SELECT normalized_command, cwd,
-	            SUM(CASE WHEN state = 'completed' THEN occurrences ELSE 0 END),
-	            SUM(CASE WHEN state = 'failed' THEN occurrences ELSE 0 END),
-	            MAX(completed_at)
-	     FROM history_events
-	     WHERE imported = 0 AND state IN ('completed', 'failed')
-	     GROUP BY normalized_command, cwd`,
-		`DELETE FROM imported_history_entries`,
-		`INSERT INTO imported_history_entries
-         (cmd, cwd, count, last_used, exit_code, duration_ns, source)
-         WITH ranked AS (
-             SELECT normalized_command, cwd, source, started_at, exit_code, duration_ns,
-                    SUM(occurrences) OVER (
-                        PARTITION BY normalized_command, cwd, source
-                    ) AS event_count,
-                    MAX(started_at) OVER (
-                        PARTITION BY normalized_command, cwd, source
-                    ) AS most_recent,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY normalized_command, cwd, source
-                        ORDER BY started_at DESC, history_order DESC, event_key DESC
-                    ) AS recency_rank
-             FROM history_events
-             WHERE imported = 1
-         )
-         SELECT normalized_command, cwd, event_count, most_recent, exit_code, duration_ns, source
-         FROM ranked
-         WHERE recency_rank = 1`,
-		`DELETE FROM imported_history`,
-		`INSERT INTO imported_history (cmd, count, last_used)
-         SELECT cmd, SUM(count), MAX(last_used)
-         FROM imported_history_entries
-         GROUP BY cmd`,
-		`DELETE FROM command_transitions`,
-		`DELETE FROM exact_command_transitions`,
-		`DELETE FROM suggestion_feedback
-         WHERE NOT EXISTS (
-             SELECT 1 FROM history_events
-             WHERE imported = 0
-               AND normalized_command = suggestion_feedback.cmd
-               AND cwd = suggestion_feedback.cwd
-         )`,
-		`DELETE FROM argument_values`,
-		`DELETE FROM recent_failures`,
-		`DELETE FROM metadata
-         WHERE key = 'imported_history_events_fingerprint'
-            OR key = 'imported_history_fingerprint'`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return 0, err
-		}
-	}
-	if err := rebuildRetainedCompletionSignals(ctx, tx); err != nil {
-		return 0, err
-	}
-	if err := rebuildRetainedTransitions(ctx, tx); err != nil {
+	if err := rebuildHistoryProjectionsAfterRemoval(ctx, tx); err != nil {
 		return 0, err
 	}
 	if err := f.recordHistoryChange(ctx, tx, "reset", ""); err != nil {
@@ -1428,13 +1460,19 @@ func (f *FrecencyStore) ClearHistory(ctx context.Context) error {
 	for _, table := range []string{
 		"history_events", "history_entries", "imported_history_entries", "imported_history",
 		"command_transitions", "exact_command_transitions", "command_outcomes", "suggestion_feedback",
+		"legacy_suggestion_feedback", "history_feedback_events",
 		"argument_values", "recent_failures",
+		"directory_navigation_visits",
 	} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM directory_navigation_sources WHERE source = 'history'`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM history_counterpart_sources
+WHERE NOT EXISTS (SELECT 1 FROM forgotten_history_events WHERE identity_hash = owner_hash)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM directory_navigation_sources WHERE source IN ('history', 'native-visits')`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -1451,6 +1489,9 @@ GROUP BY path;
 	   OR key LIKE 'history_import_failure_count:%'
 	   OR key LIKE 'history_import_failed_at:%';
 `); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM metadata WHERE key = ?`, directoryProjectionClockMetadata); err != nil {
 		return err
 	}
 	if err := f.recordHistoryChange(ctx, tx, "reset", ""); err != nil {
@@ -1632,51 +1673,24 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 }
 
 func (f *FrecencyStore) ReplaceImportedHistoryEvents(ctx context.Context, events []HistoryEvent) error {
-	if f == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	return f.replaceImportedHistoryEvents(ctx, events, false, false)
+}
 
-	if err := f.acquireWrite(ctx); err != nil {
-		return err
-	}
-	defer f.releaseWrite()
+// ReplaceExternalHistoryEvents replaces optional adapter snapshots while
+// preferring native executions and honoring durable forgotten counterparts.
+func (f *FrecencyStore) ReplaceExternalHistoryEvents(ctx context.Context, events []HistoryEvent) error {
+	return f.replaceImportedHistoryEvents(ctx, events, true, false)
+}
 
-	fingerprint := importedHistoryEventsFingerprint(events)
-	var storedFingerprint string
-	fingerprintErr := f.db.QueryRowContext(
-		ctx,
-		`SELECT value FROM metadata WHERE key = 'imported_history_events_fingerprint'`,
-	).Scan(&storedFingerprint)
-	if fingerprintErr == nil && storedFingerprint == fingerprint {
-		return nil
-	}
-	if fingerprintErr != nil && !errors.Is(fingerprintErr, sql.ErrNoRows) {
-		return fingerprintErr
-	}
+// ReplaceAdapterHistoryEvents owns the complete configured-source snapshot,
+// including richer-source preference that used to run before this transaction.
+func (f *FrecencyStore) ReplaceAdapterHistoryEvents(ctx context.Context, events []HistoryEvent) error {
+	return f.replaceImportedHistoryEvents(ctx, events, true, true)
+}
 
-	tx, err := f.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM history_events WHERE imported = 1`); deleteErr != nil {
-		return deleteErr
-	}
-	stmt, err := tx.PrepareContext(ctx, `
-INSERT INTO history_events
-    (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
-     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-ON CONFLICT(event_key) DO NOTHING
-`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
+func normalizeImportedHistoryEvents(events []HistoryEvent) []HistoryEvent {
+	normalizedEvents := make([]HistoryEvent, 0, len(events))
+	seen := make(map[string]bool, len(events))
 	for _, event := range events {
 		event.EventKey = strings.TrimSpace(event.EventKey)
 		if _, ok := policy.HistoryCommand(event.Command, false); !ok {
@@ -1696,7 +1710,7 @@ ON CONFLICT(event_key) DO NOTHING
 		if event.Occurrences <= 0 {
 			event.Occurrences = 1
 		}
-		if event.EventKey == "" || strings.TrimSpace(event.Command) == "" || event.Source == "" {
+		if event.EventKey == "" || event.Source == "" || !validHistoryEventState(event.State) {
 			continue
 		}
 		if normalized, ok := policy.HistoryCommand(event.NormalizedCommand, false); !ok {
@@ -1704,9 +1718,114 @@ ON CONFLICT(event_key) DO NOTHING
 		} else {
 			event.NormalizedCommand = normalized
 		}
-		if !validHistoryEventState(event.State) {
+		// One identity is one input execution, even if a snapshot repeats it.
+		// Preserve the first accepted row, matching INSERT ... DO NOTHING.
+		if seen[event.EventKey] {
 			continue
 		}
+		seen[event.EventKey] = true
+		normalizedEvents = append(normalizedEvents, event)
+	}
+	return normalizedEvents
+}
+
+func (f *FrecencyStore) replaceImportedHistoryEvents(ctx context.Context, events []HistoryEvent, preferNative, preferExternal bool) error {
+	if f == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Invalid/private rows must not reserve a counterpart slot before being
+	// rejected at insertion. Normalize the same accepted snapshot for matching,
+	// fingerprinting and persistence.
+	events = normalizeImportedHistoryEvents(events)
+
+	if err := f.acquireWrite(ctx); err != nil {
+		return err
+	}
+	defer f.releaseWrite()
+
+	tx, err := f.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Acquire SQLite's write ownership before taking the matching snapshot.
+	// A local write gate alone cannot serialize imports against other panes.
+	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
+		return err
+	}
+	events, err = filterHistoryCounterparts(ctx, tx, events, preferNative)
+	if err != nil {
+		return err
+	}
+	// Match native/forgotten owners against the complete accepted source input
+	// before richer external rows hide their lower-fidelity counterparts.
+	// Keep the observed source memberships in this same transaction.
+	events, err = preferExternalHistoryEvents(ctx, tx, events, preferExternal)
+	if err != nil {
+		return err
+	}
+	fingerprint := importedHistoryEventsFingerprint(events)
+	var storedFingerprint string
+	fingerprintErr := tx.QueryRowContext(
+		ctx,
+		`SELECT value FROM metadata WHERE key = 'imported_history_events_fingerprint'`,
+	).Scan(&storedFingerprint)
+	if fingerprintErr == nil && storedFingerprint == fingerprint {
+		return tx.Commit()
+	}
+	if fingerprintErr != nil && !errors.Is(fingerprintErr, sql.ErrNoRows) {
+		return fingerprintErr
+	}
+
+	oldRows, err := tx.QueryContext(ctx, `SELECT event_key FROM history_events WHERE imported = 1`)
+	if err != nil {
+		return err
+	}
+	retained := make(map[string]bool, len(events))
+	for _, event := range events {
+		retained[event.EventKey] = true
+	}
+	var departed []string
+	for oldRows.Next() {
+		var key string
+		if err := oldRows.Scan(&key); err != nil {
+			_ = oldRows.Close()
+			return err
+		}
+		if !retained[key] {
+			departed = append(departed, key)
+		}
+	}
+	if err := oldRows.Err(); err != nil {
+		_ = oldRows.Close()
+		return err
+	}
+	if err := oldRows.Close(); err != nil {
+		return err
+	}
+	if err := removeHistoryCounterpartSources(ctx, tx, departed); err != nil {
+		return err
+	}
+	if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM history_events WHERE imported = 1`); deleteErr != nil {
+		return deleteErr
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO history_events
+    (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
+     duration_ns, exit_code, source, host, session_id, shell, state, history_order, occurrences, imported)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1
+WHERE NOT EXISTS (SELECT 1 FROM forgotten_history_events WHERE identity_hash IN (?, ?))
+ON CONFLICT(event_key) DO NOTHING
+`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, event := range events {
 		var exitCode any
 		if event.HasExitCode {
 			exitCode = event.ExitCode
@@ -1715,7 +1834,7 @@ ON CONFLICT(event_key) DO NOTHING
 			strings.TrimSpace(event.Cwd), canonicalTimestamp(event.SubmittedAt), canonicalTimestamp(event.StartedAt),
 			canonicalTimestamp(event.CompletedAt), event.Duration.Nanoseconds(), exitCode, event.Source,
 			strings.TrimSpace(event.Host), strings.TrimSpace(event.SessionID), strings.TrimSpace(event.Shell), event.State,
-			event.HistoryOrder, event.Occurrences); err != nil {
+			event.HistoryOrder, event.Occurrences, forgottenHistoryIdentity(event.EventKey), forgottenImportedProvenance(event)); err != nil {
 			return err
 		}
 	}
@@ -1759,6 +1878,9 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM metadata WHERE key = 'imported_history_fingerprint'`); err != nil {
+		return err
+	}
+	if err := rebuildHistoryDirectorySource(ctx, tx, time.Now()); err != nil {
 		return err
 	}
 	if err := f.recordHistoryChange(ctx, tx, "reset", ""); err != nil {

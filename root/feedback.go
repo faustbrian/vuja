@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -60,13 +61,13 @@ func (s *suggestionFeedbackSession) reset() {
 	s.mu.Unlock()
 }
 
-func recordSuggestionFeedback(events []suggestionFeedbackEvent, cwd string) {
+func recordSuggestionFeedback(events []suggestionFeedbackEvent, cwd, eventKey string) {
 	if len(events) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	recordSuggestionFeedbackToStore(ctx, scoring.LoadedFrecencyStore(), events, cwd)
+	recordSuggestionFeedbackToStore(ctx, scoring.LoadedFrecencyStore(), events, cwd, eventKey)
 }
 
 func recordSuggestionFeedbackToStore(
@@ -74,6 +75,7 @@ func recordSuggestionFeedbackToStore(
 	store *scoring.FrecencyStore,
 	events []suggestionFeedbackEvent,
 	cwd string,
+	eventKey string,
 ) {
 	if store == nil || len(events) == 0 {
 		return
@@ -82,7 +84,7 @@ func recordSuggestionFeedbackToStore(
 		if policy.IsSensitive(event.command) {
 			continue
 		}
-		if err := store.RecordFeedback(ctx, event.command, cwd, event.kind); err != nil {
+		if err := store.RecordExecutionFeedback(ctx, eventKey, event.command, cwd, event.kind); err != nil && !errors.Is(err, scoring.ErrHistoryForgotten) {
 			recordHistoryDerivedFailure("feedback", err)
 		}
 	}

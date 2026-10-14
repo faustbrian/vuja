@@ -21,7 +21,13 @@ func TestSuggestionStoreHealthDistinguishesEmptyFromClosedDatabase(t *testing.T)
 			t.Cleanup(InvalidateSignalCache)
 			cwd := t.TempDir()
 			var observations []health.Observation
-			ctx := health.WithObserver(context.Background(), func(value health.Observation) { observations = append(observations, value) })
+			ctx := health.WithObserver(context.Background(), func(value health.Observation) {
+				// Signal collection also reports workspace discovery. This test
+				// owns the selected store source, not unrelated provider reports.
+				if value.Source == source {
+					observations = append(observations, value)
+				}
+			})
 			query := func(ctx context.Context) {
 				switch source {
 				case health.Directory:
