@@ -125,11 +125,17 @@ jobs:
             -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${VERSION}" \
             -trimpath -o dist/vuja ./cmd/vuja
 
+      - name: Stage distribution notices
+        run: cp LICENSE THIRD_PARTY_NOTICES.md dist/
+
       - name: Preserve release binary
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: vuja-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/vuja
+          path: |
+            dist/vuja
+            dist/LICENSE
+            dist/THIRD_PARTY_NOTICES.md
           if-no-files-found: error
           retention-days: 7
 
@@ -199,7 +205,7 @@ jobs:
             source="artifacts/vuja-${GOOS}-${GOARCH}/vuja"
             test -f "$source"
             chmod 0755 "$source"
-            tar -czf "dist/vuja_${GOOS}_${GOARCH}.tar.gz" -C "$(dirname "$source")" vuja
+            tar -czf "dist/vuja_${GOOS}_${GOARCH}.tar.gz" -C "$(dirname "$source")" vuja LICENSE THIRD_PARTY_NOTICES.md
           done
           cd dist
           sha256sum vuja_*.tar.gz > SHA256SUMS

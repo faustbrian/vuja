@@ -250,6 +250,42 @@ func TestInstallReleaseRejectsChecksumMismatchWithoutReplacingBinary(t *testing.
 	}
 }
 
+func TestExtractVujaBinaryAllowsBundledNotices(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		t.Run(fmt.Sprintf("notices-first=%v", before), func(t *testing.T) {
+			var archive bytes.Buffer
+			compressed := gzip.NewWriter(&archive)
+			writer := tar.NewWriter(compressed)
+			members := []struct{ name, text string }{
+				{"LICENSE", "distribution license fixture"},
+				{"THIRD_PARTY_NOTICES.md", "dependency notice fixture"},
+				{"vuja", "inert archive payload; never execute"},
+			}
+			if !before {
+				members[0], members[2] = members[2], members[0]
+			}
+			for _, member := range members {
+				if err := writer.WriteHeader(&tar.Header{Name: member.name, Mode: 0644, Size: int64(len(member.text))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := writer.Write([]byte(member.text)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := compressed.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := extractVujaBinary(archive.Bytes())
+			if err != nil || string(got) != "inert archive payload; never execute" {
+				t.Fatalf("bundled documents changed extracted payload: %q %v", got, err)
+			}
+		})
+	}
+}
+
 func buildTestReleaseArchive(t *testing.T, binary []byte) []byte {
 	t.Helper()
 	var archive bytes.Buffer

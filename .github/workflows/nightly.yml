@@ -67,6 +67,7 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
+          cp LICENSE THIRD_PARTY_NOTICES.md dist/
           platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
           for platform in "${platforms[@]}"; do
             IFS=/ read -r GOOS GOARCH <<< "$platform"
@@ -76,7 +77,7 @@ jobs:
               -trimpath -o "dist/vuja" ./cmd/vuja
 
             cd dist
-            tar -czf "vuja_${GOOS}_${GOARCH}.tar.gz" "vuja"
+            tar -czf "vuja_${GOOS}_${GOARCH}.tar.gz" vuja LICENSE THIRD_PARTY_NOTICES.md
             rm "vuja"
             cd ..
           done
