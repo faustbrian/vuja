@@ -46,6 +46,17 @@ func InspectHistoryEventForgotten(ctx context.Context, path, eventKey string) (b
 	return (&FrecencyStore{db: db}).HistoryEventForgotten(ctx, eventKey)
 }
 
+// InspectHistoryEventForgotten reads this store's durable exclusion authority
+// independently of its writable connection pool. It remains usable after Close
+// or a failed write, without opening an unrelated default database or creating
+// schema, workers, or a replacement history authority.
+func (f *FrecencyStore) InspectHistoryEventForgotten(ctx context.Context, eventKey string) (bool, error) {
+	if f == nil || f.dbPath == "" {
+		return false, errors.New("history store path is unavailable")
+	}
+	return InspectHistoryEventForgotten(ctx, f.dbPath, eventKey)
+}
+
 func openHistoryInspectionDB(path string) (*sql.DB, error) {
 	info, err := os.Stat(path)
 	if err != nil {

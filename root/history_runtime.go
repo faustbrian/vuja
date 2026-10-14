@@ -215,6 +215,10 @@ func historyRecoveryOffsetPath() (string, error) {
 }
 
 func appendHistoryRecoveryRecord(kind string, entry integration.HistoryEntry) error {
+	return appendHistoryRecoveryRecordForStore(nil, kind, entry)
+}
+
+func appendHistoryRecoveryRecordForStore(store *scoring.FrecencyStore, kind string, entry integration.HistoryEntry) error {
 	if kind != historyRecoverySubmission && kind != historyRecoveryCompletion {
 		return fmt.Errorf("unsupported history recovery record kind %q", kind)
 	}
@@ -230,6 +234,12 @@ func appendHistoryRecoveryRecord(kind string, entry integration.HistoryEntry) er
 	}
 	if _, recordable := policy.HistoryCommand(normalized, false); !recordable {
 		return errors.New("history recovery event rejected by privacy policy")
+	}
+	// Avoid creating even an empty journal for an already-known exclusion.
+	// The second check under the file lock remains essential: forgetting can
+	// commit while this append is waiting for another process's journal lock.
+	if historyStoreIdentityForgotten(context.Background(), store, entry.ID) {
+		return scoring.ErrHistoryForgotten
 	}
 	payload, err := json.Marshal(historyRecoveryRecord{Kind: kind, Entry: entry})
 	if err != nil {
@@ -260,7 +270,7 @@ func appendHistoryRecoveryRecord(kind string, entry integration.HistoryEntry) er
 	// Check after taking the append/replay lock. A check made before waiting
 	// for that lock could become stale while another client finishes forgetting
 	// and cleans the journal. Do not copy known-forgotten raw text back to disk.
-	if historyFallbackIdentityForgotten(ctx, entry.ID) {
+	if historyStoreIdentityForgotten(ctx, store, entry.ID) {
 		return scoring.ErrHistoryForgotten
 	}
 	info, err := file.Stat()
@@ -894,6 +904,12 @@ func persistHistorySubmissionResult(store *scoring.FrecencyStore, entry integrat
 		if errors.Is(err, scoring.ErrHistoryForgotten) {
 			return err
 		}
+		// A writer lock can fail before transactional admission gets to read
+		// its exclusion. Classify committed privacy state before creating any
+		// failure counter or recovery artifact; unknown state still falls back.
+		if historyStoreIdentityForgotten(context.Background(), store, entry.ID) {
+			return scoring.ErrHistoryForgotten
+		}
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to persist submitted history event: %v", err)
 		return err
@@ -921,7 +937,7 @@ func persistHistorySubmissionDurablyObserved(store *scoring.FrecencyStore, entry
 	if err == nil {
 		return true, false
 	}
-	if err := appendHistoryRecoveryRecord(historyRecoverySubmission, entry); err != nil {
+	if err := appendHistoryRecoveryRecordForStore(store, historyRecoverySubmission, entry); err != nil {
 		if errors.Is(err, scoring.ErrHistoryForgotten) {
 			privacyRejected = true
 			return false, false
@@ -938,13 +954,23 @@ func persistHistorySubmissionDurablyObserved(store *scoring.FrecencyStore, entry
 // while publication separately waits until exclusions can be inspected. No
 // second persisted exclusion list or cache can diverge from canonical history.
 func historyFallbackIdentityForgotten(parent context.Context, eventKey string) bool {
-	path, err := scoring.DefaultHistoryPath()
-	if err != nil {
-		return false
-	}
+	return historyStoreIdentityForgotten(parent, nil, eventKey)
+}
+
+func historyStoreIdentityForgotten(parent context.Context, store *scoring.FrecencyStore, eventKey string) bool {
 	ctx, cancel := context.WithTimeout(parent, historyRecoveryLockTimeout)
 	defer cancel()
-	forgotten, err := scoring.InspectHistoryEventForgotten(ctx, path, eventKey)
+	var forgotten bool
+	var err error
+	if store != nil {
+		forgotten, err = store.InspectHistoryEventForgotten(ctx, eventKey)
+	} else {
+		path, pathErr := scoring.DefaultHistoryPath()
+		if pathErr != nil {
+			return false
+		}
+		forgotten, err = scoring.InspectHistoryEventForgotten(ctx, path, eventKey)
+	}
 	return err == nil && forgotten
 }
 
@@ -994,6 +1020,9 @@ func completeHistoryEvent(store *scoring.FrecencyStore, entry integration.Histor
 	defer cancel()
 	completed, err := store.CompleteHistoryEvent(ctx, scoringHistoryEvent(entry))
 	if err != nil {
+		if errors.Is(err, scoring.ErrHistoryForgotten) || historyStoreIdentityForgotten(context.Background(), store, entry.ID) {
+			return false, scoring.ErrHistoryForgotten
+		}
 		recordHistoryPersistenceFailure()
 		logger.Errorf("failed to complete history event: %v", err)
 		return false, err
@@ -1050,7 +1079,7 @@ func completeHistoryEventDurablyObserved(store *scoring.FrecencyStore, entry int
 		}
 		return true, false
 	}
-	if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, entry); err != nil {
+	if err := appendHistoryRecoveryRecordForStore(store, historyRecoveryCompletion, entry); err != nil {
 		if errors.Is(err, scoring.ErrHistoryForgotten) {
 			return false, false
 		}

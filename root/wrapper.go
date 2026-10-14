@@ -779,7 +779,7 @@ func runWrapper() {
 								recordHistoryDerivedFailure("recovery journal clear", err)
 							}
 						} else if activeHistoryJournaled {
-							if err := appendHistoryRecoveryRecord(historyRecoveryCompletion, historyEntry); err != nil {
+							if err := appendHistoryRecoveryRecordForStore(historyStore, historyRecoveryCompletion, historyEntry); err != nil {
 								if !errors.Is(err, scoring.ErrHistoryForgotten) {
 									observeCompletion(false, false)
 									recordHistoryDerivedFailure("recovery completion", err)
