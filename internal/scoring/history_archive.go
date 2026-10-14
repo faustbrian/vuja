@@ -166,11 +166,11 @@ func (f *FrecencyStore) ImportHistoryArchiveEvents(ctx context.Context, events [
 		return 0, err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	// Read, privacy reconciliation, ownership, projection and publication all
 	// share the same SQLite writer boundary across terminal windows.
 	if _, err := tx.ExecContext(ctx, "UPDATE metadata SET value = value WHERE key = 'history_schema_version'"); err != nil {

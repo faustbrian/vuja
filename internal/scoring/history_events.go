@@ -631,11 +631,11 @@ func (f *FrecencyStore) RecordHistoryEvent(ctx context.Context, event HistoryEve
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	// Native counterpart admission must share the cross-pane writer boundary
 	// with forgetting and imports, including when the input is a journal replay.
 	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
@@ -771,11 +771,11 @@ func (f *FrecencyStore) CompleteHistoryEvent(ctx context.Context, event HistoryE
 		return false, err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if forgotten, err := historyIdentityForgotten(ctx, tx, event.EventKey); err != nil {
 		return false, err
 	} else if forgotten {
@@ -1176,11 +1176,11 @@ WHERE imported = 0
 			arguments = append(arguments, sessionID)
 		}
 	}
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	result, err := tx.ExecContext(ctx, query, arguments...)
 	if err != nil {
 		return 0, err
@@ -1258,11 +1258,11 @@ func (f *FrecencyStore) PruneHistoryEventsWithRetention(ctx context.Context, max
 			f.historyRetentionDeferred.Store(true)
 		}
 	}()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	rows, err := tx.QueryContext(ctx, `
 SELECT event_key, occurrences, imported, CAST(started_at AS TEXT)
 FROM history_events
@@ -1530,11 +1530,11 @@ func (f *FrecencyStore) ClearHistory(ctx context.Context) error {
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	for _, table := range []string{
 		"history_events", "history_entries", "imported_history_entries", "imported_history",
 		"command_transitions", "exact_command_transitions", "command_outcomes", "suggestion_feedback",
@@ -1683,11 +1683,11 @@ func (f *FrecencyStore) RecordHistoryImportFailure(ctx context.Context, source s
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO metadata (key, value) VALUES (?, '1')
 ON CONFLICT(key) DO UPDATE SET value = CAST(metadata.value AS INTEGER) + 1
@@ -1743,7 +1743,7 @@ func (f *FrecencyStore) RecordHistoryImportFreshness(ctx context.Context, source
 		return err
 	}
 	defer f.releaseWrite()
-	_, err := f.db.ExecContext(ctx, `
+	_, err := f.execWrite(ctx, `
 INSERT INTO metadata (key, value) VALUES (?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value
 `, "history_imported_at:"+source, canonicalTimestamp(importedAt))
@@ -1825,11 +1825,11 @@ func (f *FrecencyStore) replaceImportedHistoryEvents(ctx context.Context, events
 	}
 	defer f.releaseWrite()
 
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	// Acquire SQLite's write ownership before taking the matching snapshot.
 	// A local write gate alone cannot serialize imports against other panes.
 	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {

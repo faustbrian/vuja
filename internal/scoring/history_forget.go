@@ -204,11 +204,11 @@ func (f *FrecencyStore) forgetHistoryEvents(ctx context.Context, eventKeys []str
 		return 0, err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	// Obtain cross-process writer ownership before reading the selected set.
 	// Another client cannot replay/replace a target between selection and its
 	// durable exclusion within this transaction.

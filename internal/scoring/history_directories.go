@@ -77,11 +77,11 @@ func (f *FrecencyStore) recordHistoryDirectoryAt(ctx context.Context, eventKey, 
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if forgotten, err := historyIdentityForgotten(ctx, tx, eventKey); err != nil {
 		return err
 	} else if forgotten {
@@ -241,11 +241,11 @@ func (f *FrecencyStore) RefreshHistoryDirectories(ctx context.Context) error {
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if err := rebuildHistoryDirectorySource(ctx, tx, time.Now()); err != nil {
 		return err
 	}

@@ -95,3 +95,79 @@ These checks do not establish actual concurrent SQLite-writer latency, real
 forced termination, terminal session restoration or multi-day behavior.
 Ordinary physical drag/copy, window/pane movement, native application handoff
 and the supported iTerm2/Ghostty shell matrix remain Brian-only acceptance.
+
+## Independent SQLite writer contention
+
+The additional contention fixture holds `BEGIN IMMEDIATE` on an independent
+connection until the production submission's durable acknowledgement returns.
+It verifies the private recovery record, absence of a partial canonical row,
+two idempotent replays, and exactly one execution after reopening the store.
+This models a competing SQLite writer, not just Vuja's publication mutex.
+
+Before the fix, three acknowledgement samples were 5.107–5.120 seconds despite
+the one-second canonical submission context. Diagnostic-only phase tracing
+in a disposable source copy isolated 5.072–5.086 seconds to the initial writer
+UPDATE, versus 6–7 ms for the failure counter and 25–32 ms for journal fallback.
+SQLite's connection-local [busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html)
+remained 5000 ms while the pinned modernc v1.53.0 driver returned only after
+that wait. Context cancellation alone did not shorten it in this fixture.
+
+The fix pins short-budget writes to one connection, caps the busy handler to
+the remaining budget, and restores the ordinary policy before pooling it.
+Existing transaction ordering is preserved: an already-forgotten or completed
+execution can resolve read-only even while another connection owns the writer.
+Operations requiring a writer before decision reads retain their own guard.
+Ordinary background writes, initialization and read-only transactions retain
+their existing policy. A connection that cannot be restored is discarded.
+
+Three post-fix acknowledgement samples were 1.047–1.058 seconds with journal
+durability and exactly-once replay/reopen assertions passing. This is not a
+hard one-second end-to-end guarantee: scheduling, connection initialization,
+cleanup, counter/journal locking and filesystem sync remain separate costs.
+Rounding the busy budget down may return SQLite busy before the Go deadline;
+this deliberately takes the existing durable fallback rather than extending
+the caller's lock-wait budget.
+
+A trigger inside real submission, completion and compatibility writes observes
+SQLite's actual policy. It fails before the fix because those writes still
+use 5000 ms under a 1000 ms budget. Successful, failed and independently
+blocked writes check that all four pool connections retain the ordinary
+5000 ms timeout and FULL synchronization. Contention also exercises a fresh
+physical connection. No timing value is a test pass/fail threshold.
+
+A separate held-writer regression covers delayed completions for already
+forgotten and already-completed executions. They remain read-only no-ops:
+no failure-counter increment, recovery file or unhealthy observer event. The
+test rejected an intermediate change that acquired the writer before those
+decisions; preserving the original ordering fixes both cases.
+
+### Uncontended cost comparison
+
+`BenchmarkHistorySubmissionWriteBudget` excludes store creation and measures
+the complete FULL-sync submission commit, including each interactive context.
+The baseline is HEAD `0ec6a964` plus the identical benchmark; the candidate's
+code/test tree is `4fcec4e9c23752e17792d81e57fa0ed1c327f4a4`.
+
+```sh
+go test ./internal/scoring -run '^$' \
+  -bench '^BenchmarkHistorySubmissionWriteBudget$' \
+  -benchtime=20x -count=3 -benchmem -timeout=90s
+```
+
+Go 1.27.2, darwin/arm64, Apple M4 Max; sequential baseline/candidate runs,
+uncontrolled host load and warm OS caches. Each sample averages 20 operations.
+
+| Scope | Baseline three-sample range | Candidate three-sample range | Allocation objects/op |
+| --- | --- | --- | --- |
+| One-second interactive budget | 212–225 µs/op | 222–235 µs/op | 199–203 → 226–230 |
+| Ordinary background write | 209–213 µs/op | 211–248 µs/op | 192 → 193 |
+
+The elapsed ranges overlap; no uncontended latency improvement is claimed.
+Interactive connection/policy management adds 27 allocation
+objects per operation in this fixture. The benefit established here is the
+shorter contended wait, without changing FULL-sync durability or globally
+shortening the five-second background policy. Globally lowering that policy
+would also change ordinary imports/initialization; returning asynchronously
+would introduce unresolved late-write/acknowledgement ownership. Neither is
+needed for this fix. Live pane responsiveness and forced termination remain
+Brian-only checks, not consequences proven by these measurements.

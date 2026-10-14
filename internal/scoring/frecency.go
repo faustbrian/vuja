@@ -868,11 +868,11 @@ func (f *FrecencyStore) recordFeedback(ctx context.Context, eventKey, cmd, cwd, 
 		return err
 	}
 	defer f.releaseWrite()
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	// Serialize the parent/exclusion check with writers in other panes too.
 	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
 		return err
@@ -987,7 +987,7 @@ func (f *FrecencyStore) RecordExactTransition(ctx context.Context, prevCommand, 
 	if nextExitCode == 0 {
 		count = 1
 	}
-	_, err := f.db.ExecContext(ctxTimeout, `
+	_, err := f.execWrite(ctxTimeout, `
 INSERT INTO exact_command_transitions (prev_command, next_command, cwd, count, last_used)
 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(prev_command, next_command, cwd) DO UPDATE SET
@@ -1216,11 +1216,11 @@ func (f *FrecencyStore) Record(ctx context.Context, cmd, cwd string, exitCode in
 	if exitCode == 0 {
 		state = "completed"
 	}
-	tx, err := f.db.BeginTx(ctxTimeout, nil)
+	tx, finish, err := f.beginWriteTx(ctxTimeout)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if _, err = tx.ExecContext(ctxTimeout, `
 INSERT INTO history_events
     (event_key, command, normalized_command, cwd, submitted_at, started_at, completed_at,
@@ -1406,7 +1406,7 @@ func (f *FrecencyStore) RecordDirectory(ctx context.Context, path string) error 
 		return err
 	}
 	defer f.releaseWrite()
-	_, err := f.db.ExecContext(ctx, `
+	_, err := f.execWrite(ctx, `
 INSERT INTO directory_navigation_index (path) VALUES (?)
 ON CONFLICT(path) DO UPDATE SET
     count = count + 1,
@@ -1433,11 +1433,11 @@ func (f *FrecencyStore) ReplaceDirectorySource(ctx context.Context, source strin
 	}
 	defer f.releaseWrite()
 
-	tx, err := f.db.BeginTx(ctx, nil)
+	tx, finish, err := f.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer finish()
 	if _, execErr := tx.ExecContext(ctx, `DELETE FROM directory_navigation_sources WHERE source = ?`, source); execErr != nil {
 		return execErr
 	}
@@ -1679,7 +1679,7 @@ ON CONFLICT(prev_skeleton, next_skeleton, cwd) DO UPDATE SET
     last_used = CURRENT_TIMESTAMP;
 `
 	}
-	_, err := f.db.ExecContext(ctxTimeout, query, prevSkeleton, nextSkeleton, cwd)
+	_, err := f.execWrite(ctxTimeout, query, prevSkeleton, nextSkeleton, cwd)
 	return err
 }
 
