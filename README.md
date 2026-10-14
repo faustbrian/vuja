@@ -283,7 +283,30 @@ Previewing never launches Vuja:
 
 ```bash
 vuja config preview --preset balanced --width 120 --night
+vuja config preview --preset context-rich --width 40 --height 24 --scenario conflicts
+vuja config preview ~/.config/vuja/config.toml --scenario multiline
+vuja config preview --scenario running
+vuja config preview --scenario history
+vuja config setup
 ```
+
+Preview uses the production compositor and fictional snapshots, not your
+credentials, workspace, history, or running processes. Choose `clean`,
+`conflicts`, `multiline`, `running`, or `history`; dimensions, semantic density,
+region placement, named/ANSI palettes and input surface width follow the real
+renderer. `auto` previews night unless the configuration selects the day
+palette. Classic prompts remain shell-owned, so their preview is explicitly
+illustrative instead of inventing bottom status bars.
+
+Guided setup offers finite presets, prompt placement, input surface width,
+output scrolling and palette. Blank answers keep existing choices. It displays
+the proposed diff and preview, then saves only after `yes`; EOF or cancellation
+leaves configuration bytes and permissions unchanged. Presets affect only
+visual density, segments and provider visibility, preserving custom prompt
+text, colors, keybindings, privacy settings and credentials. Existing bytes are
+retained in a private, uniquely named `.bak.*` file before an atomic save; edits
+detected during the dialogue are not overwritten. Both commands accept an
+optional configuration path; preview also accepts `--preset` instead of a path.
 
 Configuration maintenance commands are also non-interactive and do not start a
 managed shell:

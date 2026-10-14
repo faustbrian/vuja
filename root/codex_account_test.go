@@ -335,7 +335,7 @@ func TestCodexAccountTitleFitsPresetsAndNarrowWidths(t *testing.T) {
 				t.Fatalf("account missing or title overflow for %s/%d: %q", preset, width, line)
 			}
 		}
-		preview := renderConfigPreview(cfg, preset, 120, "night")
+		preview := previewForTest(t, cfg, preset, 120, "night")
 		if !strings.Contains(preview, "Codex person@example.test") || strings.Contains(preview, "NEVER-DISPLAY") {
 			t.Fatal("preview must use fictional account")
 		}

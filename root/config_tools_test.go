@@ -17,7 +17,7 @@ func TestConfigPreviewIsBoundedAndNamesSelectedMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preview := renderConfigPreview(cfg, "balanced", 60, "night")
+	preview := previewForTest(t, cfg, "balanced", 60, "night")
 	if !strings.Contains(preview, "balanced") || !strings.Contains(preview, "night palette") {
 		t.Fatalf("expected preset and palette in preview, got %q", preview)
 	}
@@ -33,7 +33,7 @@ func TestConfigPreviewUsesTerminalBackgroundForActiveBars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", 60, "night"), "\n"), "\n")
+	lines := strings.Split(strings.TrimSuffix(previewForTest(t, cfg, "balanced", 60, "night"), "\n"), "\n")
 	if len(lines) != 6 {
 		t.Fatalf("expected six preview rows, got %d: %q", len(lines), lines)
 	}
@@ -67,7 +67,7 @@ func TestConfigPreviewMatchesConfiguredSurfaceWidth(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.UI.Chatbox.SurfaceWidth = test.mode
-			lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", test.width, "night"), "\n"), "\n")
+			lines := strings.Split(strings.TrimSuffix(previewForTest(t, cfg, "balanced", test.width, "night"), "\n"), "\n")
 			if len(lines) != 6 {
 				t.Fatalf("expected six preview rows, got %d", len(lines))
 			}
@@ -91,7 +91,7 @@ func TestConfigPreviewMatchesConfiguredSurfaceWidth(t *testing.T) {
 	}
 }
 
-func TestConfigPreviewClipsWidePromptByTerminalCellWidth(t *testing.T) {
+func TestConfigPreviewWidePromptUsesBoundedProductionCellGeometry(t *testing.T) {
 	cfg, err := config.Preset("balanced")
 	if err != nil {
 		t.Fatal(err)
@@ -99,17 +99,24 @@ func TestConfigPreviewClipsWidePromptByTerminalCellWidth(t *testing.T) {
 	cfg.UI.Chatbox.Prompt = strings.Repeat("界", 20)
 	cfg.UI.Chatbox.SurfaceWidth = "content-width"
 
-	lines := strings.Split(strings.TrimSuffix(renderConfigPreview(cfg, "balanced", 40, "night"), "\n"), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("expected six preview rows, got %d", len(lines))
+	lines := strings.Split(strings.TrimSuffix(previewForTest(t, cfg, "balanced", 40, "night"), "\n"), "\n")
+	if len(lines) != 7 {
+		t.Fatalf("expected the real input surface to grow for the wide prompt, got %d rows", len(lines))
 	}
-	if width := ansi.StringWidth(lines[3]); width != 40 {
-		t.Fatalf("expected wide prompt preview row to be capped at 40 terminal cells, got %d", width)
+	for _, row := range []int{3, 4} {
+		if width := ansi.StringWidth(lines[row]); width > 40 {
+			t.Fatalf("expected wrapped input row to stay within 40 terminal cells, got %d", width)
+		}
 	}
-	screen := applyTerminalOutput(t, []byte(strings.Join(lines[1:], "\r\n")), 40, 5)
-	for _, column := range []int{0, 39} {
-		if cell := screen.CellAt(column, 2); cell == nil || cell.Style.Bg == nil {
-			t.Fatalf("expected capped content-width surface boundary at column %d, got %#v", column, cell)
+	screen := applyTerminalOutput(t, []byte(strings.Join(lines[1:], "\r\n")), 40, 6)
+	if !terminalContainsLine(screen, strings.Repeat("界", 18)) {
+		t.Fatal("preview serialization lost wide-glyph cells from the production surface")
+	}
+	for _, row := range []int{2, 3} {
+		for _, column := range []int{0, 39} {
+			if cell := screen.CellAt(column, row); cell == nil || cell.Style.Bg == nil {
+				t.Fatalf("expected wrapped content-width surface boundary at (%d,%d), got %#v", column, row, cell)
+			}
 		}
 	}
 }

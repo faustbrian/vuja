@@ -70,5 +70,6 @@ func init() {
 	ConfigCmd.AddCommand(ConfigDiffCmd)
 	ConfigCmd.AddCommand(ConfigMigrateCmd)
 	ConfigCmd.AddCommand(ConfigDoctorCmd)
+	ConfigCmd.AddCommand(ConfigSetupCmd)
 	rootCmd.AddCommand(ConfigCmd)
 }

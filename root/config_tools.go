@@ -2,27 +2,19 @@ package root
 
 import (
 	"fmt"
+	"github.com/faustbrian/vuja/internal/config"
+	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
-
-	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/spf13/cobra"
 )
 
 var (
 	configPresetWrite  bool
 	configPresetForce  bool
-	configPreviewName  string
-	configPreviewWidth int
-	configPreviewDay   bool
-	configPreviewNight bool
 	configMigrateWrite bool
 	configDiffDefaults bool
 )
@@ -76,29 +68,62 @@ var ConfigPresetCmd = &cobra.Command{
 	},
 }
 
-var ConfigPreviewCmd = &cobra.Command{
-	Use:   "preview",
-	Short: "preview a preset at a terminal width without starting Vuja",
-	RunE: func(cmd *cobra.Command, _ []string) error {
-		if configPreviewDay && configPreviewNight {
-			return fmt.Errorf("--day and --night cannot be combined")
-		}
-		if configPreviewWidth < 40 || configPreviewWidth > 500 {
-			return fmt.Errorf("--width must be between 40 and 500")
-		}
-		cfg, err := config.Preset(configPreviewName)
-		if err != nil {
+var ConfigPreviewCmd = newConfigPreviewCommand()
+
+func newConfigPreviewCommand() *cobra.Command {
+	var name, scenario string
+	var width, height int
+	var day, night bool
+	command := &cobra.Command{
+		Use:   "preview [path]",
+		Short: "preview fictional snapshots with the production renderer",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if day && night {
+				return fmt.Errorf("--day and --night cannot be combined")
+			}
+			if width < 40 || width > 500 {
+				return fmt.Errorf("--width must be between 40 and 500")
+			}
+			cfg, err := config.Preset(name)
+			if err != nil {
+				return err
+			}
+			label := name
+			if len(args) > 0 {
+				if cmd.Flags().Changed("preset") {
+					return fmt.Errorf("choose a config path or --preset, not both")
+				}
+				_, cfg, err = readSetupConfig(args[0])
+				if err != nil {
+					return err
+				}
+				if cfg == nil {
+					return fmt.Errorf("configuration does not exist")
+				}
+				label = "custom"
+			}
+			mode := "auto"
+			if day {
+				mode = "day"
+			} else if night {
+				mode = "night"
+			}
+			preview, err := renderConfigScenario(cfg, label, width, height, mode, scenario)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprint(cmd.OutOrStdout(), preview)
 			return err
-		}
-		mode := "auto"
-		if configPreviewDay {
-			mode = "day"
-		} else if configPreviewNight {
-			mode = "night"
-		}
-		fmt.Fprint(cmd.OutOrStdout(), renderConfigPreview(cfg, configPreviewName, configPreviewWidth, mode))
-		return nil
-	},
+		},
+	}
+	command.Flags().StringVar(&name, "preset", "balanced", "preset to preview")
+	command.Flags().IntVar(&width, "width", 120, "preview width")
+	command.Flags().IntVar(&height, "height", 24, "preview height (8-100)")
+	command.Flags().StringVar(&scenario, "scenario", "clean", "clean|conflicts|multiline|running|history")
+	command.Flags().BoolVar(&day, "day", false, "preview the day palette")
+	command.Flags().BoolVar(&night, "night", false, "preview the night palette")
+	return command
 }
 
 var ConfigDiffCmd = &cobra.Command{
@@ -182,10 +207,6 @@ var ConfigDoctorCmd = &cobra.Command{
 func initConfigToolFlags() {
 	ConfigPresetCmd.Flags().BoolVar(&configPresetWrite, "write", false, "write the preset to the config path")
 	ConfigPresetCmd.Flags().BoolVar(&configPresetForce, "force", false, "replace an existing config when writing")
-	ConfigPreviewCmd.Flags().StringVar(&configPreviewName, "preset", "balanced", "preset to preview")
-	ConfigPreviewCmd.Flags().IntVar(&configPreviewWidth, "width", 120, "preview width")
-	ConfigPreviewCmd.Flags().BoolVar(&configPreviewDay, "day", false, "preview the day palette")
-	ConfigPreviewCmd.Flags().BoolVar(&configPreviewNight, "night", false, "preview the night palette")
 	ConfigMigrateCmd.Flags().BoolVar(&configMigrateWrite, "write", false, "write the migrated config and create a backup")
 	ConfigDiffCmd.Flags().BoolVar(&configDiffDefaults, "defaults", false, "compare with balanced defaults")
 }
@@ -228,112 +249,6 @@ func writeConfigFile(path string, content []byte) error {
 		return err
 	}
 	return config.RestrictPrivateFiles(path)
-}
-
-func renderConfigPreview(cfg *config.Config, preset string, width int, mode string) string {
-	width = max(width, 40)
-	clip := func(value string, limit int) string {
-		for ansi.StringWidth(value) > limit {
-			_, size := utf8.DecodeLastRuneInString(value)
-			value = value[:len(value)-size]
-		}
-		return value
-	}
-	title := "~/Developer/vuja"
-	if slices.Contains(cfg.UI.Chatbox.TitleRight, "versions") {
-		title += "                                      Go 1.26.0"
-	}
-	if cfg.UI.Chatbox.CodexAccount {
-		account := clip("Codex person@example.test", width)
-		title = clip(title, max(width-ansi.StringWidth(account)-2, 0))
-		title += strings.Repeat(" ", max(width-ansi.StringWidth(title)-ansi.StringWidth(account), 0)) + account
-	}
-	left := previewStatusValues(cfg.UI.Chatbox.StatusLeft)
-	right := previewStatusValues(cfg.UI.Chatbox.StatusRight)
-	status := strings.Join(left, cfg.UI.Chatbox.Separator)
-	if len(right) > 0 {
-		status += "                                      " + strings.Join(right, cfg.UI.Chatbox.Separator)
-	}
-	header := clip(fmt.Sprintf("preset %s · %s density · %s palette · width %d", preset, cfg.UI.Density, mode, width), width)
-	palette := cfg.UI.Colors.Night
-	if mode == "day" {
-		palette = cfg.UI.Colors.Day
-	}
-	paint := func(foreground, background, value string) string {
-		return terminalTrueColor("48", background) + terminalTrueColor("38", foreground) + value + "\x1b[0m"
-	}
-	paintBar := func(foreground, value string) string {
-		return terminalDefaultBackground + terminalTrueColor("38", foreground) + value + "\x1b[0m"
-	}
-	pad := func(value string, span int) string {
-		value = clip(value, span)
-		return value + strings.Repeat(" ", max(span-ansi.StringWidth(value), 0))
-	}
-	paintSurface := func(value string) string {
-		surfaceWidth := width
-		if cfg.UI.Chatbox.SurfaceWidth == "content-width" {
-			surfaceWidth = min(width, ansi.StringWidth(value)+2*terminalInputHorizontalPadding)
-		}
-		inner := max(surfaceWidth-2*terminalInputHorizontalPadding, 1)
-		value = clip(value, inner)
-		row := strings.Repeat(" ", terminalInputHorizontalPadding) + pad(value, inner) + strings.Repeat(" ", terminalInputHorizontalPadding)
-		if surfaceWidth < width {
-			row += terminalDefaultBackground + strings.Repeat(" ", width-surfaceWidth)
-		}
-		return paint(palette.Text, palette.SurfaceBackground, row)
-	}
-	paintPadding := func(contentWidth int) string {
-		surfaceWidth := width
-		if cfg.UI.Chatbox.SurfaceWidth == "content-width" {
-			surfaceWidth = min(width, contentWidth+2*terminalInputHorizontalPadding)
-		}
-		row := strings.Repeat(" ", surfaceWidth)
-		if surfaceWidth < width {
-			row += terminalDefaultBackground + strings.Repeat(" ", width-surfaceWidth)
-		}
-		return paint(palette.Text, palette.SurfaceBackground, row)
-	}
-	input := cfg.UI.Chatbox.Prompt + "git status"
-	inputWidth := ansi.StringWidth(input)
-	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n",
-		header,
-		paintBar(cfg.UI.Chatbox.Colors.Directory, pad(title, width)),
-		paintPadding(inputWidth),
-		paintSurface(input),
-		paintPadding(inputWidth),
-		paintBar(palette.StatusText, pad(status, width)),
-	)
-}
-
-func previewStatusValues(segments []string) []string {
-	values := make([]string, 0, len(segments)+2)
-	for _, segment := range segments {
-		switch segment {
-		case "session":
-			values = append(values, "SSH staging")
-		case "git-branch":
-			values = append(values, "main")
-		case "git-status":
-			values = append(values, "modified 2", "untracked 1")
-		case "contexts":
-			values = append(values, "Kube staging/apps")
-		case "environment":
-			values = append(values, "mise")
-		case "stale":
-			values = append(values, "stale git")
-		case "jobs":
-			values = append(values, "jobs 1")
-		case "duration":
-			values = append(values, "84ms")
-		case "exit":
-			values = append(values, "exit 0")
-		case "cpu":
-			values = append(values, "CPU 42%")
-		case "memory":
-			values = append(values, "RAM 58%")
-		}
-	}
-	return values
 }
 
 func configDifferences(defaults, current reflect.Value, prefix string) []string {

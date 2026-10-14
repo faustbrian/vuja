@@ -204,6 +204,13 @@ func Execute() {
 		}
 		return
 	}
+	if handled, err := executeConfigToolsInvocation(os.Args[1:], os.Stdin, os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	_ = config.MigrateFromLegacyJSON()
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
