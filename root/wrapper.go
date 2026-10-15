@@ -93,7 +93,7 @@ func readShellMessage(reader *bufio.Reader, limit int) ([]byte, bool, error) {
 		}
 		if !oversized {
 			if len(message)+len(fragment) > limit {
-				message = nil
+				message = oversizedShellMessageFallback(message, fragment)
 				oversized = true
 			} else {
 				message = append(message, fragment...)
@@ -114,6 +114,20 @@ func readShellMessage(reader *bufio.Reader, limit int) ([]byte, bool, error) {
 			return nil, oversized, err
 		}
 	}
+}
+
+// A preexec sender waits for an acknowledgement. Discard its oversized text,
+// but retain a compact, explicitly unrecordable start so normal dispatch still
+// releases that sender. Editor frames have no acknowledgement and stay dropped.
+func oversizedShellMessageFallback(message, fragment []byte) []byte {
+	headerSize := len(commandStartIgnoreMessage + ":COMMAND:")
+	prefix := make([]byte, 0, headerSize)
+	prefix = append(prefix, message[:min(len(message), headerSize)]...)
+	prefix = append(prefix, fragment[:min(len(fragment), headerSize-len(prefix))]...)
+	if _, _, start := commandStartPayload(string(prefix)); start {
+		return []byte(commandStartIgnoreMessage + ":COMMAND:")
+	}
+	return nil
 }
 
 var (
@@ -217,7 +231,7 @@ func runWrapper() {
 	var lastCommandHistoryIgnored bool
 	var historyRecording historyRecordingSession
 	var lastHistoryAdmission historySubmissionAdmission
-	var pendingFeedback []suggestionFeedbackEvent
+	var pendingFeedback suggestionFeedbackSubmission
 	var pendingFeedbackCWD string
 	var feedback suggestionFeedbackSession
 	var historyNav historyNavigation
@@ -649,8 +663,11 @@ func runWrapper() {
 				return
 			}
 			if oversized {
-				writeNotification([]byte("[VUJA] an oversized shell update was ignored; command execution remains available"))
-				continue
+				if start, _ := parseCommandStartMessage(string(message)); !start {
+					writeNotification([]byte("[VUJA] an oversized shell update was ignored; command execution remains available"))
+					continue
+				}
+				writeNotification([]byte("[VUJA] command exceeds the history capture limit; execution remains available without recording"))
 			}
 			query := string(message)
 			if handled, controlErr := handleHistoryRecordingMessage(query, &historyRecording, historyAckWriter); handled {
@@ -686,8 +703,10 @@ func runWrapper() {
 				admission := lastHistoryAdmission
 				lastCommandHistoryIgnored = ignored
 				bufferMu.Unlock()
-				command, recordable := admission.command(rawCommand, ignored)
-				entry := executionTracker.StartRaw(rawCommand, command, spec.GetCWD(), shellName)
+				entry, recordable := admission.startExecution(executionTracker, query, rawCommand, spec.GetCWD(), shellName, ignored)
+				bufferMu.Lock()
+				lastSubmittedCommand = entry.Command
+				bufferMu.Unlock()
 				activeHistoryJournaled = false
 				if recordable && historyStore == nil {
 					recoveredStore, recovered, recoverErr := ensureCanonicalHistoryStore(
@@ -753,12 +772,12 @@ func runWrapper() {
 				bufferMu.Lock()
 				rawCommand := lastSubmittedCommand
 				historyIgnored := lastCommandHistoryIgnored
-				feedbackEvents := pendingFeedback
+				feedbackEvents := pendingFeedback.finish(rawCommand)
 				feedbackCWD := pendingFeedbackCWD
 				admission := lastHistoryAdmission
 				lastSubmittedCommand = ""
 				lastCommandHistoryIgnored = false
-				pendingFeedback = nil
+				pendingFeedback = suggestionFeedbackSubmission{}
 				pendingFeedbackCWD = ""
 				bufferMu.Unlock()
 				if strings.TrimSpace(rawCommand) != "" {
@@ -1806,12 +1825,12 @@ inputLoop:
 					lastSubmittedCommand = cmdToSubmit
 					lastHistoryAdmission = historyRecording.capture()
 					lastCommandHistoryIgnored = false
-					if strings.TrimSpace(cmdToSubmit) == "" || lastHistoryAdmission.paused {
+					if lastHistoryAdmission.paused {
 						feedback.reset()
-						pendingFeedback = nil
+						pendingFeedback = suggestionFeedbackSubmission{}
 						pendingFeedbackCWD = ""
 					} else {
-						pendingFeedback = feedback.finish(cmdToSubmit)
+						pendingFeedback = feedback.capture()
 						pendingFeedbackCWD = spec.GetCWD()
 					}
 					naiveBuffer = ""

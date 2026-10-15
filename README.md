@@ -378,6 +378,15 @@ history preserves repeated executions; inline recall deduplicates only the
 display candidate. Search and ranking perform no Atuin or shell-history I/O on
 the keystroke path.
 
+Zsh supplies the full typed command at pre-execution, so stale editor redraws
+and text to the right of the cursor do not shorten recorded history. The same
+privacy and pause-at-submission gates apply to that complete text. If Zsh's
+history mechanism supplies no typed command, Vuja retains its input-capture
+fallback, as it does for Bash and Fish. Previously missing or truncated command
+text cannot be reconstructed automatically.
+An accepted command exceeding the bounded shell-message limit runs without
+recording, with an explicit warning; it never waits indefinitely for history.
+
 Managed sessions publish history changes through a bounded database change
 feed. Long-lived terminal windows therefore pick up ordinary submissions and
 completions from other Vuja windows through bounded event-key reads instead of

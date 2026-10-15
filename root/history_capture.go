@@ -29,6 +29,17 @@ func (t *commandExecutionTracker) Start(command, cwd, shell string) integration.
 	return t.StartRaw(command, command, cwd, shell)
 }
 
+// startExecution is the submission boundary shared by shell start messages and
+// history admission. The editor mirror is not necessarily the accepted buffer.
+func (a historySubmissionAdmission) startExecution(t *commandExecutionTracker, message string, fallback, cwd, shell string, ignored bool) (integration.HistoryEntry, bool) {
+	raw := fallback
+	if encoded, _, present := commandStartPayload(message); present {
+		raw = shellEditorUnescape.Replace(encoded)
+	}
+	command, recordable := a.command(raw, ignored)
+	return t.StartRaw(raw, command, cwd, shell), recordable
+}
+
 func (t *commandExecutionTracker) StartRaw(command, normalizedCommand, cwd, shell string) integration.HistoryEntry {
 	t.mu.Lock()
 	defer t.mu.Unlock()

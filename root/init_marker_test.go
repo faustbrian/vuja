@@ -117,19 +117,22 @@ func assertOrderedMarkers(t *testing.T, output, marker string) {
 	}
 }
 
-func TestZshInitReportsHistoryIgnoreWithoutSendingTheCommand(t *testing.T) {
+func TestZshInitReportsHistoryIgnoreWithFramedAcceptedCommand(t *testing.T) {
 	script := shellInitScript("zsh", "/unused/vuja")
 	for _, expected := range []string{
 		`[[ $1 == [[:space:]]* ]]`,
 		`[[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]]`,
 		`VUJA_CMD_START:IGNORE`,
+		`local _vuja_accepted_command=${1//\\/\\\\}`,
+		`_vuja_accepted_command=${_vuja_accepted_command//$'\0'/'\0'}`,
+		`${_vuja_history_marker}:COMMAND:${_vuja_accepted_command}`,
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("expected zsh integration to contain %q", expected)
 		}
 	}
 	if strings.Contains(script, `VUJA_CMD_START:$1`) {
-		t.Fatal("history decision message must not send command text")
+		t.Fatal("accepted command must be escaped within its data frame")
 	}
 }
 
@@ -157,7 +160,7 @@ _vuja_preexec 'private command'
 			if err != nil {
 				t.Fatalf("zsh history-policy integration failed: %v", err)
 			}
-			if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+			if !strings.Contains(string(output), commandStartIgnoreMessage+":COMMAND:private command\x00") {
 				t.Fatalf("expected rejected zsh history entry to be ignored, got %q", output)
 			}
 		})
@@ -187,7 +190,7 @@ _vuja_preexec 'private command'
 	if err != nil {
 		t.Fatalf("zsh late history-policy integration failed: %v", err)
 	}
-	if !strings.Contains(string(output), commandStartIgnoreMessage+"\x00") {
+	if !strings.Contains(string(output), commandStartIgnoreMessage+":COMMAND:private command\x00") {
 		t.Fatalf("expected late zsh history policy to remain effective, got %q", output)
 	}
 }

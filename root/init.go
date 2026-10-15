@@ -221,6 +221,14 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     if [[ $1 == [[:space:]]* ]] || [[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]] || (( ${_vuja_history_policy_status:-0} != 0 )); then
       _vuja_history_marker="VUJA_CMD_START:IGNORE"
     fi
+    # preexec's first argument is the full typed command, unlike LBUFFER or
+    # its abbreviated/alias-expanded later arguments. With history disabled
+    # it can be empty; retain the legacy input-capture fallback in that case.
+    if [[ -n $1 ]]; then
+      local _vuja_accepted_command=${1//\\/\\\\}
+      _vuja_accepted_command=${_vuja_accepted_command//$'\0'/'\0'}
+      _vuja_history_marker="${_vuja_history_marker}:COMMAND:${_vuja_accepted_command}"
+    fi
     print -u $VUJA_FD -N -r -- "$_vuja_history_marker" 2>/dev/null
 	    if [[ -n ${VUJA_HISTORY_ACK_FD-} ]]; then
 	      read -u "$VUJA_HISTORY_ACK_FD" -k 1 _vuja_history_ack 2>/dev/null

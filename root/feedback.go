@@ -22,6 +22,13 @@ type suggestionFeedbackEvent struct {
 	kind    string
 }
 
+// Freeze interaction evidence on Enter, but classify it only against the
+// command the shell accepted. Later asynchronous offers cannot alter it.
+type suggestionFeedbackSubmission struct {
+	offered  string
+	accepted string
+}
+
 func (s *suggestionFeedbackSession) offer(command string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -36,9 +43,15 @@ func (s *suggestionFeedbackSession) accept(command string) {
 	s.accepted = strings.TrimSpace(command)
 }
 
-func (s *suggestionFeedbackSession) finish(submitted string) []suggestionFeedbackEvent {
+func (s *suggestionFeedbackSession) capture() suggestionFeedbackSubmission {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	result := suggestionFeedbackSubmission{offered: s.offered, accepted: s.accepted}
+	s.offered, s.accepted = "", ""
+	return result
+}
+
+func (s suggestionFeedbackSubmission) finish(submitted string) []suggestionFeedbackEvent {
 	submitted = strings.TrimSpace(submitted)
 	var events []suggestionFeedbackEvent
 	if s.accepted == "" {
@@ -51,7 +64,6 @@ func (s *suggestionFeedbackSession) finish(submitted string) []suggestionFeedbac
 	if s.offered != "" && s.offered != submitted && s.offered != s.accepted {
 		events = append(events, suggestionFeedbackEvent{s.offered, "dismissed"})
 	}
-	s.offered, s.accepted = "", ""
 	return events
 }
 
