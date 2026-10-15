@@ -680,6 +680,59 @@ back-to-bottom badge instead. Terminal mouse reporting in that mode may require
 the terminal's selection modifier for text selection.
 New output does not move your reading position. `output-lines = 2000` bounds the
 offscreen output history (1–10000 lines), in addition to the visible output rows.
+In the pinned pane, F7 opens a case-insensitive literal output search without
+changing the shell input. Type or paste a query; Enter, Down or F8 advances to
+the next match, while Up or Shift+F8 moves to the previous match, with wrapping.
+The search badge shows the current match and total (a `+` means the 4096-match
+display limit was reached). Backspace edits the query and Ctrl+U clears it.
+In narrow panes, the match counter and truncation warning take precedence over
+activity notices, action hints and query text.
+Escape or Ctrl+C closes search while preserving the reading position; then
+Escape or End returns to the latest output. Search never submits a command,
+does not intercept native application input, and preserves normal drag
+selection in the default `output-mouse = "select"` mode.
+F10 opens the newest completed execution's output; repeated F10 moves to older
+executions and Shift+F10 moves to newer ones, clamping at either end. The
+execution number identifies a local output capture, not a durable history ID.
+F11 requests terminal clipboard copy of the selected execution's rendered
+plain text (or explicitly reveals the newest capture first). The terminal must
+permit OSC 52 clipboard writes; Vuja never sends a copy command to the shell.
+An empty capture leaves the clipboard unchanged, and copies over 256 KiB are
+refused rather than silently shortened. F12 asynchronously exports the selected
+execution, or the frozen pane when none is selected, to an owner-only text file
+under Vuja's cache `exports/` directory. The badge shows the resulting filename.
+Search does not implicitly select an execution for copying.
+
+Completed captures share the configured `output-lines` budget, with a 1 MiB
+text budget; silent executions cost one retention slot. Frozen reading/copy
+targets remain stable when newer output evicts their source. Captures contain
+output received during that execution, not command/title/status snapshots or
+full-screen application canvases. Any native application handoff makes that
+execution's capture unavailable for copy/export, on either screen buffer.
+Returning to the latest pane and explicitly exporting it still includes its
+retained display rows, such as native application exit summaries; this does
+not capture or resume the application itself. Search, copy, export and new
+checkpoints share the SDK's semantic text: actual line breaks are preserved,
+while display-only wraps do not become extra newlines. Width and height changes
+reshape drawing without discarding stored text. Erased or overwritten terminal
+cells are not kept as a raw byte transcript. The execution badge and export
+disclose genuine retention eviction. The live pane has its configured logical
+line limit and an independent 1 MiB scrollback text/link budget; reaching a
+limit is distinct from resizing the window.
+Styled cell storage costs substantially more than its text bytes; see the
+[bounded model measurements](docs/retained-output-performance.md) for measured
+memory and resize costs, and the separate
+[live terminal checklist](docs/terminal-compatibility.md) for acceptance.
+Legacy restored output has no execution identities and remains searchable and
+exportable as a pane, but is not fabricated into per-execution captures.
+Existing checkpoints retain their stored line boundaries; previously lost
+text or old soft-wrap provenance cannot be reconstructed during restoration.
+Retained pinned output limits a single Unicode grapheme to 512 UTF-8 bytes.
+An oversized cluster is replaced with `[Unicode cluster truncated]`; further
+zero-width continuations are omitted until new text or a control boundary.
+The notice remains in retained output, search and checkpoints. This bounds
+pathological combining runs without changing shell input or native application
+output; ordinary Unicode clusters are preserved.
 Set `output-viewport = "terminal"` to use native
 terminal scrollback instead. Suggestion menus retain their page-navigation keys;
 full-screen and cursor-addressed applications retain terminal ownership.
@@ -714,7 +767,13 @@ configured interval, including when no more output arrives. These are best-effor
 abrupt termination can lose a pending snapshot or output since the latest save.
 Canonical command-history durability is separate. Checkpoints are owner-only
 files under Vuja's data directory (`terminal-output`), bounded to 1 MiB and
-10000 rows per pane. Age retention removes saves strictly older than the cutoff
+10000 rows per pane. These limits count the serialized checkpoint, including
+JSON escaping. Oversized rows shed formatting before text; when text must be
+removed, the newest suffix is kept with a persistent `checkpoint output
+truncated` notice. Loss provenance is also stored as metadata, so restoring into
+a smaller pane cannot silently erase it along with the visible notice.
+Existing version-1 checkpoints remain readable. Live retained output and explicit exports are unaffected by
+this separate disk limit. Age retention removes saves strictly older than the cutoff
 on startup/save; claiming a pane does not renew its output's original age.
 
 Checkpoints can contain sensitive command output. They do not retain old resume

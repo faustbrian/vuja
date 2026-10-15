@@ -8,8 +8,8 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/vt"
 )
 
 // All inputs are fictional. This is the production compositor, with an

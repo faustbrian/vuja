@@ -10,31 +10,44 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
+	"github.com/faustbrian/vuja/internal/vt"
 )
 
 // The output model never receives prompt or suggestion frames. Browsing freezes
 // rendered rows, so background output and retention eviction cannot move the
 // user's reading position. Both the live model and frozen view are bounded.
 type outputViewport struct {
-	model     *vt.Emulator
-	native    *nativeOutputTail
-	done      chan struct{}
-	frozen    []string
-	top       int
-	newOutput bool
-	dirty     bool
-	csiTail   []byte
-	pointerX  int
-	pointerY  int
+	model             *vt.Emulator
+	native            *nativeOutputTail
+	done              chan struct{}
+	frozen            []string
+	frozenLayout      []frozenOutputRow
+	frozenWidth       int
+	frozenTruncated   bool
+	top               int
+	newOutput         bool
+	dirty             bool
+	csiTail           []byte
+	pointerX          int
+	pointerY          int
+	search            *outputSearch
+	text              outputModelStream
+	executions        outputExecutions
+	restoredTruncated bool
+}
+
+// The SDK owns live eviction, including writes made during restoration. Prior
+// checkpoint loss is independent: its visible notice can itself be evicted.
+func (v *outputViewport) outputTruncated() bool {
+	return v.restoredTruncated || v.model.RetainedOutputTruncated()
 }
 
 func (v *outputViewport) write(data []byte) {
 	data = sanitizeTerminalModelCSI(data, &v.csiTail, v.model.Width(), v.model.Height())
-	_, _ = v.model.Write(data)
+	v.text.write(v.model, data)
 }
 
-var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF", "\x1b[B", "\x1bOB"}
+var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF", "\x1b[B", "\x1bOB", "\x1b[18~", "\x1b[19~", "\x1b[19;2~", "\x1b[21~", "\x1b[21;2~", "\x1b[23~", "\x1b[24~"}
 
 func (c *terminalCompositor) ViewportNavigationActive() bool {
 	c.mu.Lock()
@@ -50,14 +63,14 @@ func (c *terminalCompositor) ensureOutputViewport() {
 	rows := max(c.height-c.surfaceRows, 1)
 	if c.viewport == nil {
 		model := vt.NewEmulator(c.width, rows)
+		model.SetReflow(true)
 		model.SetScrollbackSize(clamp(c.chatboxConfig.OutputLines, 1, 10000))
 		v := &outputViewport{model: model, done: make(chan struct{}), dirty: true}
 		c.viewport = v
 		go func() { _, _ = io.Copy(io.Discard, model); close(v.done) }()
 		c.restoreOutputRecovery()
 	} else if c.viewport.model.Width() != c.width || c.viewport.model.Height() != rows {
-		c.viewport.model.Resize(c.width, rows)
-		_, _ = c.viewport.model.Write([]byte("\x1b[r"))
+		c.viewport.text.resize(c.viewport.model, c.width, rows)
 		c.viewport.dirty = true
 	}
 }
@@ -68,6 +81,9 @@ func (c *terminalCompositor) closeOutputViewport() {
 	}
 	v := c.viewport
 	c.viewport = nil
+	if a := v.executions.active; a != nil {
+		abandonTerminalModel(a.model, a.done)
+	}
 	abandonTerminalModel(v.model, v.done)
 }
 
@@ -154,6 +170,9 @@ func (c *terminalCompositor) suspendOutputViewport() {
 		}
 		c.viewport.frozen = nil
 		c.viewport.newOutput = false
+		c.viewport.search = nil
+		c.viewport.executions.selected = nil
+		c.viewport.executions.notice = ""
 	}
 	c.writeTerminal([]byte("\x1b[r\x1b[?7h"))
 	c.surfaceRows = 0
@@ -164,6 +183,12 @@ func (c *terminalCompositor) suspendOutputViewport() {
 // Native applications get the primary terminal back before their own controls
 // are forwarded, avoiding nested alternate-screen save/restore semantics.
 func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
+	if !enabled && c.viewport != nil {
+		// Query ownership cannot outlive the visible managed surface.
+		c.viewport.search = nil
+		c.viewport.executions.selected = nil
+		c.viewport.executions.notice = ""
+	}
 	if c.viewportAlternate == enabled {
 		return false
 	}
@@ -230,8 +255,20 @@ func (c *terminalCompositor) setViewportMotion(enabled bool) {
 
 func (c *terminalCompositor) viewportBadge() (string, int, int) {
 	label := " ↓ Back to bottom · esc "
-	if c.viewport.newOutput {
-		label = " New activity · ↓ Back to bottom · esc "
+	if c.viewport.search != nil {
+		label = c.viewport.search.label(c.width, c.viewport.frozenTruncated, c.viewport.newOutput, c.viewport.executions.notice)
+	} else if execution := c.viewport.executions.label(); execution != "" {
+		label = execution
+	} else if c.viewport.frozenTruncated {
+		label = " Retention limit reached · ↓ Latest · esc "
+	}
+	if c.viewport.newOutput && c.viewport.search == nil {
+		selected := c.viewport.executions.selected
+		if c.viewport.frozenTruncated || selected != nil && (selected.truncated || selected.applicationOwned) {
+			label += " · New activity"
+		} else {
+			label = " New activity ·" + label
+		}
 	}
 	label = ansi.Cut(label, 0, c.width)
 	width := ansi.StringWidth(label)
@@ -243,9 +280,24 @@ func (c *terminalCompositor) viewportBadgeHovered() bool {
 	return c.viewport.pointerY == c.viewportBadgeRow() && c.viewport.pointerX > left && c.viewport.pointerX <= left+width
 }
 
+func (v *outputViewport) toolbarActive() bool {
+	return v.search != nil || v.executions.selected != nil || v.executions.notice != ""
+}
+
+func (c *terminalCompositor) viewportContentRows() int {
+	rows := c.height - c.surfaceRows
+	if c.viewport != nil && c.viewport.toolbarActive() {
+		rows--
+	}
+	return max(rows, 0)
+}
+
 // Use the title row when present so the badge touches the input surface.
 func (c *terminalCompositor) viewportBadgeRow() int {
 	row := c.height - c.surfaceRows
+	if c.viewport.toolbarActive() {
+		return row
+	}
 	if c.inputBoxTitleEnabled() && c.inputBoxDecorationRows() > 0 {
 		row++
 	}
@@ -253,7 +305,7 @@ func (c *terminalCompositor) viewportBadgeRow() int {
 }
 
 func (c *terminalCompositor) viewportBadgeTitleLine() string {
-	if c.viewport.frozen == nil {
+	if c.viewport.frozen == nil || c.viewport.toolbarActive() {
 		return c.inputBoxTitleLine()
 	}
 	_, start, width := c.viewportBadge()
@@ -336,9 +388,8 @@ func viewportLine(model *vt.Emulator, y, width int, history bool) string {
 		} else {
 			cell = model.CellAt(x, y)
 		}
-		if cell != nil {
+		if cell != nil && cell.Width > 0 {
 			line.Set(x, cell)
-			line[x].Link = terminalModelHyperlink(cell.Link)
 		}
 	}
 	return line.Render()
@@ -350,9 +401,15 @@ func (c *terminalCompositor) renderOutputViewport() {
 		return
 	}
 	c.setViewportScreen(true)
-	c.setViewportMouse(c.transientUIVisible == nil || !c.transientUIVisible())
+	c.setViewportMouse(c.viewport != nil && c.viewport.search != nil || c.transientUIVisible == nil || !c.transientUIVisible())
 	c.ensureOutputViewport()
 	v := c.viewport
+	if v.frozen != nil && v.frozenWidth != c.width {
+		v.layoutFrozen(c.width)
+		if v.search != nil && v.search.index >= 0 {
+			c.revealOutputSearchMatch()
+		}
+	}
 	c.setViewportMotion(c.viewportMouse && v.frozen != nil)
 	if !v.dirty {
 		return
@@ -365,8 +422,9 @@ func (c *terminalCompositor) renderOutputViewport() {
 		line := ""
 		if v.frozen != nil {
 			index := v.top + row
-			if index < len(v.frozen) {
-				line = ansi.Cut(v.frozen[index], 0, c.width)
+			if index < len(v.frozenLayout) && row < c.viewportContentRows() {
+				span := v.frozenLayout[index]
+				line = c.outputSearchLine(v.frozen[span.logical], span.logical, span.first, span.last)
 			}
 		} else {
 			line = viewportLine(v.model, row, c.width, false)
@@ -396,8 +454,8 @@ func (c *terminalCompositor) renderOutputViewport() {
 	var badge strings.Builder
 	badge.WriteString(terminalSyncStart + "\x1b7\x1b[?7l")
 	badgeRow := c.viewportBadgeRow()
-	if badgeRow > rows {
-		fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", badgeRow, c.viewportBadgeTitleLine())
+	if c.inputBoxTitleEnabled() && c.inputBoxDecorationRows() > 0 {
+		fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", rows+1, c.viewportBadgeTitleLine())
 	}
 	if v.frozen != nil {
 		label, left, _ := c.viewportBadge()
@@ -418,7 +476,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 	c.recordBackdrop(data)
 	// Transient UI owns the topmost layer, but never the retained backdrop.
 	// A viewport repaint invalidates even otherwise unchanged overlay rows.
-	if c.transientUIVisible != nil && c.transientUIVisible() && c.renderTransientUI != nil {
+	if v.search == nil && c.transientUIVisible != nil && c.transientUIVisible() && c.renderTransientUI != nil {
 		if c.setTransientUIGeometry != nil {
 			c.setTransientUIGeometry(true, c.surfaceRows)
 		}
@@ -434,6 +492,10 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	if c.closed || !c.outputViewportEnabled() || bytes.Contains(data, bracketedPasteStart) {
 		return false
 	}
+	if c.viewport != nil && c.viewport.search != nil {
+		// A pending suggestion result does not transfer modal pointer ownership.
+		suggestions = false
+	}
 	wheel, mouse := viewportWheel(data, c.width, c.height-c.surfaceRows)
 	if mouse && !suggestions && wheel == 0 && c.viewport != nil && c.viewport.frozen != nil {
 		button, x, y, pressed, _ := viewportMouseReport(data)
@@ -441,6 +503,9 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		hover := y == c.viewportBadgeRow() && x > left && x <= left+width
 		if pressed && button&^28 == 0 && hover {
 			c.viewport.frozen = nil
+			c.viewport.search = nil
+			c.viewport.executions.selected = nil
+			c.viewport.executions.notice = ""
 			c.viewport.newOutput = false
 			c.viewport.pointerX, c.viewport.pointerY = 0, 0
 			c.viewport.dirty = true
@@ -459,11 +524,17 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		// Button reports and wheel over chrome/menu must not become shell input.
 		return true
 	}
-	if suggestions {
+	if suggestions && (c.viewport == nil || c.viewport.search == nil) && string(data) != "\x1b[18~" {
 		return false
 	}
 	c.ensureOutputViewport()
 	v := c.viewport
+	if !mouse && c.handleOutputExecution(data) {
+		return true
+	}
+	if !mouse && c.handleOutputSearch(data) {
+		return true
+	}
 	page := max(c.height-c.surfaceRows-1, 1)
 	key := string(data)
 	if wheel != 0 {
@@ -476,22 +547,14 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	}
 	switch key {
 	case "\x1b[5~":
-		if v.frozen == nil {
-			for y := 0; y < v.model.ScrollbackLen(); y++ {
-				v.frozen = append(v.frozen, viewportLine(v.model, y, c.width, true))
-			}
-			for y := 0; y < v.model.Height(); y++ {
-				v.frozen = append(v.frozen, viewportLine(v.model, y, c.width, false))
-			}
-			v.top = max(len(v.frozen)-(c.height-c.surfaceRows), 0)
-		}
+		c.freezeOutputViewport()
 		v.top = max(v.top-page, 0)
 	case "\x1b[6~":
 		if v.frozen == nil {
 			return mouse
 		}
 		v.top += page
-		if v.top >= max(len(v.frozen)-(c.height-c.surfaceRows), 0) {
+		if v.top >= max(len(v.frozenLayout)-c.viewportContentRows(), 0) {
 			v.frozen = nil
 			v.newOutput = false
 		}
@@ -506,6 +569,9 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	}
 	v.dirty = true
 	if v.frozen == nil {
+		v.search = nil
+		v.executions.selected = nil
+		v.executions.notice = ""
 		v.pointerX, v.pointerY = 0, 0
 	}
 	c.renderOutputViewport()

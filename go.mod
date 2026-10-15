@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/charmbracelet/x/vt v0.0.0-20260727090823-41c9e6be3365
+	github.com/charmbracelet/x/exp/ordered v0.1.0
 	github.com/creack/pty v1.1.24
 	github.com/ebitengine/purego v0.10.0
 	github.com/muesli/termenv v0.16.0
@@ -24,7 +24,6 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
-	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
@@ -40,7 +39,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
+	github.com/spf13/pflag v1.0.10
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.39.0

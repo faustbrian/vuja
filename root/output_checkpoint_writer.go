@@ -6,8 +6,9 @@ import (
 )
 
 type outputCheckpointSnapshot struct {
-	rows    []string
-	savedAt time.Time
+	rows      []string
+	savedAt   time.Time
+	truncated bool
 }
 
 // At most one immutable snapshot is being written and one newer snapshot is

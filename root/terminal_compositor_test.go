@@ -17,9 +17,9 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
 	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/vt"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -3210,6 +3210,7 @@ func TestTerminalModelHyperlinksPreserveWireFieldsAcrossSurfaces(t *testing.T) {
 		uri, params string
 	}{
 		{uri: "https://example.com"},
+		{uri: "https://example.com/e\u0301", params: "id=e\u0301"},
 		{uri: "file:///tmp/example", params: "id=file"},
 		{uri: "vuja://codex-resume/" + testCodexResumeID, params: "id=session"},
 	} {
@@ -3238,7 +3239,9 @@ func TestTerminalModelHyperlinksPreserveWireFieldsAcrossSurfaces(t *testing.T) {
 			model := vt.NewEmulator(80, 2)
 			t.Cleanup(func() { _ = model.Close() })
 			model.SetScrollbackSize(10)
-			for i := range input {
+			// A string range visits rune starts, not every byte. Include UTF-8
+			// continuation bytes in the fragmented wire fixture too.
+			for i := 0; i < len(input); i++ {
 				if _, err := model.Write([]byte(input[i : i+1])); err != nil {
 					t.Fatal(err)
 				}

@@ -14,24 +14,29 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/faustbrian/vuja/internal/config"
 	"golang.org/x/sys/unix"
 )
 
 const outputRecoveryByteLimit = 1024 * 1024
 const outputRecoveryPaneLimit = 64
+const outputRecoveryTruncated = "[VUJA] checkpoint output truncated"
 
 type outputRecoveryState struct {
-	Version int       `json:"version"`
-	Owner   string    `json:"owner"`
-	Rows    []string  `json:"rows"`
-	SavedAt time.Time `json:"saved_at,omitempty"`
+	Version   int       `json:"version"`
+	Owner     string    `json:"owner"`
+	Rows      []string  `json:"rows"`
+	SavedAt   time.Time `json:"saved_at,omitempty"`
+	Truncated bool      `json:"truncated,omitempty"`
 }
 
 type outputRecovery struct {
 	dir, path, owner string
 	rows             []string
+	truncated        bool
 	linkFor          func(string) string
 	restored         bool
 	failed           bool
@@ -107,8 +112,10 @@ func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor f
 		}
 		if checkpointExpired(state.SavedAt, now, r.maxAge) {
 			state.Rows, state.SavedAt = nil, time.Time{}
+			state.Truncated = false
 		}
 		r.rows = state.Rows
+		r.truncated = state.Truncated
 		state.Version, state.Owner = 1, r.owner
 		if err := r.writeState(state); err != nil {
 			return err
@@ -277,6 +284,9 @@ func readOutputRecoveryState(path string) (outputRecoveryState, error) {
 	for i, row := range state.Rows {
 		state.Rows[i] = recoveryRow(row, nil, false)
 	}
+	// Early version-1 checkpoints carried only this reserved leading notice.
+	// Lift it into metadata before a smaller live model can evict the row.
+	state.Truncated = state.Truncated || len(state.Rows) > 0 && state.Rows[0] == outputRecoveryTruncated
 	if state.SavedAt.IsZero() && len(state.Rows) > 0 {
 		state.SavedAt = info.ModTime()
 	}
@@ -288,23 +298,21 @@ func (r *outputRecovery) write(rows []string) error {
 }
 
 func (r *outputRecovery) writeState(state outputRecoveryState) error {
-	rows := state.Rows
-	// Account for JSON escaping once per row rather than repeatedly encoding a
-	// shrinking large transcript. Serialization work is linear in retained data.
-	budget := outputRecoveryByteLimit - 512
-	start := len(rows)
-	for start > 0 {
-		encoded, err := json.Marshal(rows[start-1])
-		if err != nil {
-			return err
+	// The disk cap counts escaped JSON, not logical text or screen columns.
+	// Prefer dropping styling to text; if text must go, keep the newest suffix
+	// and reserve room for a notice that survives legacy version-1 readers.
+	const budget = outputRecoveryByteLimit - 512
+	rows, shortened := checkpointRowsWithinBudget(state.Rows, budget, 10000)
+	state.Truncated = state.Truncated || shortened
+	if state.Truncated {
+		original := state.Rows
+		if len(original) > 0 && original[0] == outputRecoveryTruncated {
+			original = original[1:]
 		}
-		if len(encoded)+1 > budget {
-			break
-		}
-		budget -= len(encoded) + 1
-		start--
+		notice, _ := json.Marshal(outputRecoveryTruncated)
+		rows, _ = checkpointRowsWithinBudget(original, budget-len(notice)-1, 9999)
+		rows = append([]string{outputRecoveryTruncated}, rows...)
 	}
-	rows = rows[start:]
 	state.Rows = rows
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -389,12 +397,70 @@ func (r *outputRecovery) prune(now time.Time) error {
 	return nil
 }
 
+// Each sizing pass encodes a row at most twice. Styled rows fall back to plain
+// text, and one backward rune scan bounds the final suffix without repeatedly
+// encoding progressively smaller copies of a large logical line.
+func checkpointRowsWithinBudget(rows []string, budget, maxRows int) ([]string, bool) {
+	kept := make([]string, 0, min(len(rows), maxRows))
+	shortened := false
+	for y := len(rows) - 1; y >= 0; y-- {
+		if len(kept) == maxRows {
+			shortened = true
+			break
+		}
+		row := rows[y]
+		encoded, _ := json.Marshal(row)
+		if len(encoded)+1 > budget {
+			row = ansi.Strip(row)
+			encoded, _ = json.Marshal(row)
+		}
+		if len(encoded)+1 > budget {
+			if suffix := checkpointStringSuffix(row, budget-1); suffix != "" {
+				kept = append(kept, suffix)
+			}
+			shortened = true
+			break
+		}
+		budget -= len(encoded) + 1
+		kept = append(kept, row)
+	}
+	slices.Reverse(kept)
+	return kept, shortened
+}
+
+// Match encoding/json's string size, including HTML escaping and the two
+// quotes. Starting at a rune boundary keeps a shortened checkpoint valid UTF-8.
+func checkpointStringSuffix(text string, budget int) string {
+	start, size := len(text), 2
+	for start > 0 {
+		r, n := utf8.DecodeLastRuneInString(text[:start])
+		encoded := n
+		switch r {
+		case '"', '\\', '\b', '\f', '\n', '\r', '\t':
+			encoded = 2
+		case '<', '>', '&', '\u2028', '\u2029':
+			encoded = 6
+		default:
+			if r < 0x20 || r == utf8.RuneError && n == 1 {
+				encoded = 6
+			}
+		}
+		if size+encoded > budget {
+			break
+		}
+		start -= n
+		size += encoded
+	}
+	return strings.Clone(text[start:])
+}
+
 func (c *terminalCompositor) restoreOutputRecovery() {
 	r := c.outputRecovery
 	if r == nil || r.restored {
 		return
 	}
 	r.restored = true
+	c.viewport.restoredTruncated = r.truncated
 	if len(r.rows) > 0 {
 		c.viewport.write([]byte("[VUJA] Output restored; process not resumed\r\n"))
 	}
@@ -416,27 +482,33 @@ func (c *terminalCompositor) checkpointOutputRecovery() {
 		return
 	}
 	m := c.viewport.model
-	count := m.ScrollbackLen() + m.CursorPosition().Y + 1
+	stored := retainedModelRows(m)
+	count := len(stored)
 	var rows []string
 	bytes := 0
-	for y := count - 1; y >= max(0, count-min(clamp(c.chatboxConfig.OutputLines, 1, 10000)+m.Height(), 10000)); y-- {
-		history := y < m.ScrollbackLen()
-		row := y
-		if !history {
-			row -= m.ScrollbackLen()
+	first := max(0, count-min(clamp(c.chatboxConfig.OutputLines, 1, 10000)+m.Height(), 10000))
+	shortened := first > 0 || c.viewport.outputTruncated()
+	for y := count - 1; y >= first; y-- {
+		line := recoveryRow(stored[y], nil, false)
+		remaining := outputRecoveryByteLimit - bytes
+		if len(line) > remaining {
+			line = ansi.Strip(line)
 		}
-		line := recoveryRow(viewportLine(m, row, c.width, history), nil, false)
-		bytes += len(line)
-		if bytes > outputRecoveryByteLimit {
+		if len(line) > remaining {
+			if suffix := checkpointStringSuffix(line, remaining); suffix != "" {
+				rows = append(rows, suffix)
+			}
+			shortened = true
 			break
 		}
+		bytes += len(line)
 		rows = append(rows, line)
 	}
 	slices.Reverse(rows)
 	r.dirty = false
 	now := c.checkpointNow()
 	r.nextCheckpoint = now.Add(c.outputCheckpointInterval())
-	r.writer.submit(outputCheckpointSnapshot{rows: rows, savedAt: now.UTC()})
+	r.writer.submit(outputCheckpointSnapshot{rows: rows, savedAt: now.UTC(), truncated: shortened})
 }
 
 func (c *terminalCompositor) checkpointNow() time.Time {
@@ -486,7 +558,7 @@ func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded 
 			superseded = true
 			return nil
 		}
-		if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: snapshot.rows, SavedAt: snapshot.savedAt}); err != nil {
+		if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: snapshot.rows, SavedAt: snapshot.savedAt, Truncated: snapshot.truncated}); err != nil {
 			return err
 		}
 		return r.prune(snapshot.savedAt)

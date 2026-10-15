@@ -21,10 +21,12 @@ func detectDarkBackground() bool {
 }
 
 type terminalInputFilter struct {
-	pending      []byte
-	paste        bool
-	pendingOwner terminalInputOwner
-	pasteOwner   terminalInputOwner
+	pending       []byte
+	paste         bool
+	pendingOwner  terminalInputOwner
+	pasteOwner    terminalInputOwner
+	searchPaste   bool
+	pendingSearch bool
 }
 
 type terminalInputOwner struct {
@@ -47,7 +49,7 @@ func flattenTerminalInput(events []ownedTerminalInput) []byte {
 }
 
 func (f *terminalInputFilter) Filter(input []byte) []byte {
-	return flattenTerminalInput(f.frame(input, terminalInputOwner{shell: true}, func(data []byte, _ terminalInputOwner) []byte { return stripShellReport(data) }))
+	return flattenTerminalInput(f.frame(input, terminalInputOwner{shell: true}, func(data []byte, _ terminalInputOwner) []byte { return stripShellReport(data) }, nil))
 }
 
 func stripShellReport(sequence []byte) []byte {
@@ -63,15 +65,66 @@ func (f *terminalInputFilter) FilterInput(input []byte, display *terminalComposi
 
 func (f *terminalInputFilter) FilterEvents(input []byte, display *terminalCompositor, suggestions, shellOwned bool) []ownedTerminalInput {
 	owner := terminalInputOwner{shell: shellOwned, viewport: display.ViewportNavigationActive(), suggestions: suggestions}
-	return f.frame(input, owner, func(sequence []byte, owner terminalInputOwner) []byte {
+	pendingSearch := f.pendingSearch
+	f.pendingSearch = false
+	events := f.frame(input, owner, func(sequence []byte, owner terminalInputOwner) []byte {
+		if pendingSearch {
+			// An incomplete modal control keeps its original owner even if
+			// resize or native handoff has since closed the search surface.
+			pendingSearch = false
+			if !display.OutputSearchActive() {
+				return nil
+			}
+		}
 		if owner.shell {
 			sequence = stripShellReport(sequence)
+		}
+		if len(sequence) > 0 && sequence[0] != '\x1b' && owner.viewport && display.OutputSearchActive() {
+			// Frame text and editing keys independently even when a single read
+			// contains both. Closing the modal preserves subsequent shell bytes.
+			var forwarded []byte
+			for i := 0; i < len(sequence); {
+				end := i + 1
+				if sequence[i] >= 0x20 && sequence[i] != 0x7f {
+					for end < len(sequence) && sequence[end] >= 0x20 && sequence[end] != 0x7f {
+						end++
+					}
+				}
+				if !display.HandleViewportInput(sequence[i:end], owner.suggestions) {
+					forwarded = append(forwarded, sequence[i:end]...)
+				}
+				i = end
+			}
+			return forwarded
 		}
 		if owner.viewport && display.HandleViewportInput(sequence, owner.suggestions) {
 			return nil
 		}
 		return sequence
+	}, func(sequence []byte, owner terminalInputOwner, start, end bool) []byte {
+		if start {
+			f.searchPaste = pendingSearch || owner.viewport && display.OutputSearchActive()
+			pendingSearch = false
+		}
+		if !f.searchPaste {
+			return sequence
+		}
+		if start {
+			return nil
+		}
+		if end {
+			sequence = sequence[:len(sequence)-len(bracketedPasteEnd)]
+			f.searchPaste = false
+		}
+		// The start owns the entire paste, including across native handoff.
+		// Search payloads must never become a command or application input.
+		display.PasteOutputSearch(sequence)
+		return nil
 	})
+	if len(f.pending) > 0 && !f.paste {
+		f.pendingSearch = pendingSearch || display.OutputSearchActive()
+	}
+	return events
 }
 
 func (f *terminalInputFilter) EscapePending() bool {
@@ -83,6 +136,11 @@ func (f *terminalInputFilter) FlushEscape(display *terminalCompositor, _ bool) [
 		return nil
 	}
 	f.pending = nil
+	pendingSearch := f.pendingSearch
+	f.pendingSearch = false
+	if pendingSearch && !display.OutputSearchActive() {
+		return nil
+	}
 	if !f.pendingOwner.viewport {
 		return []byte("\x1b")
 	}
@@ -91,7 +149,7 @@ func (f *terminalInputFilter) FlushEscape(display *terminalCompositor, _ bool) [
 
 // One stream boundary recognizes paste regions before report suppression or
 // key ownership. Only incomplete framing is retained, never paste contents.
-func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwner, normal func([]byte, terminalInputOwner) []byte) []ownedTerminalInput {
+func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwner, normal func([]byte, terminalInputOwner) []byte, pasted func([]byte, terminalInputOwner, bool, bool) []byte) []ownedTerminalInput {
 	pendingLen, pendingOwner := len(f.pending), f.pendingOwner
 	data := make([]byte, 0, len(f.pending)+len(input))
 	data = append(data, f.pending...)
@@ -109,6 +167,12 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 			filtered = append(filtered, ownedTerminalInput{append([]byte(nil), data...), owner})
 		}
 	}
+	emitPaste := func(data []byte, owner terminalInputOwner, start, end bool) {
+		if pasted != nil {
+			data = pasted(data, owner, start, end)
+		}
+		emit(data, owner)
+	}
 	for i := 0; i < len(data); {
 		owner := currentOwner
 		if i < pendingLen {
@@ -117,7 +181,7 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 		if f.paste {
 			if end := bytes.Index(data[i:], bracketedPasteEnd); end >= 0 {
 				end += i + len(bracketedPasteEnd)
-				emit(data[i:end], f.pasteOwner)
+				emitPaste(data[i:end], f.pasteOwner, false, true)
 				i = end
 				f.paste = false
 				continue
@@ -131,7 +195,7 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 					break
 				}
 			}
-			emit(data[i:end], f.pasteOwner)
+			emitPaste(data[i:end], f.pasteOwner, false, false)
 			return filtered
 		}
 		if data[i] != '\x1b' {
@@ -166,7 +230,9 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 		if end < 0 {
 			if len(data)-i > terminalModelSequenceLimit {
 				// Malformed input cannot grow retained framing without bound.
-				emit(data[i:], owner)
+				// The fallback still obeys modal/report ownership; directly
+				// emitting it would let a search-owned CR reach the shell.
+				emit(normal(data[i:], owner), owner)
 				return filtered
 			}
 			f.pending = append(f.pending, data[i:]...)
@@ -177,7 +243,7 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 		if bytes.Equal(sequence, bracketedPasteStart) {
 			f.paste = true
 			f.pasteOwner = owner
-			emit(sequence, owner)
+			emitPaste(sequence, owner, true, false)
 		} else {
 			emit(normal(sequence, owner), owner)
 		}

@@ -1,8 +1,12 @@
 # Third-party notices
 
-This distribution contains portions covered by the following MIT license:
+This distribution contains Deja-derived code and locally modified
+`github.com/charmbracelet/x/vt` sources covered by the following MIT notices.
+The terminal SDK's complete source license and modification provenance are
+also retained in `internal/vt/`.
 
 > Copyright (c) 2026 Giammarco Ferranti
+> Copyright (c) 2023 Charmbracelet, Inc.
 >
 > Permission is hereby granted, free of charge, to any person obtaining a copy
 > of this software and associated documentation files (the "Software"), to deal

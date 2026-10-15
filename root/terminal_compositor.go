@@ -17,7 +17,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	ansiparser "github.com/charmbracelet/x/ansi/parser"
-	"github.com/charmbracelet/x/vt"
+	"github.com/faustbrian/vuja/internal/vt"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -132,6 +132,7 @@ type terminalCompositor struct {
 	now                     func() time.Time
 	viewport                *outputViewport
 	outputRecovery          *outputRecovery
+	outputExportDone        chan struct{}
 	viewportCommand         bool
 	viewportPassthrough     bool
 	viewportSuspended       bool
@@ -511,6 +512,9 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.viewportControlTail = append(c.viewportControlTail, text...)
 			return
 		}
+		if c.phase == terminalOutput && c.viewportCommand {
+			c.captureExecutionOutput(text)
+		}
 		if !c.layout {
 			if c.viewportSuspended && requiresOutputPassThrough(text, false) {
 				c.suspendOutputViewport()
@@ -596,6 +600,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		if !c.layout {
 			if strings.HasPrefix(event, "command-end") {
 				c.finishNativeOutput()
+				c.finishOutputExecution(false)
 				c.checkpointOutputRecovery()
 				c.commandStartedAt = time.Time{}
 				select {
@@ -634,6 +639,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.writeTerminal([]byte(terminalBracketedPasteDisable))
 			c.startCommandExecution()
 			if c.outputViewportEnabled() && c.surfaceRows > 0 {
+				c.startOutputExecution()
 				c.viewportCommand = true
 				c.viewportPassthrough = false
 				c.clearViewportOverlay()
@@ -670,6 +676,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				}
 			}
 			c.finishCommandOutput(exitCode)
+			c.finishOutputExecution(false)
 			c.checkpointOutputRecovery()
 			select {
 			case c.runningStatusWake <- struct{}{}:
@@ -748,6 +755,11 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 		return
 	}
 	if c.enabled && (!c.layout || c.awaitingPrompt || c.phase != terminalInput) {
+		return
+	}
+	if c.viewport != nil && c.viewport.search != nil {
+		c.viewport.dirty = true
+		c.renderOutputViewport()
 		return
 	}
 	oldTop, oldRows := c.currentTransientUIRegion()
@@ -1244,6 +1256,7 @@ func (c *terminalCompositor) Close() {
 		c.closeBackdrop()
 	}
 	asyncOut := c.asyncOut
+	exportDone := c.outputExportDone
 	var recoveryWriter *outputCheckpointWriter
 	if c.outputRecovery != nil {
 		recoveryWriter = c.outputRecovery.writer
@@ -1251,6 +1264,9 @@ func (c *terminalCompositor) Close() {
 	c.mu.Unlock()
 	if recoveryWriter != nil {
 		recoveryWriter.stop(true)
+	}
+	if exportDone != nil {
+		<-exportDone
 	}
 	if asyncOut != nil {
 		asyncOut.Close()
@@ -1391,9 +1407,8 @@ func (c *terminalCompositor) restoreBackdropRows(top, rows int) (result []byte) 
 	for row := top; row < bottom; row++ {
 		line := uv.NewLine(c.width)
 		for column := 0; column < c.width; column++ {
-			if cell := c.backdrop.CellAt(column, row); cell != nil {
+			if cell := c.backdrop.CellAt(column, row); cell != nil && cell.Width > 0 {
 				line.Set(column, cell)
-				line[column].Link = terminalModelHyperlink(cell.Link)
 			}
 		}
 		fmt.Fprintf(&restored, "\x1b[%d;1H\x1b[2K%s\x1b[0m", row+1, line.Render())
@@ -1676,6 +1691,7 @@ func (c *terminalCompositor) startCommandExecution() {
 func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
 	if c.viewportCommand && c.viewport != nil {
 		if len(c.viewportControlTail) > 0 {
+			c.captureExecutionOutput(c.viewportControlTail)
 			c.writeCompletedViewportOutput(c.viewportControlTail)
 			c.viewportControlTail = nil
 		}
@@ -1919,8 +1935,6 @@ func (c *terminalCompositor) renderPinned() {
 				normalized := *cell
 				if normalized.Link.URL == terminalModelWrittenSpaceLink {
 					normalized.Link = uv.Link{}
-				} else {
-					normalized.Link = terminalModelHyperlink(normalized.Link)
 				}
 				normalized.Content = norm.NFC.String(normalized.Content)
 				if padded && surfaceColor != nil {
@@ -2212,7 +2226,6 @@ func (c *terminalCompositor) inputBoxContentWithSurface(content, surface string)
 func (c *terminalCompositor) inputBoxContentWithSurfaceWidth(content, surface string, width int) string {
 	width = clamp(width, 2*terminalInputHorizontalPadding, c.width)
 	inner := width - 2*terminalInputHorizontalPadding
-	content = norm.NFC.String(content)
 	if ansi.StringWidth(content) > inner {
 		content = ansi.Cut(content, 0, inner)
 	}
@@ -2228,7 +2241,6 @@ func (c *terminalCompositor) inputBoxContentWithSurfaceWidth(content, surface st
 
 func (c *terminalCompositor) inputBoxSparseContentWithSurface(content, surface string) string {
 	inner := c.width - 2*terminalInputHorizontalPadding
-	content = norm.NFC.String(content)
 	if ansi.StringWidth(content) > inner {
 		content = ansi.Cut(content, 0, inner)
 	}
@@ -3186,7 +3198,9 @@ func (c *terminalCompositor) writeModel(data []byte) {
 	c.modelUTF8Tail = trailingIncompleteUTF8(analysis)
 	complete := analysis[:len(analysis)-len(c.modelUTF8Tail)]
 	attachment := c.attachLeadingZeroWidthRun(complete)
-	modelData := norm.NFC.Bytes(complete)
+	// Normalize rendered text cells, not the raw terminal stream: OSC payloads
+	// such as hyperlink targets and parameters must remain byte-exact.
+	modelData := complete
 	if c.phase == terminalOutput {
 		_, _ = c.emulator.Write(modelData)
 	} else {
@@ -3566,13 +3580,6 @@ func isViewportLineEraseCSI(params []byte, final byte) bool {
 	}
 	value, err := strconv.Atoi(string(params))
 	return err == nil && value <= 2
-}
-
-// The pinned x/vt version stores OSC 8 URI and parameters in reversed fields.
-// Normalize only model-owned links when copying cells into render-owned lines;
-// do not mutate the model or swap already-normalized snapshot cells again.
-func terminalModelHyperlink(link uv.Link) uv.Link {
-	return uv.Link{URL: link.Params, Params: link.URL}
 }
 
 func (c *terminalCompositor) cellAtAbsolute(x, absoluteY, scrollback int) *uv.Cell {
