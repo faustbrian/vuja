@@ -9,37 +9,70 @@ here.
 ## Hard Block: Never Build Vuja Or Disrupt Live Sessions
 
 Codex and every agent, subagent, automation, tool, and subprocess acting on its
-behalf MUST NOT build or install Vuja, start a managed Vuja shell or watchdog,
-reload or replace a live Vuja process, or otherwise interfere with an active
-session. It also MUST NOT run a test that can crash, signal, replace, reload,
-or otherwise interfere with a live Vuja session. This prohibition applies even
-when those actions would normally be part of implementation, debugging,
+behalf MUST NOT build or install Vuja, start a watchdog, reload or replace an
+existing Vuja process, or otherwise interfere with an existing session. A
+managed shell MAY be started only under Isolated Installed-Binary Verification
+below. Agents MUST NOT run a test that can crash, signal, replace, reload,
+or otherwise interfere with an existing Vuja session. This prohibition applies
+even when those actions would normally be part of implementation, debugging,
 testing, verification, review, installation, or completion. Read-only operations
 using an already installed Vuja binary are allowed under the rules below.
 
 The following actions are explicitly forbidden:
 
-- executing Vuja without a verified read-only subcommand, entering its managed
-  shell or watchdog, or executing a newly compiled Vuja binary;
+- executing Vuja outside a verified read-only subcommand or the isolated
+  installed-binary verification rules, starting a watchdog, or executing a
+  newly compiled Vuja binary;
 - building or installing the Vuja executable, including with `go build`,
   `go install`, release tooling, or a wrapper such as `just build` or
   `just install`;
 - running broad commands such as `go test ./...` or `just test` when their
   selected packages include a test that builds or starts Vuja;
 - running `tests/e2e` or any other test, benchmark, analyzer, or script that
-  builds, launches a managed Vuja session, reloads, installs, signals, or
-  otherwise interferes with live Vuja;
+  builds, reloads, installs, signals an existing session, or otherwise
+  interferes with existing Vuja; managed test sessions MUST satisfy the
+  isolated installed-binary verification rules;
 - sourcing generated Vuja shell integration or starting a shell, terminal,
-  PTY, tmux session, or subprocess in a way that can auto-start Vuja;
-- sending signals to `VUJA_PID` or another Vuja process;
+  PTY, tmux session, or subprocess in a way that can auto-start Vuja outside
+  the isolated installed-binary verification rules;
+- sending signals to an inherited `VUJA_PID` or any process not created and
+  verified as owned by the current isolated test;
 - invoking another agent, tool, IDE task, CI command, or wrapper to perform an
   action forbidden above.
 
 This is a hard safety boundary, not a preference. Brian MUST perform Vuja
-builds, installations, reloads, end-to-end tests, and interactive terminal
-acceptance himself. Agents MAY perform read-only runtime inspection and verified
-read-only CLI checks without asking Brian to run them. The repository policy
-itself must be deliberately changed before Codex may run any forbidden command.
+builds, installations and reloads himself. Agents MAY perform read-only runtime
+inspection, verified read-only CLI checks and isolated installed-binary
+verification without asking Brian to run them. The repository policy itself
+must be deliberately changed before Codex may run any other forbidden command.
+
+## Isolated Installed-Binary Verification
+
+Agents MAY exercise the already installed Vuja binary in a task-owned PTY,
+including its generated shell integration, without rebuilding or installing it.
+This permission MUST NOT be used to control an existing terminal or session.
+
+- All writes MUST remain in disposable task-owned storage. Set private `HOME`,
+  `ZDOTDIR`, `TMPDIR` and XDG config/data/cache/runtime directories; use a
+  disposable working directory and minimal fixture shell configuration.
+  Do not source the user's dotfiles or use their history or credentials.
+- Clear inherited `VUJA_*`, shell-startup overrides, Codex home, terminal pane
+  identities and tmux variables. Then set `VUJA_IS_CHILD=true` only for the
+  task-owned process so it cannot start the watchdog. Any fixture pane identity
+  MUST be newly generated, never copied from a real pane.
+- Disable update checks, external history integrations and network-dependent
+  providers in the fixture configuration. Do not run setup, installation,
+  update or reload commands. An installed binary MUST NOT be replaced.
+- Keystrokes, resizing, normal exit and intentional interruption MAY target
+  only the captured, verified task-owned PTY and processes. Prefer normal exit;
+  cleanup signals MUST NOT use inherited PIDs, broad process-name matching or
+  unrelated process groups.
+- Close and reap owned processes before removing their disposable storage,
+  including on failure. Capture bounded fixture-only evidence and remove all
+  temporary artifacts and caches when no longer needed.
+- PTY evidence MUST remain distinct from actual iTerm2/Ghostty mouse selection,
+  clipboard, window restoration and multi-day-use evidence. Do not claim those
+  platform behaviors from a PTY test alone.
 
 ## Allowed Agent Actions
 
@@ -55,29 +88,31 @@ Agents MAY:
   or watchdog, build/install/reload Vuja, signal a session, modify history or
   configuration, replay recovery records, or start background workers. A
   read-like command name or preview flag alone does not establish this;
+- run isolated installed-binary verification under the section above;
 - create or edit files with `apply_patch`;
 - run `gofmt` on explicitly named Go files because it formats source without
   compiling or executing project code;
 - run package-scoped Go tests, race tests, benchmarks, linters, analyzers, and
   other repository checks after inspecting their helpers and transitive setup
-  to establish that they do not build, start, signal, reload, or exercise Vuja;
+  to establish that they do not build or interfere with existing Vuja sessions;
+  tests exercising installed Vuja MUST satisfy the isolated verification rules;
 - run repository tooling that does not build Vuja or interfere with live
   sessions;
 - run static text checks such as `git diff --check` that do not invoke hooks or
   project executables.
 
-Before running an allowed test or tool, agents MUST remove `VUJA_PID`,
+Before running an allowed test or tool, agents MUST remove inherited `VUJA_PID`,
 `VUJA_FD`, `VUJA_HISTORY_ACK_FD`, `VUJA_IS_CHILD`, and
 `VUJA_MANAGED_PROMPT` from its subprocess environment. Every allowed Go test,
 race test, benchmark, or analyzer MUST use a task-owned disposable `GOCACHE`
 that is removed after the command, including on failure.
 
-If inspection cannot establish that a Vuja invocation is read-only, or that
-another test/tool is isolated from live-session interference, the agent MUST
-treat it as forbidden. Isolated tests MAY write task-owned disposable fixtures.
-Agents MUST perform available read-only checks themselves and stop only at a
-forbidden build or interactive/runtime-mutation boundary, give Brian the exact
-remaining command, and report that boundary as not run.
+If inspection cannot establish that a Vuja invocation is read-only or satisfies
+the isolated verification rules, or that another test/tool is isolated from
+existing-session interference, the agent MUST treat it as forbidden. Isolated
+tests MAY write task-owned disposable fixtures. Agents MUST perform available
+safe verification themselves. A genuinely forbidden boundary MUST be reported
+as not run rather than represented as a passing result.
 
 [RFC2119]: https://www.rfc-editor.org/rfc/rfc2119
 [RFC8174]: https://www.rfc-editor.org/rfc/rfc8174
