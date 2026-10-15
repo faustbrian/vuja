@@ -29,7 +29,7 @@ shared acceptance report.
 | Multiline paste | Paste the fixture below without pressing Enter, edit its middle line, then press Enter once. | Nothing executes during paste. All lines remain inside the growing chatbox with one consistent background. One Enter submits the pasted input. |
 | Running command | Run the quiet fixture below; resize and move the window while it sleeps. | Output, title and status stay visible. A smooth running indicator remains visible; completion replaces it with the outcome. |
 | Frozen reading | Generate the large fixture, browse upward, then generate more output. | The input remains fixed; incoming output does not move the reading anchor. Down/End/Esc returns to the latest output. |
-| Search/navigation | Search for `fixture-row-00100`; use next/previous match and previous/next execution navigation. | Match position is accurate, boundaries are deterministic, input is unchanged, and no command is submitted. |
+| Search/navigation | Immediately after the large fixture, search for `fixture-row-10000`; shorten the query to `fixture-row-` for next/previous matches. Also exercise previous/next execution navigation. | Match position is accurate, boundaries are deterministic, input is unchanged, and no command is submitted. |
 | Copy/export | Copy one selected fixture execution; export it and the retained pane. Narrow the window and repeat. | Plain text has no neighboring execution or unsafe controls. Retained text is preserved, or any loss is explicitly disclosed; no silent clipping. |
 | Async suggestions | Select a non-first suggestion while results refresh; press Enter. Test unselected typed input separately. | Selected command identity does not change during reordering. Enter runs only typed input or an explicitly selected command, never incidental ghost text. |
 | Empty-prompt history | Run distinct harmless commands and a repeated command, then open history with Up. | Most recent execution starts at the bottom. Repeated Up moves toward older executions in chronological order; duplicates remain distinct. |
@@ -55,6 +55,12 @@ Bounded output fixture, using the system's `awk`:
 ```sh
 awk 'BEGIN { for (i = 1; i <= 10000; i++) printf "fixture-row-%05d café 日本語\n", i }'
 ```
+
+The default `output-lines = 2000` does not retain all 10,000 fixture rows.
+An early row such as `fixture-row-00100` may correctly be absent. Search the
+newest row immediately, before later commands can evict it; with a smaller
+configured limit, use a row still retained in the pane. Genuine eviction must
+be disclosed as truncation, not mistaken for a search or resize failure.
 
 Output-tool key bindings and retention disclosures are documented in the
 README. Test both narrow and wide panes and both light and dark palettes. Also
