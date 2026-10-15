@@ -363,8 +363,11 @@ func TestRecoveryJournalRejectsPrivateCommandsBeforePersistence(t *testing.T) {
 		ID: "vuja:journal:private", Command: " ssh forge@private", NormalizedCommand: "ssh forge@private",
 		StartedAt: time.Now(), SubmittedAt: time.Now(), Source: "vuja", State: integration.HistoryStateRunning,
 	}
-	if err := appendHistoryRecoveryRecord(historyRecoverySubmission, entry); err == nil {
-		t.Fatal("expected leading-space command to be rejected before recovery persistence")
+	for _, raw := range []string{" ssh forge@private", "\n ssh forge@private", "\r\n\tssh forge@private"} {
+		entry.Command = raw
+		if err := appendHistoryRecoveryRecord(historyRecoverySubmission, entry); err == nil {
+			t.Fatal("expected leading-space command to be rejected before recovery persistence")
+		}
 	}
 	path, err := historyRecoveryJournalPath()
 	if err != nil {
@@ -417,7 +420,7 @@ func TestRecoveryJournalReplaysCompletionIntoTheSubmittedEvent(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
 	started := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
 	entry := integration.HistoryEntry{
-		ID: "vuja:journal:completion", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api",
+		ID: "vuja:journal:completion", Command: "\n\nssh forge@api  ", NormalizedCommand: "ssh forge@api",
 		Cwd: "/repo", SubmittedAt: started, StartedAt: started, Source: "vuja",
 		SessionID: "session-a", Shell: "zsh", State: integration.HistoryStateRunning,
 	}
@@ -441,11 +444,14 @@ func TestRecoveryJournalReplaysCompletionIntoTheSubmittedEvent(t *testing.T) {
 	if err := replayHistoryRecoveryJournal(store); err != nil {
 		t.Fatal(err)
 	}
+	if err := replayHistoryRecoveryJournal(store); err != nil {
+		t.Fatal(err)
+	}
 	events, err := store.QueryAllHistoryEvents(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].EventKey != entry.ID || events[0].State != integration.HistoryStateFailed ||
+	if len(events) != 1 || events[0].EventKey != entry.ID || events[0].Command != "\n\nssh forge@api  " || events[0].NormalizedCommand != "ssh forge@api" || events[0].State != integration.HistoryStateFailed ||
 		!events[0].HasExitCode || events[0].ExitCode != 130 || events[0].Duration != 5*time.Second {
 		t.Fatalf("expected journal completion to enrich one canonical event, got %+v", events)
 	}

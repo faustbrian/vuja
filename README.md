@@ -429,6 +429,9 @@ already passed Vuja's privacy policy and durable-write gate; it never flushes
 the shell's broader in-memory history. Missing, stale, locked, malformed, or
 removed external history never disables Vuja recall.
 
+Zsh imports decode continued multiline records before applying privacy filters.
+The record-size limit covers the whole encoded command, not each physical line.
+
 Use `vuja history import atuin` or `vuja history import shell` for a one-time
 import. `vuja history doctor`, `stats`, `sources`, and `explain` are
 non-interactive and do not start a managed shell. Bounded retention never
@@ -613,9 +616,9 @@ output checkpoints follow their separate settings, and shell history, Atuin,
 or other independently enabled tools may still record commands. Optional
 imports can subsequently read those external histories.
 
-Commands beginning with whitespace, commands excluded by the active shell's
-history-ignore policy, and commands matching Vuja's sensitive-data policy are
-rejected before persistence. They do not enter events, ranking aggregates,
+Commands with a leading-space privacy prefix, commands excluded by the active
+shell's history-ignore policy, and commands matching Vuja's sensitive-data policy
+are rejected before persistence. They do not enter events, ranking aggregates,
 transitions, feedback, debug logs, or external mirroring.
 
 Forgetting-command text is excluded conservatively too: after removing literal
@@ -1067,14 +1070,20 @@ file.
 
 ## Privacy
 
-Vuja treats a command beginning with whitespace as private and does not add it
-to session history, imported history, rich history, scoring, feedback, or
-command-transition predictions. This is deliberately enforced even when Zsh's
+Vuja treats a command beginning with whitespace other than empty CR/LF lines as
+private and does not add it to session history, imported history, rich history,
+scoring, feedback, or command-transition predictions. This is deliberately
+enforced even when Zsh's
 `HIST_IGNORE_SPACE` option is disabled. Zsh `HISTORY_IGNORE` glob matches are
 also excluded. Ignored commands break the transition chain so they cannot
 resurface as the predecessor of a later suggestion.
 
-The shell hook sends Vuja only the ignore decision, never the ignored command.
+Initial empty pasted lines alone do not disable recording. A space or tab after
+those empty lines still makes the command private. Accepted raw text is retained
+unchanged; only its ranking/search identity is normalized.
+
+The managed shell protocol carries accepted input privately for policy
+enforcement; excluded commands are never persisted.
 Vuja's configuration, state, history database and SQLite sidecars, debug logs,
 latency snapshots, and crash reports are stored with owner-only permissions.
 Existing files are repaired when opened.

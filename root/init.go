@@ -218,7 +218,9 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
       builtin printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
     fi
     local _vuja_history_marker="VUJA_CMD_START"
-    if [[ $1 == [[:space:]]* ]] || [[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]] || (( ${_vuja_history_policy_status:-0} != 0 )); then
+    # The shared admission gate handles leading-space privacy, distinguishing
+    # genuinely private prefixes from empty lines in a multiline paste.
+    if [[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]] || (( ${_vuja_history_policy_status:-0} != 0 )); then
       _vuja_history_marker="VUJA_CMD_START:IGNORE"
     fi
     # preexec's first argument is the full typed command, unlike LBUFFER or
@@ -488,7 +490,7 @@ if set -q VUJA_PID; and set -q VUJA_FD
         if functions -q _vuja_original_fish_should_add_to_history
             _vuja_original_fish_should_add_to_history $argv
             set _vuja_policy_status $status
-        else if string match -qr '^[[:space:]]' -- "$argv[1]"
+        else if string match -qr '^[\r\n]*[^\S\r\n]' -- "$argv[1]"
             set _vuja_policy_status 1
         end
         set -g _vuja_history_policy_status $_vuja_policy_status
@@ -629,7 +631,7 @@ if set -q VUJA_PID; and set -q VUJA_FD
             printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
         end
 	        set -l _vuja_history_marker VUJA_CMD_START
-	        if string match -qr '^[[:space:]]' -- "$argv[1]"; or set -q fish_private_mode; or test "$_vuja_history_policy_status" -ne 0
+	        if string match -qr '^[\r\n]*[^\S\r\n]' -- "$argv[1]"; or set -q fish_private_mode; or test "$_vuja_history_policy_status" -ne 0
 	            set _vuja_history_marker VUJA_CMD_START:IGNORE
 	        end
 	        printf '%%s\0' "$_vuja_history_marker" >&$VUJA_FD 2>/dev/null

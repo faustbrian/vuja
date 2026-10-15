@@ -120,7 +120,6 @@ func assertOrderedMarkers(t *testing.T, output, marker string) {
 func TestZshInitReportsHistoryIgnoreWithFramedAcceptedCommand(t *testing.T) {
 	script := shellInitScript("zsh", "/unused/vuja")
 	for _, expected := range []string{
-		`[[ $1 == [[:space:]]* ]]`,
 		`[[ -n ${HISTORY_IGNORE-} && $1 == ${~HISTORY_IGNORE} ]]`,
 		`VUJA_CMD_START:IGNORE`,
 		`local _vuja_accepted_command=${1//\\/\\\\}`,

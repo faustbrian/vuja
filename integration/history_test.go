@@ -1,10 +1,12 @@
 package integration
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,6 +100,70 @@ func TestShellHistoryImportRejectsLeadingWhitespaceBeforeNormalization(t *testin
 	}
 	if len(entries) != 1 || entries[0].Command != "visible command" {
 		t.Fatalf("expected only recordable history, got %+v", entries)
+	}
+}
+
+func TestShellHistoryImportKeepsCommandsAfterLeadingEmptyLines(t *testing.T) {
+	for _, test := range []struct{ name, encoded, want string }{
+		{"extended", ": 1720000000:0;\\\n\\\nprintf 'café 日本語'\\\nprintf second  \n", "printf 'café 日本語'\nprintf second"},
+		{"plain", "\\\n\\\nprintf first\\\nprintf second\n", "printf first\nprintf second"},
+		{"semicolon", "printf 'first;second'\\\nprintf third\n", "printf 'first;second'\nprintf third"},
+		{"colon builtin", ": note; printf first\\\nprintf second\n", ": note; printf first\nprintf second"},
+		{"native escaped colon", "\\: 123:0; printf first\\\nprintf second\n", ": 123:0; printf first\nprintf second"},
+		{"native escaped ordinary colon", "\\: note; printf ordinary\n", ": note; printf ordinary"},
+		{"native short colon", "\\:foo\n", ":foo"},
+		{"literal initial backslash", "\\printf raw\n", "\\printf raw"},
+		{"extended escaped payload", ": 1720000000:0;\\: literal\n", "\\: literal"},
+		{"literal backslash before newline", "printf slash\\\\\nprintf next\n", "printf slash\\\nprintf next"},
+		{"literal trailing backslash", "printf slash\\ \n", "printf slash\\"},
+		{"unterminated final record", "printf final\\", "printf final\\"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "history")
+			// Zsh escapes every logical LF with one additional backslash,
+			// even after another backslash. These are native-format literals.
+			encoded := test.encoded + "\n: 1720000001:0;\\\n printf private\n" +
+				": 1720000002:0;curl --token private\\\nprintf harmless-tail\n" +
+				": token=private; printf secret-tail\\\nprintf another-tail\n"
+			if test.name == "unterminated final record" {
+				encoded = test.encoded
+			}
+			if err := os.WriteFile(path, []byte(encoded), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			entries, err := loadShellHistory(file, "zsh")
+			if err != nil || len(entries) != 1 || entries[0].Command != test.want {
+				t.Fatalf("shell import lost eligible multiline input or exposed private input: %+v, %v", entries, err)
+			}
+			if strings.HasPrefix(test.name, "extended") && entries[0].Timestamp.Unix() != 1720000000 {
+				t.Fatal("multiline record lost its native timestamp")
+			}
+			if strings.HasPrefix(test.name, "native") && !entries[0].Timestamp.IsZero() {
+				t.Fatal("nonextended command was mistaken for a timestamp header")
+			}
+		})
+	}
+}
+
+func TestShellHistoryImportBoundsEntireZshLogicalRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history")
+	encoded := strings.Repeat("x\\\n", externalHistoryRecordLimit/3+1) + "printf tail\nprintf later\n"
+	if err := os.WriteFile(path, []byte(encoded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	entries, err := loadShellHistory(file, "zsh")
+	if err != bufio.ErrTooLong || len(entries) != 0 {
+		t.Fatalf("oversized logical record escaped the scanner bound or admitted fragments: count=%d err=%v", len(entries), err)
 	}
 }
 
@@ -232,7 +298,7 @@ CREATE TABLE history (
 INSERT INTO history (id, command, timestamp, duration, exit, cwd, hostname, session)
 VALUES ('event-1', 'go test ./...', 1720000000000000000, 250000000, 0, '/repo/service', 'devbox', 'shell-1');
 INSERT INTO history (id, command, timestamp, duration, exit, cwd, hostname, session)
-VALUES ('event-2', 'printf first' || char(10) || 'printf second', 1720000001000000000, 1000000, 0, '/repo/service', 'devbox', 'shell-1');
+VALUES ('event-2', char(10) || char(10) || 'printf first' || char(10) || 'printf second', 1720000001000000000, 1000000, 0, '/repo/service', 'devbox', 'shell-1');
 `)
 	if err != nil {
 		t.Fatal(err)

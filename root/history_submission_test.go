@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/faustbrian/vuja/integration"
 	"github.com/faustbrian/vuja/internal/scoring"
 )
 
@@ -116,6 +117,8 @@ func TestHistorySubmissionAcceptedPayloadKeepsPrivacyAndPauseAdmission(t *testin
 }
 
 func TestHistorySubmissionAcceptedMultilineSurvivesReopenAndExactForgetPreview(t *testing.T) {
+	original := integration.RichHistorySnapshot()
+	t.Cleanup(func() { integration.PublishCanonicalHistory(original) })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "history.db")
@@ -124,7 +127,7 @@ func TestHistorySubmissionAcceptedMultilineSurvivesReopenAndExactForgetPreview(t
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	const accepted = "printf 'café 日本語'\nprintf 'VUJA_CMD_START\\n'  "
+	const accepted = "\n\nprintf 'café 日本語'\nprintf 'VUJA_CMD_START\\n'  "
 	sequence := bracketedPasteSequence(accepted)
 	var filter terminalInputFilter
 	var pasted bytes.Buffer
@@ -197,6 +200,18 @@ func TestHistorySubmissionAcceptedMultilineSurvivesReopenAndExactForgetPreview(t
 	after, err := store.QueryAllHistoryEvents(t.Context())
 	if err != nil || len(after) != len(before) {
 		t.Fatal("preview mutated history")
+	}
+	if _, err := publishCanonicalStoreHistory(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, recalled := range integration.RichHistorySnapshot() {
+		if recalled.ID == entry.ID {
+			found = recalled.Command == accepted && recalled.State == "completed"
+		}
+	}
+	if !found {
+		t.Fatal("reopened canonical publication lost exact multiline execution")
 	}
 }
 

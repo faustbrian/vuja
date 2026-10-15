@@ -141,7 +141,7 @@ func TestHistoryArchivePortableOrderMatchesNativeAllocation(t *testing.T) {
 
 func TestHistoryArchiveRejectsConflictsAndUnsafeInputAtomically(t *testing.T) {
 	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	for _, kind := range []string{"existing ID", "duplicate ID", "private command", "ignored command", "private normalized command", "unsafe directory", "invalid state", "negative duration", "native Atuin negative duration", "invalid Atuin negative duration", "missing ID", "missing submission order", "existing submission order", "duplicate submission order"} {
+	for _, kind := range []string{"existing ID", "duplicate ID", "private command", "ignored command", "private after empty lines", "private normalized command", "unsafe directory", "invalid state", "negative duration", "native Atuin negative duration", "invalid Atuin negative duration", "missing ID", "missing submission order", "existing submission order", "duplicate submission order"} {
 		t.Run(kind, func(t *testing.T) {
 			store, err := NewFrecencyStore(filepath.Join(t.TempDir(), "history.db"))
 			if err != nil {
@@ -166,6 +166,8 @@ func TestHistoryArchiveRejectsConflictsAndUnsafeInputAtomically(t *testing.T) {
 				bad.Command = "curl --token private-fixture https://example.test"
 			case "ignored command":
 				bad.Command = " pwd"
+			case "private after empty lines":
+				bad.Command = "\n \npwd"
 			case "private normalized command":
 				bad.NormalizedCommand = "curl --token private-fixture https://example.test"
 			case "unsafe directory":

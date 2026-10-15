@@ -135,7 +135,7 @@ func runHistoryArchiveFixture(t *testing.T, args ...string) (string, error) {
 func TestHistoryArchiveCommandsRoundTripNativeExternalAndUnfinished(t *testing.T) {
 	store := historyArchiveFixture(t)
 	at := time.Date(2026, 10, 1, 12, 0, 0, 123, time.UTC)
-	native := scoring.HistoryEvent{EventKey: "vuja:unfinished", Command: "git status", NormalizedCommand: "git status", Cwd: "/repo",
+	native := scoring.HistoryEvent{EventKey: "vuja:unfinished", Command: "\n\nprintf 'café 日本語'  ", NormalizedCommand: "printf 'café 日本語'", Cwd: "/repo",
 		SubmittedAt: at, StartedAt: at, Source: "vuja", Host: "host-one", SessionID: "archive-fixture", Shell: "zsh", Occurrences: 1}
 	if err := store.RecordHistorySubmission(t.Context(), native); err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestHistoryArchiveCommandsRoundTripNativeExternalAndUnfinished(t *testing.T
 	for _, event := range events {
 		switch event.EventKey {
 		case native.EventKey:
-			if event.State != "interrupted" || event.HasExitCode || event.Imported || event.Host != native.Host || !event.StartedAt.Equal(at) {
+			if event.Command != native.Command || event.NormalizedCommand != native.NormalizedCommand || event.State != "interrupted" || event.HasExitCode || event.Imported || event.Host != native.Host || !event.StartedAt.Equal(at) {
 				t.Fatalf("unfinished archive fabricated a completion or changed provenance: %+v", event)
 			}
 		case external.EventKey:

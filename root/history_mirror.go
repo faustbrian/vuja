@@ -54,6 +54,11 @@ func recordableNativeHistoryRecord(command, shellName string, submittedAt time.T
 func nativeHistoryRecord(command, shellName string, submittedAt time.Time) string {
 	switch shellName {
 	case "zsh":
+		// Native Zsh pads a literal final backslash so the record's newline
+		// cannot be mistaken for an escaped newline joining the next command.
+		if strings.HasSuffix(command, "\\") {
+			command += " "
+		}
 		command = strings.ReplaceAll(command, "\n", "\\\n")
 		return fmt.Sprintf(": %d:0;%s\n", submittedAt.Unix(), command)
 	case "fish":

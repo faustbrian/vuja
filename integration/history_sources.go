@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -104,6 +105,11 @@ func loadShellHistoryContextLimit(ctx context.Context, file *os.File, shellName 
 	occurrences := newBoundedHistoryBuffer(limit, externalHistoryMemoryLimit)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), externalHistoryRecordLimit)
+	if shellName == "zsh" {
+		// Limit the entire encoded logical record, not its individual physical
+		// lines. Otherwise a private/oversized record could leak its tail.
+		scanner.Split(scanZshHistoryRecord)
+	}
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -112,7 +118,7 @@ func loadShellHistoryContextLimit(ctx context.Context, file *os.File, shellName 
 		var occurrence historyOccurrence
 		switch shellName {
 		case "zsh":
-			occurrence = parseZshHistoryLine(line)
+			occurrence = parseZshHistoryLine(strings.ReplaceAll(line, "\\\n", "\n"))
 		case "fish":
 			command, ok := strings.CutPrefix(line, "- cmd: ")
 			if !ok {
@@ -137,25 +143,56 @@ func loadShellHistoryContextLimit(ctx context.Context, file *os.File, shellName 
 	return occurrences.Entries(), nil
 }
 
+// Zsh inserts one backslash before each logical newline, including when the
+// preceding character is itself a backslash. A literal final backslash is
+// followed by a padding space in native history, so it is not a continuation.
+func scanZshHistoryRecord(data []byte, atEOF bool) (int, []byte, error) {
+	for offset := 0; offset < len(data); {
+		index := bytes.IndexByte(data[offset:], '\n')
+		if index < 0 {
+			break
+		}
+		index += offset
+		if index == 0 || data[index-1] != '\\' {
+			return index + 1, data[:index], nil
+		}
+		offset = index + 1
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 func parseZshHistoryLine(line string) historyOccurrence {
 	occurrence := historyOccurrence{Command: line, Source: "zsh"}
+	if strings.HasPrefix(line, "\\:") {
+		// Nonextended Zsh protects an initial colon from header detection.
+		// Do not apply this to the payload of an extended-history record.
+		occurrence.Command = line[1:]
+		return occurrence
+	}
+	if !strings.HasPrefix(line, ": ") {
+		return occurrence
+	}
 	header, command, ok := strings.Cut(line, ";")
 	if !ok {
 		return occurrence
 	}
-	occurrence.Command = command
 	header = strings.TrimSpace(strings.TrimPrefix(header, ":"))
 	parts := strings.SplitN(header, ":", 2)
-	if len(parts) > 0 {
-		if seconds, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64); err == nil {
-			occurrence.Timestamp = time.Unix(seconds, 0)
-		}
+	if len(parts) != 2 {
+		return occurrence
 	}
-	if len(parts) == 2 {
-		if seconds, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil {
-			occurrence.Duration = time.Duration(seconds * float64(time.Second))
-		}
+	seconds, timestampErr := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	durationSeconds, durationErr := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if timestampErr != nil || durationErr != nil {
+		// A normal command invoking ':' is not an extended-history header.
+		return occurrence
 	}
+	occurrence.Command = command
+	occurrence.Timestamp = time.Unix(seconds, 0)
+	occurrence.Duration = time.Duration(durationSeconds * float64(time.Second))
 	return occurrence
 }
 

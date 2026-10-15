@@ -140,6 +140,7 @@ func TestCanonicalHistoryRejectsSensitiveAndLeadingSpaceEntriesAtPublicationBoun
 	PublishCanonicalHistory([]HistoryEntry{
 		{ID: "safe", Command: "ssh forge@api", NormalizedCommand: "ssh forge@api", Source: "vuja"},
 		{ID: "leading", Command: " ssh forge@private", NormalizedCommand: "ssh forge@private", Source: "vuja"},
+		{ID: "leading-after-empty", Command: "\n ssh forge@private", NormalizedCommand: "ssh forge@private", Source: "vuja"},
 		{ID: "sensitive-exact", Command: "curl --token private-value https://example.test", NormalizedCommand: "echo safe", Source: "vuja"},
 		{ID: "sensitive-normalized", Command: "echo safe", NormalizedCommand: "curl --token private-value https://example.test", Source: "vuja"},
 	})

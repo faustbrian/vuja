@@ -18,7 +18,9 @@ func HistoryCommand(raw string, shellIgnored bool) (string, bool) {
 	if raw == "" || shellIgnored {
 		return "", false
 	}
-	first, _ := utf8.DecodeRuneInString(raw)
+	// Empty pasted lines are not a privacy prefix. Inspect the first non-CR/LF
+	// rune without discarding actual space/tab prefixes or changing stored text.
+	first, _ := utf8.DecodeRuneInString(strings.TrimLeft(raw, "\r\n"))
 	if unicode.IsSpace(first) {
 		return "", false
 	}
