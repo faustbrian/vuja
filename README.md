@@ -849,8 +849,29 @@ collapse title metadata; the account survives before directory and versions.
 Its color follows `ui.chatbox.colors.session`. Config preview uses a fictional
 account and never reads credentials.
 
+Claude Code's cached account email appears beside Codex by default, also in
+existing custom layouts. Set `[ui.chatbox]` `claude-account = false` to hide
+it and stop its metadata reads independently of Codex. It reads only
+`oauthAccount.emailAddress` from `~/.claude.json`, or
+`$CLAUDE_CONFIG_DIR/.claude.json` when that directory is selected. As in
+Claude Code 2.1.292, an existing `<Claude config directory>/.config.json`
+legacy file takes precedence. An unavailable or malformed selected source
+does not fall back to another account.
+
+This is saved display metadata, not proof of a current login or which
+credential a particular Claude process is using. Vuja never launches Claude,
+calls its API, reads its credential store, or prompts for Keychain access.
+Missing, unsafe or oversized (over 1 MiB) metadata hides the element.
+It shares Codex's refresh interval, session color, snapshot behavior and
+native-application screen ownership. Both labels share layout priority;
+when space is insufficient the normal title collapse rules apply.
+Preview shows fictional identities only.
+See [Claude Code's configuration documentation](https://code.claude.com/docs/en/settings)
+for its local account metadata file.
+
 Each row has independent left, center, and right regions. Empty all three
-arrays for a row to hide it (also disable `codex-account` for the title).
+arrays for a row to hide it (also disable `codex-account` and `claude-account`
+for the title).
 The finite built-in segments are `directory`,
 `package`, `versions`, `session`, `git-branch`, `git-status`, `git-added`,
 `git-deleted`, `git-stash`, `git-lines`, `environment`, `version-mismatch`,

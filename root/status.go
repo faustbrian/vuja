@@ -43,6 +43,7 @@ type statusSnapshot struct {
 	Directory         string
 	CommandContext    string
 	CodexAccount      string
+	ClaudeAccount     string
 	RepositoryRoot    string
 	DirectoryReadOnly bool
 	Git               gitStatusSnapshot
@@ -72,6 +73,7 @@ type statusEngineOptions struct {
 	Sample           func() (float64, float64)
 	Metrics          bool
 	CodexAccount     bool
+	ClaudeAccount    bool
 	MetricHysteresis float64
 	GitLines         bool
 	Session          bool
@@ -120,6 +122,9 @@ type statusEngine struct {
 	desired          string
 	commandTimer     *time.Timer
 	revision         uint64
+
+	claudeAccountFile       string
+	claudeAccountLegacyFile string
 }
 
 const (
@@ -194,6 +199,9 @@ func newStatusEngine(options statusEngineOptions) *statusEngine {
 	if options.CodexAccount {
 		engine.codexAccountHome = codexAccountHome()
 	}
+	if options.ClaudeAccount {
+		engine.claudeAccountFile, engine.claudeAccountLegacyFile = claudeAccountFiles()
+	}
 	return engine
 }
 
@@ -210,13 +218,14 @@ func (e *statusEngine) Close() {
 }
 
 func (e *statusEngine) StartMetrics(interval time.Duration) {
-	if interval <= 0 || (!e.metrics && e.codexAccountHome == "") {
+	if interval <= 0 || (!e.metrics && e.codexAccountHome == "" && e.claudeAccountFile == "") {
 		return
 	}
 	e.metricWG.Add(1)
 	go func() {
 		defer e.metricWG.Done()
 		e.refreshCodexAccount()
+		e.refreshClaudeAccount()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -225,6 +234,7 @@ func (e *statusEngine) StartMetrics(interval time.Duration) {
 				return
 			case <-ticker.C:
 				e.refreshCodexAccount()
+				e.refreshClaudeAccount()
 				if e.metrics {
 					e.refreshMetrics()
 				}
@@ -550,6 +560,7 @@ func (e *statusEngine) commitSnapshot(directory string, next statusSnapshot) boo
 	next.ExitCode = e.snapshot.ExitCode
 	next.Duration = e.snapshot.Duration
 	next.CodexAccount = e.snapshot.CodexAccount
+	next.ClaudeAccount = e.snapshot.ClaudeAccount
 	e.revision++
 	next.Revision = e.revision
 	e.snapshot = next

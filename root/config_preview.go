@@ -75,7 +75,8 @@ func renderConfigScenario(cfg *config.Config, label string, width, height int, m
 	exit := 0
 	snapshot := statusSnapshot{
 		Directory: "~/Developer/vuja", RepositoryRoot: "~/Developer/vuja", CodexAccount: "person@example.test",
-		Git: gitStatusSnapshot{Branch: "main", Resolved: true}, Versions: map[string]string{"go": "1.26.0"},
+		ClaudeAccount: "claude@example.test",
+		Git:           gitStatusSnapshot{Branch: "main", Resolved: true}, Versions: map[string]string{"go": "1.26.0"},
 		Environment: []string{"mise"}, CPU: 42, Memory: 58, HasCPU: true, HasMemory: true,
 		ExitCode: &exit, Duration: 84 * time.Millisecond,
 	}

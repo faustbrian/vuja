@@ -394,6 +394,7 @@ func runWrapper() {
 		OnUpdate:         display.SetStatusSnapshot,
 		MetricHysteresis: config.Get().UI.Chatbox.MetricHysteresis,
 		CodexAccount:     managedStatus && config.Get().UI.Chatbox.CodexAccount,
+		ClaudeAccount:    managedStatus && config.Get().UI.Chatbox.ClaudeAccount,
 		Metrics: managedStatus && config.Get().UI.Chatbox.Metrics != "never" &&
 			(slices.Contains(statusSegments, "cpu") || slices.Contains(statusSegments, "memory")),
 		GitLines:    managedStatus && slices.Contains(statusSegments, "git-lines"),
@@ -2108,6 +2109,9 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 	if chatbox.CodexAccount {
 		titleRight = append(titleRight, "codex-account")
 	}
+	if chatbox.ClaudeAccount {
+		titleRight = append(titleRight, "claude-account")
+	}
 	return terminalChatboxConfig{
 		Prompt:                   chatbox.Prompt,
 		Separator:                chatbox.Separator,
@@ -2165,7 +2169,7 @@ func terminalChatboxColors(colors config.ChatboxColorsConfig) map[string]string 
 		"git-behind": colors.GitBehind, "git-added": colors.GitAdded,
 		"git-deleted": colors.GitDeleted, "git-stash": colors.GitStash,
 		"git-lines-added": colors.GitLinesAdded, "git-lines-deleted": colors.GitLinesDeleted,
-		"session": colors.Session, "codex-account": colors.Session, "session-warning": colors.SessionWarning,
+		"session": colors.Session, "codex-account": colors.Session, "claude-account": colors.Session, "session-warning": colors.SessionWarning,
 		"session-critical": colors.SessionCritical, "contexts": colors.Contexts,
 		"environment": colors.Environment, "version-mismatch": colors.VersionMismatch,
 		"package": colors.Package, "stale": colors.Stale, "jobs": colors.Jobs,

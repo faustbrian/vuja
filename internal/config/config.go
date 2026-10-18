@@ -75,6 +75,7 @@ type ChatboxConfig struct {
 	PathMaxSegments          int                 `toml:"path-max-segments"`
 	HistorySpacing           int                 `toml:"history-spacing"`
 	CodexAccount             bool                `toml:"codex-account"`
+	ClaudeAccount            bool                `toml:"claude-account"`
 	Status                   []string            `toml:"status,omitempty"` // Legacy single-row layout.
 	TitleLeft                []string            `toml:"title-left"`
 	TitleCenter              []string            `toml:"title-center"`

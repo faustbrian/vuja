@@ -66,13 +66,13 @@ func readCodexAccount(home string) string {
 	var claims struct {
 		Email string `json:"email"`
 	}
-	if json.Unmarshal(payload, &claims) != nil || !safeCodexAccount(claims.Email) {
+	if json.Unmarshal(payload, &claims) != nil || !safeAccountLabel(claims.Email) {
 		return ""
 	}
 	return claims.Email
 }
 
-func safeCodexAccount(value string) bool {
+func safeAccountLabel(value string) bool {
 	if value == "" || len(value) > 256 || !utf8.ValidString(value) {
 		return false
 	}
