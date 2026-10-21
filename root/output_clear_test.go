@@ -38,7 +38,7 @@ func clearOutputFixtureWidth(t *testing.T, mode string, width int) (*terminalCom
 }
 
 func TestOutputClearCommandDoesNotResurrectOnPromptOrResize(t *testing.T) {
-	for _, mode := range []string{"output", "snapshot"} {
+	for _, mode := range []string{"output", "snapshot", "blocks"} {
 		for _, controls := range []string{"\x1b[H\x1b[2J", "\x1b[H\x1b[2J\x1b[3J", "\x1b[3J\x1b[H\x1b[2J", "\x1b[1;1H\x1b[2J\x1b[3J"} {
 			for split := 0; split <= len(controls); split++ {
 				t.Run(fmt.Sprintf("%s/%q/%d", mode, controls, split), func(t *testing.T) {
@@ -173,7 +173,7 @@ func TestOutputClearZshIntentExcludesFunctionsAliasesAndCompoundCommands(t *test
 		{"native", "", "codex", "codex", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			want := terminalMarkerBytes("clear", "command-start")
+			want := append(terminalMarkerBytes("clear", "command-private"), terminalMarkerBytes("clear", "command-start")...)
 			if test.clear {
 				want = append(want, terminalMarkerBytes("clear", "command-clear")...)
 			}

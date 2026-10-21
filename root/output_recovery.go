@@ -567,10 +567,14 @@ func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded 
 	return superseded, err
 }
 
-// Disk rows contain only text, SGR and credential-free observed Codex links.
+// Disk rows contain only text, SGR, non-action divider metadata and
+// credential-free observed Codex links.
 // Never replay cursor controls, notifications, OSC52 clipboard writes or old
 // process capabilities. Rebinding also works across a UUID's wrapped rows.
 func recoveryRow(row string, linkFor func(string) string, restore bool) string {
+	if isOutputBlockDivider(row) {
+		return outputBlockDividerRow
+	}
 	var out strings.Builder
 	for i := 0; i < len(row); {
 		if row[i] != '\x1b' {

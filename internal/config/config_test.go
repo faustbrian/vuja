@@ -46,8 +46,8 @@ func TestDefaultConfigAndState(t *testing.T) {
 	if cfg.UI.Chatbox.Prompt != "› " || cfg.UI.Chatbox.Separator != " · " {
 		t.Fatalf("unexpected default chatbox prompt: %+v", cfg.UI.Chatbox)
 	}
-	if cfg.UI.Chatbox.Scrollback != "output" {
-		t.Fatalf("expected completed commands to default to output-only scrollback, got %q", cfg.UI.Chatbox.Scrollback)
+	if cfg.UI.Chatbox.Scrollback != "blocks" {
+		t.Fatalf("expected completed commands to default to blocks, got %q", cfg.UI.Chatbox.Scrollback)
 	}
 	if cfg.UI.Chatbox.PathColorMode != "hierarchy" || cfg.UI.Chatbox.PathMaxSegments != 6 {
 		t.Fatalf("unexpected default path rendering: %+v", cfg.UI.Chatbox)

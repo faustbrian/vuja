@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -605,8 +606,11 @@ func TestOutputCheckpointNeverPersistsNativeCanvasAtCompletionOrLater(t *testing
 					if laterOwnedCommand && !bytes.Contains(data, []byte("owned-after-application")) {
 						t.Fatal("native exclusion disabled later owned-output recovery")
 					}
-					_, restored := recoveryCompositor(t, dir, "pane", "reopen-native", nil)
-					if !strings.Contains(restored.String(), "eligible-owned-output") || strings.Contains(restored.String(), "private-native-canvas") {
+					reopened, _ := recoveryCompositor(t, dir, "pane", "reopen-native", nil)
+					// Block labels can push the oldest saved line above the viewport.
+					// Inspect retained text, not only the currently painted rows.
+					restored := ansi.Strip(strings.Join(retainedModelRows(reopened.viewport.model), "\n"))
+					if !strings.Contains(restored, "eligible-owned-output") || strings.Contains(restored, "private-native-canvas") {
 						t.Fatal("reopened pane restored private application canvas or lost owned output")
 					}
 				})

@@ -94,6 +94,7 @@ func renderConfigScenario(cfg *config.Config, label string, width, height int, m
 	}
 	if scenario == "history" {
 		prompt("go test ./example")
+		c.WritePTY(terminalMarkerBytes(marker, "command-public"))
 		c.WritePTY(terminalMarkerBytes(marker, "command-start"))
 		c.WritePTY([]byte("compiled 3 packages\r\nall checks passed\r\n"))
 		now = now.Add(84 * time.Millisecond)
@@ -102,6 +103,7 @@ func renderConfigScenario(cfg *config.Config, label string, width, height int, m
 	} else {
 		prompt(input)
 		if scenario == "running" {
+			c.WritePTY(terminalMarkerBytes(marker, "command-public"))
 			c.WritePTY(terminalMarkerBytes(marker, "command-start"))
 			now = now.Add(12 * time.Second)
 			c.RefreshRunningStatus()

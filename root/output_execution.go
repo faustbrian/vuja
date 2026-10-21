@@ -216,10 +216,15 @@ func (r retainedExecution) plainText() string {
 		return ""
 	}
 	var out strings.Builder
-	for i, row := range r.rows {
-		if i > 0 {
+	first := true
+	for _, row := range r.rows {
+		if isOutputBlockDivider(row) {
+			continue
+		}
+		if !first {
 			out.WriteByte('\n')
 		}
+		first = false
 		out.WriteString(strings.TrimRight(ansi.Strip(row), " "))
 	}
 	if r.newline {

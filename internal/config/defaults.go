@@ -28,7 +28,8 @@ func DefaultConfig() *Config {
 			Chatbox: ChatboxConfig{
 				Prompt:                   "› ",
 				Separator:                " · ",
-				Scrollback:               "output",
+				Scrollback:               "blocks",
+				BlockDividers:            true,
 				SurfaceWidth:             "full-width",
 				OutputViewport:           "pinned",
 				OutputMouse:              "select",

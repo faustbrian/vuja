@@ -63,6 +63,7 @@ type ChatboxConfig struct {
 	Prompt                   string              `toml:"prompt"`
 	Separator                string              `toml:"separator"`
 	Scrollback               string              `toml:"scrollback"`
+	BlockDividers            bool                `toml:"block-dividers"`
 	SurfaceWidth             string              `toml:"surface-width"`
 	OutputViewport           string              `toml:"output-viewport"`
 	OutputMouse              string              `toml:"output-mouse"`
@@ -741,8 +742,8 @@ func validateChatbox(chatbox ChatboxConfig) error {
 	if !plainChatboxText(chatbox.Separator) {
 		return fmt.Errorf("ui.chatbox.separator: must be plain single-line text")
 	}
-	if chatbox.Scrollback != "output" && chatbox.Scrollback != "snapshot" {
-		return fmt.Errorf("ui.chatbox.scrollback: invalid value %q (want: output|snapshot)", chatbox.Scrollback)
+	if !oneOf(chatbox.Scrollback, "blocks", "output", "snapshot") {
+		return fmt.Errorf("ui.chatbox.scrollback: invalid value %q (want: blocks|output|snapshot)", chatbox.Scrollback)
 	}
 	if chatbox.SurfaceWidth != "full-width" && chatbox.SurfaceWidth != "content-width" {
 		return fmt.Errorf("ui.chatbox.surface-width: invalid value %q (want: full-width|content-width)", chatbox.SurfaceWidth)

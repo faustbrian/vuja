@@ -129,6 +129,9 @@ func (c *terminalCompositor) refreshOutputSearch() {
 	needle := foldedOutputSearchText(string(s.query))
 scan:
 	for row, line := range v.frozen {
+		if isOutputBlockDivider(line) {
+			continue
+		}
 		text := ansi.Strip(line)
 		normalized := foldedOutputSearchText(text)
 		if !strings.Contains(normalized, needle) {

@@ -11,7 +11,7 @@ import (
 )
 
 func TestOutputViewportKeepsBusyChromeDuringLineProgress(t *testing.T) {
-	for _, mode := range []string{"output", "snapshot"} {
+	for _, mode := range []string{"output", "snapshot", "blocks"} {
 		for _, update := range []string{"\rOK\x1b[K", "\r\x1b[2KOK", "\rOK\x1b[0K"} {
 			for split := 0; split <= len(update); split++ {
 				t.Run(fmt.Sprintf("%s/%q/split-%d", mode, update, split), func(t *testing.T) {

@@ -214,21 +214,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
 
   _vuja_preexec() {
     _vuja_unmark_prompts
-    if [[ -n $VUJA_MARKER ]]; then
-      builtin printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
-      local -a _vuja_execution_words
-      # zshmisc's preexec contract supplies full alias-expanded text as $3.
-      _vuja_execution_words=("${(@z)3}")
-      # Zsh's PROMPT_SP decoration precedes precmd, so the byte interval up
-      # to command-end is not just executable output. Carry the external
-      # clear intent in the ordered PTY stream, never infer it from a canvas.
-      if (( ${#_vuja_execution_words} == 1 && ! $+functions[clear] )) &&
-         [[ ${_vuja_execution_words[1]} == clear ]]; then
-        # Additive metadata keeps older running compositors compatible when
-        # users source an updated hook without replacing their parent process.
-        builtin printf '\e]777;vuja;%%s;command-clear\a' "$VUJA_MARKER"
-      fi
-    fi
+    local _vuja_history_ack=0
     local _vuja_history_marker="VUJA_CMD_START"
     # The shared admission gate handles leading-space privacy, distinguishing
     # genuinely private prefixes from empty lines in a multiline paste.
@@ -248,6 +234,22 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
 	      read -u "$VUJA_HISTORY_ACK_FD" -k 1 _vuja_history_ack 2>/dev/null
 	    fi
 	    typeset -g _vuja_history_recordable=${_vuja_history_ack:-0}
+    if [[ -n $VUJA_MARKER ]]; then
+      local _vuja_label_policy=private
+      [[ $_vuja_history_recordable == 1 ]] && _vuja_label_policy=public
+      # Classify labels in the same ordered stream, before command-start;
+      # the history acknowledgement remains the single admission authority.
+      builtin printf '\e]777;vuja;%%s;command-%%s\a' "$VUJA_MARKER" "$_vuja_label_policy"
+      builtin printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
+      local -a _vuja_execution_words
+      # zshmisc's preexec contract supplies full alias-expanded text as $3.
+      _vuja_execution_words=("${(@z)3}")
+      # PROMPT_SP precedes precmd; carry clear intent in the ordered stream.
+      if (( ${#_vuja_execution_words} == 1 && ! $+functions[clear] )) &&
+         [[ ${_vuja_execution_words[1]} == clear ]]; then
+        builtin printf '\e]777;vuja;%%s;command-clear\a' "$VUJA_MARKER"
+      fi
+    fi
   }
 
   autoload -Uz add-zle-hook-widget
@@ -375,9 +377,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
 
   _vuja_preexec() {
     _vuja_unmark_prompts
-    if [[ -n "$VUJA_MARKER" ]]; then
-      printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
-    fi
+    local _vuja_history_ack=0
 	    local _vuja_history_marker="VUJA_CMD_START"
 	    # Bash applies HISTCONTROL and HISTIGNORE before PS0 is expanded. A
 	    # recordable line advances HISTCMD; an ignored line does not. Observe
@@ -391,6 +391,12 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
 	      IFS= read -r -n 1 -u "$VUJA_HISTORY_ACK_FD" _vuja_history_ack 2>/dev/null
 	    fi
 	    _vuja_history_recordable=${_vuja_history_ack:-0}
+    if [[ -n "$VUJA_MARKER" ]]; then
+      local _vuja_label_policy=private
+      [[ $_vuja_history_recordable == 1 ]] && _vuja_label_policy=public
+      printf '\e]777;vuja;%%s;command-%%s\a' "$VUJA_MARKER" "$_vuja_label_policy"
+      printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
+    fi
   }
 
   if [[ "${PS0-}" != *'$(_vuja_preexec)'* ]]; then
@@ -639,9 +645,7 @@ if set -q VUJA_PID; and set -q VUJA_FD
     end
 
     function _vuja_preexec --on-event fish_preexec
-        if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
-            printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
-        end
+	        set -l _vuja_history_ack 0
 	        set -l _vuja_history_marker VUJA_CMD_START
 	        if string match -qr '^[\r\n]*[^\S\r\n]' -- "$argv[1]"; or set -q fish_private_mode; or test "$_vuja_history_policy_status" -ne 0
 	            set _vuja_history_marker VUJA_CMD_START:IGNORE
@@ -651,6 +655,14 @@ if set -q VUJA_PID; and set -q VUJA_FD
 	            read --nchars 1 --local _vuja_history_ack <&$VUJA_HISTORY_ACK_FD 2>/dev/null
 	        end
 	        set -g _vuja_history_recordable $_vuja_history_ack
+        if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
+            set -l _vuja_label_policy private
+            if test "$_vuja_history_recordable" = 1
+                set _vuja_label_policy public
+            end
+            printf '\e]777;vuja;%%s;command-%%s\a' "$VUJA_MARKER" "$_vuja_label_policy"
+            printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
+        end
     end
 
     function _vuja_postexec --on-event fish_postexec

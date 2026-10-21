@@ -54,16 +54,18 @@ const (
 type terminalCompositor struct {
 	mu sync.Mutex
 
-	out            io.Writer
-	asyncOut       *asyncTerminalWriter
-	enabled        bool
-	layout         bool
-	awaitingPrompt bool
-	marker         string
-	resumeLinkFor  func(string) string
-	width          int
-	height         int
-	closed         bool
+	out                    io.Writer
+	asyncOut               *asyncTerminalWriter
+	enabled                bool
+	layout                 bool
+	awaitingPrompt         bool
+	marker                 string
+	resumeLinkFor          func(string) string
+	nextBlockCommandPublic bool
+	blockCommandPublic     bool
+	width                  int
+	height                 int
+	closed                 bool
 
 	emulator            *vt.Emulator
 	emulatorDone        <-chan struct{}
@@ -91,6 +93,7 @@ type terminalCompositor struct {
 	renderedLines           []string
 	pendingLineBreak        bool
 	multilineInput          bool
+	inputWasClipped         bool
 	pendingRedraw           []byte
 	promptPrelude           string
 	transientGeometryDirty  bool
@@ -232,6 +235,7 @@ type terminalChatboxConfig struct {
 	Prompt                   string
 	Separator                string
 	Scrollback               string
+	BlockDividers            bool
 	SurfaceWidth             string
 	OutputViewport           string
 	OutputMouse              string
@@ -621,9 +625,17 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			return
 		}
 		switch {
+		case event == "command-public":
+			c.nextBlockCommandPublic = true
+		case event == "command-private":
+			c.nextBlockCommandPublic = false
 		case event == "prompt-start":
+			c.nextBlockCommandPublic = false
 			c.flushPendingRedrawToModel()
 			if c.phase == terminalInput && c.pendingLineBreak {
+				// No command-start classified this fallback transition; never
+				// reuse the previous execution's permission to retain its label.
+				c.blockCommandPublic = false
 				c.enterCommandOutput()
 				c.phase = terminalOutput
 			}
@@ -644,6 +656,7 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 				c.commandClearIntent = true
 			}
 		case event == "command-start":
+			c.blockCommandPublic, c.nextBlockCommandPublic = c.nextBlockCommandPublic, false
 			c.commandClearIntent = false
 			c.multilineInput = false
 			c.writeTerminal([]byte(terminalBracketedPasteDisable))
@@ -868,6 +881,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Prompt:                   chatbox.Prompt,
 		Separator:                chatbox.Separator,
 		Scrollback:               chatbox.Scrollback,
+		BlockDividers:            chatbox.BlockDividers,
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,
@@ -1177,6 +1191,16 @@ func (c *terminalCompositor) Resize(width, height int) {
 	c.titleLinesCache = nil
 	c.statusLinesCache = nil
 	c.transientGeometryDirty = true
+	if c.phase == terminalInput {
+		// The input emulator does not reflow: Resize can discard columns
+		// before the shell redraws. Inspect the old visible cells first.
+		for _, line := range c.surfaceContentLines {
+			if ansi.StringWidth(strings.TrimRight(ansi.Strip(line), " ")) > c.inputBoxContentWidth() {
+				c.inputWasClipped = true
+				break
+			}
+		}
+	}
 	modelReady := c.resizeModel(width, height)
 	c.modelCSITail = c.modelCSITail[:0]
 	if c.backdrop != nil {
@@ -1481,6 +1505,7 @@ func (c *terminalCompositor) beginPrompt(continuation bool) {
 		}
 	}
 	c.phase = terminalPrompt
+	c.inputWasClipped = false
 	c.promptStartAbs = c.absoluteCursorLine()
 	c.surfaceBottomAbs = c.promptStartAbs
 	c.renderedLines = nil
@@ -1488,6 +1513,10 @@ func (c *terminalCompositor) beginPrompt(continuation bool) {
 
 func (c *terminalCompositor) enterCommandOutput() {
 	c.startCommandExecution()
+	if c.chatboxConfig.Scrollback == "blocks" {
+		c.enterBlockCommandOutput()
+		return
+	}
 	if c.chatboxConfig.Scrollback == "output" {
 		c.renderPendingRawCommand()
 		return
@@ -1918,6 +1947,11 @@ func (c *terminalCompositor) renderPinned() {
 	padded := c.inputBoxPadded()
 	contentRows := c.surfaceBottomAbs - c.promptStartAbs + 1
 	contentRows = clamp(contentRows, 1, max(c.height-1-decorationRows, 1))
+	// Resize reconstructs promptStartAbs from visible rows. Keep disclosure
+	// for this prompt's lifetime rather than silently forgetting a lost prefix.
+	if c.surfaceBottomAbs-c.promptStartAbs+1 > contentRows {
+		c.inputWasClipped = true
+	}
 	sourceStartAbs := c.surfaceBottomAbs - contentRows + 1
 	rows := contentRows + decorationRows
 	targetTop := c.height - rows
@@ -1941,9 +1975,17 @@ func (c *terminalCompositor) renderPinned() {
 	for offset := range contentRows {
 		sourceAbs := sourceStartAbs + offset
 		line := uv.NewLine(contentWidth)
-		for x := 0; x < contentWidth; x++ {
+		for x := 0; x < c.emulator.Width(); x++ {
 			if cell := c.cellAtAbsolute(x, sourceAbs, scrollback); cell != nil {
 				if cell.Width == 0 {
+					continue
+				}
+				// The PTY canvas is terminal-wide; the padded projection can
+				// omit occupied columns even before a resize takes place.
+				if x+cell.Width > contentWidth && !cell.IsZero() && !cell.Equal(&uv.EmptyCell) {
+					c.inputWasClipped = true
+				}
+				if x >= contentWidth {
 					continue
 				}
 				if !cell.IsZero() && !cell.Equal(&uv.EmptyCell) {
@@ -2373,6 +2415,9 @@ func isCommandOutcomeStatus(name string) bool {
 }
 
 func (c *terminalCompositor) completedMetadataBackground() string {
+	if c.chatboxConfig.Scrollback == "blocks" {
+		return terminalDefaultBackground
+	}
 	if c.completedSurfaceCode != "" {
 		return c.completedSurfaceCode
 	}
@@ -3341,6 +3386,7 @@ func (c *terminalCompositor) recoverModel() {
 	c.surfaceContentCells = nil
 	c.renderedLines = nil
 	c.pendingLineBreak = false
+	c.inputWasClipped = false
 	c.pendingRedraw = c.pendingRedraw[:0]
 	c.promptPrelude = ""
 	c.commandCardOpen = false

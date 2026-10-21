@@ -844,15 +844,35 @@ Terminals without a stable session identifier do not guess ownership from the
 working directory. Native scrollback mode does not create these checkpoints.
 Recovery is disabled inside tmux because its panes inherit the outer terminal's
 session identifier.
-Completed commands default to `scrollback = "output"`, which omits the submitted
-chatbox from retained history and leaves only the command's output.
+Completed commands default to `scrollback = "blocks"`: each submitted command
+stays above its associated output, with a thin horizontal divider and the
+configured duration/exit outcome. Silent commands still form a visible block.
+Blocks use the terminal background rather than repeating the full chatbox.
+If input outgrows the pane, its block label retains visible rows with an explicit
+truncation notice; resizing does not erase that disclosure.
+Set `block-dividers = false` under `[ui.chatbox]` to hide the rules without
+hiding commands. `history-spacing = 0` makes blocks compact; the default is one
+blank row between executions (0–3 are supported). Spacing and divider visibility
+are independent, including in the minimal preset.
+Dividers resize to the current pane width without wrapping. They do not appear
+in output search or plain-text exports; whole-pane exports include command
+labels, while F10/F11/F12 execution captures remain output-only. Display rows,
+including command labels and dividers, share the existing pane retention budget.
+Restored checkpoints remain display rows, not newly inferred execution IDs.
+Private, ignored, paused or unclassified commands use `[private command]`
+instead of retaining their input text in blocks. The shell's history-admission
+acknowledgement controls this label; command output itself can still be sensitive.
+
+Explicit existing `scrollback` settings are preserved. Set
+`scrollback = "output"` to omit the submitted chatbox from retained history
+and leave only the command's output.
 Set `scrollback = "snapshot"` to retain the complete title, command, frozen
 status context, output, and final outcome described below.
 `completed-command = "command"`, `"outcome"`, or `"snapshot"` selects the
 retained detail. For full snapshots, `snapshot-metadata = "always"`,
 `"changed"`, or `"never"` controls repeated directory, Git, version, and
 environment metadata.
-`history-spacing` preserves visual separation in both modes without changing
+`history-spacing` preserves visual separation in all three modes without changing
 command output. Terminal applications own the number of retained scrollback
 lines; Vuja therefore does not expose a misleading completed-item retention
 limit.
@@ -1126,7 +1146,11 @@ those empty lines still makes the command private. Accepted raw text is retained
 unchanged; only its ranking/search identity is normalized.
 
 The managed shell protocol carries accepted input privately for policy
-enforcement; excluded commands are never persisted.
+enforcement; excluded command-history records are never persisted. Output
+transcripts are separate: default blocks redact excluded command labels, but
+explicit full snapshots retain their submitted input and command output can
+itself contain sensitive text. Disable output checkpoints when that display
+data must not be saved.
 Vuja's configuration, state, history database and SQLite sidecars, debug logs,
 latency snapshots, and crash reports are stored with owner-only permissions.
 Existing files are repaired when opened.

@@ -333,6 +333,10 @@ func (c *terminalCompositor) renderStatusSegmentsWithin(segments []terminalStatu
 }
 
 func (c *terminalCompositor) appendViewportSnapshot() {
+	if c.chatboxConfig.Scrollback == "blocks" {
+		c.writeViewportOutput([]byte(strings.Join(c.blockCommandRows(), "\x1b[0m\r\n") + "\x1b[0m\r\n"))
+		return
+	}
 	if c.chatboxConfig.Scrollback != "snapshot" {
 		return
 	}
@@ -356,7 +360,7 @@ func (c *terminalCompositor) appendViewportSnapshot() {
 }
 
 func (c *terminalCompositor) appendViewportOutcome(exitCode *int) {
-	if c.chatboxConfig.Scrollback != "snapshot" || exitCode == nil || c.completedCommandMode() == "command" {
+	if (c.chatboxConfig.Scrollback != "snapshot" && c.chatboxConfig.Scrollback != "blocks") || exitCode == nil || c.completedCommandMode() == "command" {
 		return
 	}
 	now := time.Now
@@ -428,6 +432,9 @@ func (c *terminalCompositor) renderOutputViewport() {
 			}
 		} else {
 			line = viewportLine(v.model, row, c.width, false)
+		}
+		if isOutputBlockDivider(line) {
+			line = c.blockDividerLine()
 		}
 		if strings.Contains(line, "vuja://codex-resume/") {
 			line = bareCodexResumeLink.ReplaceAllString(line, "")
