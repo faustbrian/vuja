@@ -23,6 +23,9 @@ type Screen struct {
 	reflow                        bool
 	tail                          []retainedRow
 	retainedPending, savedPending bool
+	// ED2 separates an erased canvas from its saved history. Reflow must not
+	// pull that history onto the screen merely because the window grows.
+	clearBoundary uint64
 }
 
 // NewScreen creates a new screen.
@@ -44,6 +47,7 @@ func (s *Screen) Reset() {
 	clear(s.wrap)
 	clear(s.used)
 	s.tail = nil
+	s.clearBoundary = 0
 	s.retainedPending, s.savedPending = false, false
 	s.cur = Cursor{}
 	s.saved = Cursor{}
@@ -140,6 +144,7 @@ func (s *Screen) ClearWithScrollback() {
 			s.scrollback.pushRetained(row.cells, row.wrap, row.used)
 		}
 		s.Clear()
+		s.clearBoundary = s.scrollback.droppedLines + uint64(len(s.scrollback.lines))
 		return
 	}
 	if s.scrollback != nil {

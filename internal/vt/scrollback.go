@@ -21,6 +21,8 @@ type Scrollback struct {
 	// Mutable public aliases cannot notify us of edits. Only callers that ask
 	// for one require the conservative recount; defensive projections do not.
 	aliases bool
+	// Logical-prefix identity survives reflow; only actual eviction advances it.
+	droppedLines uint64
 }
 
 // NewScrollback creates a new scrollback buffer with the given maximum number of lines.
@@ -193,6 +195,7 @@ func (s *Scrollback) Clear() {
 	if s == nil {
 		return
 	}
+	s.droppedLines += uint64(s.logicalLines)
 	s.lines = s.lines[:0]
 	s.wrap, s.used = s.wrap[:0], s.used[:0]
 	s.rowCosts = s.rowCosts[:0]
@@ -300,6 +303,7 @@ func (s *Scrollback) dropRetained(first int) {
 		s.cost -= s.rowCosts[i]
 		if s.wrap[i] == 0 {
 			s.logicalLines--
+			s.droppedLines++
 		}
 	}
 	s.lines = slices.Delete(s.lines, 0, first)

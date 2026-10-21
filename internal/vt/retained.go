@@ -254,7 +254,12 @@ func (s *Screen) resizeRetained(width, height int, pending bool, tracked *uv.Pos
 	currentAnchor, savedAnchor := anchors[0], anchors[1]
 	var physical []retainedRow
 	var cur, saved, mapped uv.Position
+	clearFloor := 0
 	for y, line := range logical {
+		if s.scrollback != nil && s.clearBoundary > s.scrollback.droppedLines &&
+			uint64(y) == s.clearBoundary-s.scrollback.droppedLines {
+			clearFloor = len(physical)
+		}
 		offset := -1
 		if y == currentAnchor.Y {
 			offset = currentAnchor.X
@@ -275,6 +280,7 @@ func (s *Screen) resizeRetained(width, height int, pending bool, tracked *uv.Pos
 	}
 	start := min(max(len(physical)-height, 0), cur.Y)
 	start = max(start, cur.Y-height+1)
+	start = max(start, min(clearFloor, cur.Y))
 	if sb := s.scrollback; sb != nil {
 		sb.replaceRetained(physical[:start])
 	}

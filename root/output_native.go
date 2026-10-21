@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
+	ansiparser "github.com/charmbracelet/x/ansi/parser"
 )
 
 // Once a cursor-driven application takes the display, its canvas is not a
@@ -22,40 +23,53 @@ type nativeOutputTail struct {
 	output    strings.Builder
 	resume    *codexResumeLinkifier
 	resumeIDs map[string]bool
+	clearOnly bool
+	clearMode int
 }
 
 func newNativeOutputTail() *nativeOutputTail {
-	s := &nativeOutputTail{accepting: true}
+	s := &nativeOutputTail{accepting: true, clearOnly: true}
 	p := ansi.NewParser()
 	p.SetDataSize(4096)
 	p.SetHandler(ansi.Handler{
 		Print: func(r rune) {
+			s.clearOnly = false
 			if s.accepting {
 				s.output.WriteRune(r)
 			}
 		},
 		Execute: func(b byte) {
+			s.clearOnly = false
 			if s.accepting && (b == '\r' || b == '\n' || b == '\t' || b == '\b') {
 				s.output.WriteByte(b)
 			}
 		},
-		HandleCsi: s.csi,
+		HandleCsi: func(cmd ansi.Cmd, params ansi.Params) {
+			if mode, allowed := viewportClearControl(cmd, params); allowed {
+				s.clearMode = max(s.clearMode, mode)
+			} else {
+				s.clearOnly = false
+			}
+			s.csi(cmd, params)
+		},
 		HandleEsc: func(cmd ansi.Cmd) {
+			s.clearOnly = false
 			if cmd.Final() != '\\' { // ST ends an OSC, not text ownership.
 				s.accepting = false
 			}
 		},
 		HandleOsc: func(cmd int, data []byte) {
+			s.clearOnly = false
 			if s.accepting && cmd == 8 {
 				s.output.WriteString("\x1b]")
 				s.output.Write(data)
 				s.output.WriteString("\x1b\\")
 			}
 		},
-		HandleDcs: func(ansi.Cmd, ansi.Params, []byte) { s.accepting = false },
-		HandlePm:  func([]byte) { s.accepting = false },
-		HandleApc: func([]byte) { s.accepting = false },
-		HandleSos: func([]byte) { s.accepting = false },
+		HandleDcs: func(ansi.Cmd, ansi.Params, []byte) { s.accepting, s.clearOnly = false, false },
+		HandlePm:  func([]byte) { s.accepting, s.clearOnly = false, false },
+		HandleApc: func([]byte) { s.accepting, s.clearOnly = false, false },
+		HandleSos: func([]byte) { s.accepting, s.clearOnly = false, false },
 	})
 	s.parser = p
 	s.resume = newCodexResumeLinkifier(func(id string) string {
@@ -154,6 +168,12 @@ func (c *terminalCompositor) recordNativeOutput(data []byte) {
 
 func (c *terminalCompositor) finishNativeOutput() {
 	if v := c.viewport; v != nil && v.native != nil {
+		// A primary-screen application can begin with exactly clear's home/ED
+		// bytes. Only classify a control-only command after completion; admitting
+		// following canvas text would violate nativeOutputTail's privacy boundary.
+		if v.native.clearOnly && v.native.clearMode > 0 && v.native.parser.State() == ansiparser.GroundState {
+			c.clearOutputViewport(v.native.clearMode)
+		}
 		if retained := v.native.finish(); len(retained) > 0 {
 			c.recordViewportOutput(retained)
 		}

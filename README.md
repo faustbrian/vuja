@@ -763,6 +763,13 @@ another native control takes ownership. For primary-screen applications, only
 recognised Codex continuation/session-ID metadata is retained, as a bounded,
 credential-free resume instruction; arbitrary application text is not captured.
 
+`clear` commands that emit only screen-clearing controls also clear the managed
+pane when they finish. Ctrl-L clears it during the shell's prompt redraw.
+Screen-only clearing retains older output for browsing; erase-scrollback
+controls also remove it from the pane's retained text. Neither deletes command
+history or saved exports. Native application canvases remain separate: a clear
+followed by application text is not imported as a managed transcript.
+
 ```toml
 [ui.chatbox]
 output-checkpoints = "completed" # off | completed | running

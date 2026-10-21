@@ -560,6 +560,9 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 		}
 		c.writeModel(text)
 		if screenReset {
+			if mode := promptViewportClearMode(text); mode > 0 {
+				c.clearOutputViewport(mode)
+			}
 			c.promptStartAbs = c.emulator.ScrollbackLen()
 			c.surfaceBottomAbs = c.absoluteCursorLine()
 			c.renderedLines = nil
@@ -697,6 +700,11 @@ func (c *terminalCompositor) flushPendingRedrawToModel() {
 		return
 	}
 	c.writeModel(c.pendingRedraw)
+	// PS1/PS2 markers split Ctrl-L's clear prelude from its printable redraw.
+	// Apply the same owned erase before prompt-start consumes that prelude.
+	if mode := promptViewportClearMode(c.pendingRedraw); mode > 0 {
+		c.clearOutputViewport(mode)
+	}
 	c.pendingRedraw = c.pendingRedraw[:0]
 }
 
