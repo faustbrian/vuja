@@ -69,8 +69,11 @@ func (c *terminalCompositor) freezeOutputViewport() {
 		return
 	}
 	v.setFrozen(retainedModelRows(v.model))
+	v.frozenBase, _ = v.model.LogicalRowPositions()
+	v.frozenPane = true
+	v.frozenStates = v.rowStates(len(v.frozen))
 	v.frozenTruncated = v.outputTruncated()
-	v.layoutFrozen(c.width)
+	v.layoutFrozen(c.outputContentWidth())
 	v.top = max(len(v.frozenLayout)-(c.height-c.surfaceRows), 0)
 }
 
@@ -191,7 +194,7 @@ func (c *terminalCompositor) advanceOutputSearch(direction int) {
 func (c *terminalCompositor) revealOutputSearchMatch() {
 	v := c.viewport
 	match := v.search.matches[v.search.index]
-	v.layoutFrozen(c.width)
+	v.layoutFrozen(c.outputContentWidth())
 	for i, span := range v.frozenLayout {
 		if span.logical == match.row && span.last > match.first {
 			v.top = i
@@ -225,7 +228,7 @@ func (s *outputSearch) label(width int, truncated, newOutput bool, notice string
 	return label + " · " + string(s.query) + " · Enter/↓ next · ↑ prev · esc close "
 }
 
-func (c *terminalCompositor) outputSearchLine(line string, row, left, right int) string {
+func (c *terminalCompositor) outputSearchLine(line string, row, left, right int, severitySurface bool) string {
 	s := c.viewport.search
 	if s == nil || s.index < 0 || s.matches[s.index].row != row {
 		return ansi.Cut(line, left, right)
@@ -236,8 +239,14 @@ func (c *terminalCompositor) outputSearchLine(line string, row, left, right int)
 		return ansi.Cut(line, left, right)
 	}
 	selected := ansi.Cut(line, first, last)
+	start, end := "\x1b[7m", "\x1b[27m"
+	if severitySurface {
+		// Reverse would replace the block's error/warning background. A separate
+		// double underline keeps the selected match visible on that owned surface.
+		start, end = "\x1b[4:2m", "\x1b[24m"
+	}
 	var highlight strings.Builder
-	highlight.WriteString("\x1b[7m")
+	highlight.WriteString(start)
 	var state byte
 	for len(selected) > 0 {
 		sequence, _, n, next := ansi.DecodeSequence(selected, state, nil)
@@ -248,11 +257,11 @@ func (c *terminalCompositor) outputSearchLine(line string, row, left, right int)
 		if strings.HasPrefix(sequence, "\x1b[") && strings.HasSuffix(sequence, "m") {
 			// Original SGR resets must not erase the selected-match highlight.
 			// OSC links and their payloads remain untouched.
-			highlight.WriteString("\x1b[7m")
+			highlight.WriteString(start)
 		}
 		selected = selected[n:]
 		state = next
 	}
-	highlight.WriteString("\x1b[27m")
+	highlight.WriteString(end)
 	return ansi.Cut(line, left, first) + highlight.String() + ansi.Cut(line, last, right)
 }

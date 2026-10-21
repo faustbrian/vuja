@@ -64,6 +64,7 @@ type ChatboxConfig struct {
 	Separator                string              `toml:"separator"`
 	Scrollback               string              `toml:"scrollback"`
 	BlockDividers            bool                `toml:"block-dividers"`
+	BlockStates              bool                `toml:"block-states"`
 	SurfaceWidth             string              `toml:"surface-width"`
 	OutputViewport           string              `toml:"output-viewport"`
 	OutputMouse              string              `toml:"output-mouse"`

@@ -34,6 +34,14 @@ type outputViewport struct {
 	text              outputModelStream
 	executions        outputExecutions
 	restoredTruncated bool
+	blocks            []blockSpan
+	blockStart        uint64
+	blockEnd          uint64
+	blockActive       bool
+	blockLossStart    uint64
+	frozenBase        uint64
+	frozenPane        bool
+	frozenStates      []blockState
 }
 
 // The SDK owns live eviction, including writes made during restoration. Prior
@@ -119,6 +127,7 @@ func (c *terminalCompositor) writeViewportOutput(data []byte) {
 
 func (c *terminalCompositor) recordViewportOutput(data []byte) {
 	c.viewport.write(data)
+	c.viewport.pruneBlockStates()
 	if c.outputRecovery != nil && len(data) > 0 {
 		c.outputRecovery.dirty = true
 	}
@@ -334,6 +343,7 @@ func (c *terminalCompositor) renderStatusSegmentsWithin(segments []terminalStatu
 
 func (c *terminalCompositor) appendViewportSnapshot() {
 	if c.chatboxConfig.Scrollback == "blocks" {
+		c.startBlockRows()
 		c.writeViewportOutput([]byte(strings.Join(c.blockCommandRows(), "\x1b[0m\r\n") + "\x1b[0m\r\n"))
 		return
 	}
@@ -408,8 +418,8 @@ func (c *terminalCompositor) renderOutputViewport() {
 	c.setViewportMouse(c.viewport != nil && c.viewport.search != nil || c.transientUIVisible == nil || !c.transientUIVisible())
 	c.ensureOutputViewport()
 	v := c.viewport
-	if v.frozen != nil && v.frozenWidth != c.width {
-		v.layoutFrozen(c.width)
+	if v.frozen != nil && v.frozenWidth != c.outputContentWidth() {
+		v.layoutFrozen(c.outputContentWidth())
 		if v.search != nil && v.search.index >= 0 {
 			c.revealOutputSearchMatch()
 		}
@@ -422,19 +432,36 @@ func (c *terminalCompositor) renderOutputViewport() {
 	rows := c.height - c.surfaceRows
 	var frame strings.Builder
 	frame.WriteString(terminalSyncStart + "\x1b7\x1b[?25l\x1b[?7l")
+	var projected []vt.RetainedViewRow
+	if v.frozen == nil && c.blockGutter() > 0 {
+		projected = v.model.RetainedTail(c.outputContentWidth(), rows)
+	}
 	for row := 0; row < rows; row++ {
 		line := ""
+		state := blockNeutral
 		if v.frozen != nil {
 			index := v.top + row
 			if index < len(v.frozenLayout) && row < c.viewportContentRows() {
 				span := v.frozenLayout[index]
-				line = c.outputSearchLine(v.frozen[span.logical], span.logical, span.first, span.last)
+				if span.logical < len(v.frozenStates) {
+					state = v.frozenStates[span.logical]
+				}
+				line = c.outputSearchLine(v.frozen[span.logical], span.logical, span.first, span.last, c.blockGutter() > 0 && state != blockNeutral)
+			}
+		} else if c.blockGutter() > 0 {
+			if row < len(projected) {
+				line = projected[row].Line.Render()
+				state = v.stateAt(projected[row].Logical)
 			}
 		} else {
 			line = viewportLine(v.model, row, c.width, false)
 		}
-		if isOutputBlockDivider(line) {
+		divider := isOutputBlockDivider(line)
+		if divider {
 			line = c.blockDividerLine()
+		}
+		if c.blockGutter() > 0 && (!divider || state != blockNeutral) {
+			line = c.blockStateLine(line, state, c.width)
 		}
 		if strings.Contains(line, "vuja://codex-resume/") {
 			line = bareCodexResumeLink.ReplaceAllString(line, "")

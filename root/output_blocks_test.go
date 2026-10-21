@@ -329,7 +329,7 @@ func TestOutputBlocksGenuineHyperlinkIsNotDividerMetadata(t *testing.T) {
 			}
 			genuine := false
 			for _, line := range lines {
-				if line == "─" {
+				if strings.TrimSpace(line) == "─" {
 					genuine = true
 				}
 			}

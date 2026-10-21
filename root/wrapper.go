@@ -2171,6 +2171,7 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 		Separator:                chatbox.Separator,
 		Scrollback:               chatbox.Scrollback,
 		BlockDividers:            chatbox.BlockDividers,
+		BlockStates:              chatbox.BlockStates,
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,

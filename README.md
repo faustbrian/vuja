@@ -848,6 +848,19 @@ Completed commands default to `scrollback = "blocks"`: each submitted command
 stays above its associated output, with a thin horizontal divider and the
 configured duration/exit outcome. Silent commands still form a visible block.
 Blocks use the terminal background rather than repeating the full chatbox.
+By default, failed blocks in the pinned output pane have a red-tinted background
+and a thick left rail. Every known nonzero exit is a failure; amber instead marks
+Vuja's own clipped command labels or incomplete retained output, with failure
+taking precedence. Vuja does not guess warning states from command output words.
+Set `block-states = false` under `[ui.chatbox]` to disable this styling independently
+of dividers. The rail reserves two drawable columns; semantic search, copy and
+export remain undecorated. Colors follow `exit-failure` and `session-warning`.
+Drawn background/reverse styles yield to the state tint; foregrounds and links
+remain intact. Selected search matches use double underlines on tinted rows.
+Checkpoint restoration preserves bounded presentation state, not command identity;
+at the storage byte cap cosmetic state may be dropped before transcript text.
+Native terminal scrollback cannot be repainted retrospectively, so that mode uses
+a colored completion indicator instead. Application-owned canvases remain untouched.
 If input outgrows the pane, its block label retains visible rows with an explicit
 truncation notice; resizing does not erase that disclosure.
 Set `block-dividers = false` under `[ui.chatbox]` to hide the rules without

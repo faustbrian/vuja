@@ -7,6 +7,7 @@ import (
 
 type outputCheckpointSnapshot struct {
 	rows      []string
+	blocks    []checkpointBlockSpan
 	savedAt   time.Time
 	truncated bool
 }

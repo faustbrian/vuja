@@ -40,6 +40,120 @@ func (e *Emulator) LogicalLines() []uv.Line {
 	return lines
 }
 
+// LogicalRowPositions maps the primary canvas onto the same logical rows as
+// LogicalLines. Complete prefix eviction advances first; reflow and trimming
+// within one long line do not change that line's identity. Canvas editing is
+// not an immutable document identity: callers must invalidate on clear/reset.
+func (e *Emulator) LogicalRowPositions() (first uint64, rows []uint64) {
+	s := &e.scrs[0]
+	base := uint64(0)
+	if sb := s.scrollback; sb != nil {
+		first = sb.droppedLines
+		base = first + uint64(sb.logicalLines)
+		if len(sb.wrap) > 0 && sb.wrap[len(sb.wrap)-1] > 0 {
+			base--
+		}
+	}
+	rows = make([]uint64, s.Height())
+	for y := range rows {
+		rows[y] = base
+		if s.wrap[y] == 0 {
+			base++
+		}
+	}
+	return first, rows
+}
+
+// RetainedViewRow is a defensive drawing fragment, not new terminal state.
+type RetainedViewRow struct {
+	Line    uv.Line
+	Logical uint64
+}
+
+// RetainedTail lays out only the latest visible suffix at an independent drawing
+// width. Raw CR/autowrap interpretation stays at the actual terminal width.
+// It scans cell widths within a selected logical line, but retains at most limit
+// fragments: a very long line cannot allocate a history-sized drawing document.
+func (e *Emulator) RetainedTail(width, limit int) []RetainedViewRow {
+	if width < 1 || limit < 1 {
+		return nil
+	}
+	s := &e.scrs[0]
+	rows, _ := s.retainedRows()
+	first := uint64(0)
+	if s.scrollback != nil {
+		first = s.scrollback.droppedLines
+	}
+	logical := first
+	for i := 0; i+1 < len(rows); i++ {
+		if rows[i].wrap == 0 {
+			logical++
+		}
+	}
+	// ED2 intentionally hides earlier history until explicit browsing, just as
+	// resizeRetained honors this SDK-owned clear boundary.
+	floor := max(first, s.clearBoundary)
+	var groups [][]RetainedViewRow
+	kept := 0
+	for end := len(rows); end > 0 && kept < limit && logical >= floor; {
+		start := end - 1
+		for start > 0 && rows[start-1].wrap > 0 {
+			start--
+		}
+		lines := layoutRetainedTail(rows[start:end], width, limit-kept)
+		group := make([]RetainedViewRow, len(lines))
+		for i, line := range lines {
+			group[i] = RetainedViewRow{line, logical}
+		}
+		groups = append(groups, group)
+		kept += len(group)
+		end = start
+		if logical == 0 {
+			break
+		}
+		logical--
+	}
+	out := make([]RetainedViewRow, 0, kept)
+	for i := len(groups) - 1; i >= 0; i-- {
+		out = append(out, groups[i]...)
+	}
+	return out
+}
+
+func layoutRetainedTail(rows []retainedRow, width, limit int) []uv.Line {
+	ring := []uv.Line{uv.NewLine(width)}
+	count, column := 0, 0
+	for _, row := range rows {
+		last := max(contentWidth(row.cells), row.used, row.wrap)
+		for i := 0; i < last; {
+			cell := uv.EmptyCell
+			if i < len(row.cells) {
+				cell = row.cells[i]
+			}
+			w := max(cell.Width, 1)
+			if column > 0 && column+w > width {
+				count++
+				slot := count % limit
+				if slot >= len(ring) {
+					ring = append(ring, uv.NewLine(width))
+				} else {
+					clear(ring[slot])
+				}
+				column = 0
+			}
+			ring[count%limit].Set(column, &cell)
+			column += w
+			i += w
+		}
+	}
+	n := min(count+1, limit)
+	out := make([]uv.Line, n)
+	for i := range out {
+		out[i] = ring[(count+1-n+i)%len(ring)]
+	}
+	return out
+}
+
 // RetainedOutputTruncated reports actual scrollback eviction, not merely a full
 // buffer or a narrower drawing surface. Clearing scrollback resets this flag.
 func (e *Emulator) RetainedOutputTruncated() bool {
@@ -314,6 +428,18 @@ func (se *SafeEmulator) LogicalLines() []uv.Line {
 	se.mu.RLock()
 	defer se.mu.RUnlock()
 	return se.Emulator.LogicalLines()
+}
+
+func (se *SafeEmulator) LogicalRowPositions() (uint64, []uint64) {
+	se.mu.RLock()
+	defer se.mu.RUnlock()
+	return se.Emulator.LogicalRowPositions()
+}
+
+func (se *SafeEmulator) RetainedTail(width, limit int) []RetainedViewRow {
+	se.mu.RLock()
+	defer se.mu.RUnlock()
+	return se.Emulator.RetainedTail(width, limit)
 }
 
 func (se *SafeEmulator) RetainedOutputTruncated() bool {

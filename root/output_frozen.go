@@ -10,6 +10,8 @@ type frozenOutputRow struct {
 
 func (v *outputViewport) setFrozen(rows []string) {
 	v.frozen = rows
+	v.frozenPane = false
+	v.frozenStates = nil
 	v.frozenLayout = nil
 	v.frozenWidth = 0
 	v.frozenTruncated = false

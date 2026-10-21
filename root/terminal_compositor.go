@@ -236,6 +236,7 @@ type terminalChatboxConfig struct {
 	Separator                string
 	Scrollback               string
 	BlockDividers            bool
+	BlockStates              bool
 	SurfaceWidth             string
 	OutputViewport           string
 	OutputMouse              string
@@ -606,10 +607,35 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			dirtyInput = c.phase == terminalInput
 		}
 	}, func(event string) {
+		// Completion belongs to the execution, even while a resize has
+		// temporarily suspended drawing. Never infer it from a later prompt.
+		var exitCode *int
+		if value, ok := strings.CutPrefix(event, "command-end:"); ok && !c.commandStartedAt.IsZero() {
+			if status, err := strconv.Atoi(value); err == nil {
+				c.lastExitStatus = &status
+				c.statusSnapshot.ExitCode = &status
+				now := time.Now
+				if c.now != nil {
+					now = c.now
+				}
+				c.statusSnapshot.Duration = max(now().Sub(c.commandStartedAt), 0)
+				exitCode = &status
+				c.titleLinesCache = nil
+				c.statusLinesCache = nil
+			}
+		}
 		if !c.layout {
 			if strings.HasPrefix(event, "command-end") {
-				c.finishNativeOutput()
-				c.finishOutputExecution(false)
+				if c.viewportCommand && c.viewport != nil {
+					// Layout suspension does not end semantic ownership: flush
+					// staged text and the configured outcome before capture closes.
+					c.finishCommandOutput(exitCode)
+				} else {
+					c.finishNativeOutput()
+					c.endBlockRows()
+				}
+				incomplete := c.finishOutputExecution(false)
+				c.finishBlockState(exitCode, incomplete)
 				c.checkpointOutputRecovery()
 				c.commandStartedAt = time.Time{}
 				select {
@@ -683,23 +709,9 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.phase = terminalOutput
 			dirtyInput = false
 		case strings.HasPrefix(event, "command-end"):
-			var exitCode *int
-			if value, ok := strings.CutPrefix(event, "command-end:"); ok && !c.commandStartedAt.IsZero() {
-				if status, err := strconv.Atoi(value); err == nil {
-					c.lastExitStatus = &status
-					c.statusSnapshot.ExitCode = &status
-					now := time.Now
-					if c.now != nil {
-						now = c.now
-					}
-					c.statusSnapshot.Duration = max(now().Sub(c.commandStartedAt), 0)
-					exitCode = &status
-					c.titleLinesCache = nil
-					c.statusLinesCache = nil
-				}
-			}
 			c.finishCommandOutput(exitCode)
-			c.finishOutputExecution(false)
+			incomplete := c.finishOutputExecution(false)
+			c.finishBlockState(exitCode, incomplete)
 			c.checkpointOutputRecovery()
 			select {
 			case c.runningStatusWake <- struct{}{}:
@@ -882,6 +894,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Separator:                chatbox.Separator,
 		Scrollback:               chatbox.Scrollback,
 		BlockDividers:            chatbox.BlockDividers,
+		BlockStates:              chatbox.BlockStates,
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,
@@ -1147,9 +1160,8 @@ func (c *terminalCompositor) Resize(width, height int) {
 		c.commandOutputStarted = false
 		c.commandOutputColumn = 0
 		c.rawCommandPending = false
-		c.commandStartedAt = time.Time{}
-		c.commandDirectory = ""
-		c.commandStatusSnapshot = statusSnapshot{}
+		// Geometry releases drawing, not the running execution. Its timing
+		// and status remain owned by command-end, including native applications.
 		return
 	}
 	if !c.layout && c.viewportSuspended {
@@ -1180,9 +1192,7 @@ func (c *terminalCompositor) Resize(width, height int) {
 		c.commandOutputStarted = false
 		c.commandOutputColumn = 0
 		c.rawCommandPending = false
-		c.commandStartedAt = time.Time{}
-		c.commandDirectory = ""
-		c.commandStatusSnapshot = statusSnapshot{}
+		// Reconstructing drawing likewise cannot cancel an active execution.
 		return
 	}
 	oldRows := c.surfaceContentRows
@@ -1742,6 +1752,7 @@ func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
 		}
 		c.finishNativeOutput()
 		c.appendViewportOutcome(exitCode)
+		c.endBlockRows()
 		c.writeCompletedViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))
 		c.lastCommandSnapshot = cloneStatusSnapshot(c.commandStatusSnapshot)
 		c.hasLastCommandSnapshot = true
@@ -2387,7 +2398,7 @@ func (c *terminalCompositor) completedExecutionOutcomeLines(duration time.Durati
 	snapshot.ExitCode = &exitCode
 	rowLimit := max(c.inputBoxStatusRowLimit(), 1)
 	segments := c.inputBoxBarSegmentsForSnapshot(bar, snapshot)
-	return c.renderBarLinesWithBackground(segments, rowLimit, c.completedMetadataBackground())
+	return c.renderBarLinesWithin(segments, rowLimit, c.completedMetadataBackground(), c.outputContentWidth())
 }
 
 func filterChatboxBar(
@@ -2639,7 +2650,11 @@ func (c *terminalCompositor) renderBarLinesWithBackground(
 	rowLimit int,
 	background string,
 ) []string {
-	inner := c.width - 2*terminalInputHorizontalPadding
+	return c.renderBarLinesWithin(segments, rowLimit, background, c.width)
+}
+
+func (c *terminalCompositor) renderBarLinesWithin(segments []terminalStatusSegment, rowLimit int, background string, width int) []string {
+	inner := max(width-2*terminalInputHorizontalPadding, 1)
 	separator := c.chatboxConfig.Separator
 	if c.chatboxConfig.Density == "compact" {
 		segments = slices.DeleteFunc(segments, func(segment terminalStatusSegment) bool {

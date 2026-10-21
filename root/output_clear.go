@@ -67,6 +67,17 @@ func (c *terminalCompositor) clearOutputViewport(mode int) {
 	}
 	v.write([]byte(controls))
 	v.setFrozen(nil)
+	if mode == 3 {
+		v.blocks = nil
+		if v.blockActive {
+			// ED3 discards earlier command rows, not its pending outcome.
+			v.blockStart, v.blockEnd = v.cursorLogicalRow(), 0
+		}
+	} else {
+		// ED2 retains the previous canvas in scrollback; its presentation
+		// boundaries have the same lifetime as that retained text.
+		v.pruneBlockStates()
+	}
 	v.search = nil
 	v.executions.selected = nil
 	v.executions.notice = ""

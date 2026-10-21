@@ -22,6 +22,7 @@ type outputModelStream struct {
 	last      outputModelTextCell
 	anchored  bool
 	shortened bool
+	losses    uint64
 }
 
 type outputModelTextCell struct {
@@ -166,6 +167,9 @@ func (s *outputModelStream) writeShortened(model *vt.Emulator) {
 	s.clearAnchor()
 	_, _ = model.Write([]byte(outputModelGraphemeNotice))
 	s.shortened = true
+	// Unlike the transient grapheme anchor, actual-loss events survive later
+	// text and controls so each execution can classify its own truncation.
+	s.losses++
 }
 
 func (s *outputModelStream) clearAnchor() {

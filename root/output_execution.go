@@ -79,7 +79,7 @@ func (c *terminalCompositor) captureExecutionOutput(data []byte) {
 }
 
 func (a *outputExecutionCapture) snapshot() retainedExecution {
-	r := retainedExecution{id: a.id, truncated: a.truncated, applicationOwned: a.applicationOwned}
+	r := retainedExecution{id: a.id, truncated: a.truncated || a.text.losses > 0, applicationOwned: a.applicationOwned}
 	if a.applicationOwned {
 		return r
 	}
@@ -147,9 +147,9 @@ func (r *retainedExecution) trim(lines, bytes int) {
 	}
 }
 
-func (c *terminalCompositor) finishOutputExecution(interrupted bool) {
+func (c *terminalCompositor) finishOutputExecution(interrupted bool) bool {
 	if c.viewport == nil || c.viewport.executions.active == nil {
-		return
+		return false
 	}
 	e := &c.viewport.executions
 	a := e.active
@@ -176,6 +176,7 @@ func (c *terminalCompositor) finishOutputExecution(interrupted bool) {
 	if first > 0 {
 		e.retained = append([]retainedExecution(nil), e.retained[first:]...)
 	}
+	return len(e.retained) > 0 && e.retained[len(e.retained)-1].truncated && !r.applicationOwned
 }
 
 func (c *terminalCompositor) selectOutputExecution(direction int) bool {

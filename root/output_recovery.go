@@ -26,16 +26,18 @@ const outputRecoveryPaneLimit = 64
 const outputRecoveryTruncated = "[VUJA] checkpoint output truncated"
 
 type outputRecoveryState struct {
-	Version   int       `json:"version"`
-	Owner     string    `json:"owner"`
-	Rows      []string  `json:"rows"`
-	SavedAt   time.Time `json:"saved_at,omitempty"`
-	Truncated bool      `json:"truncated,omitempty"`
+	Version   int                   `json:"version"`
+	Owner     string                `json:"owner"`
+	Rows      []string              `json:"rows"`
+	Blocks    []checkpointBlockSpan `json:"block_states,omitempty"`
+	SavedAt   time.Time             `json:"saved_at,omitempty"`
+	Truncated bool                  `json:"truncated,omitempty"`
 }
 
 type outputRecovery struct {
 	dir, path, owner string
 	rows             []string
+	blocks           []checkpointBlockSpan
 	truncated        bool
 	linkFor          func(string) string
 	restored         bool
@@ -113,9 +115,11 @@ func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor f
 		}
 		if checkpointExpired(state.SavedAt, now, r.maxAge) {
 			state.Rows, state.SavedAt = nil, time.Time{}
+			state.Blocks = nil
 			state.Truncated = false
 		}
 		r.rows = state.Rows
+		r.blocks = state.Blocks
 		r.truncated = state.Truncated
 		state.Version, state.Owner = 1, r.owner
 		if err := r.writeState(state); err != nil {
@@ -279,11 +283,31 @@ func readOutputRecoveryState(path string) (outputRecoveryState, error) {
 	if err != nil {
 		return state, err
 	}
-	if len(data) > outputRecoveryByteLimit || json.Unmarshal(data, &state) != nil || state.Version != 1 || len(state.Rows) > 10000 {
+	// Decode cosmetic data separately: an incompatible optional presentation
+	// shape must not make otherwise valid version-1 transcript text unreadable.
+	type recoveryFields outputRecoveryState
+	decoded := struct {
+		*recoveryFields
+		Blocks json.RawMessage `json:"block_states"`
+	}{recoveryFields: (*recoveryFields)(&state)}
+	if len(data) > outputRecoveryByteLimit || json.Unmarshal(data, &decoded) != nil || state.Version != 1 || len(state.Rows) > 10000 {
 		return outputRecoveryState{}, errors.New("invalid output recovery state")
+	}
+	if json.Unmarshal(decoded.Blocks, &state.Blocks) != nil {
+		state.Blocks = nil
 	}
 	for i, row := range state.Rows {
 		state.Rows[i] = recoveryRow(row, nil, false)
+	}
+	// Optional display metadata never determines which text can be restored.
+	// Old checkpoints have none; invalid/future values restore neutral text.
+	last := -1
+	for _, b := range state.Blocks {
+		if b.First <= last || b.Last < b.First || b.Last >= len(state.Rows) || b.State < blockNeutral || b.State > blockError {
+			state.Blocks = nil
+			break
+		}
+		last = b.Last
 	}
 	// Early version-1 checkpoints carried only this reserved leading notice.
 	// Lift it into metadata before a smaller live model can evict the row.
@@ -304,20 +328,37 @@ func (r *outputRecovery) writeState(state outputRecoveryState) error {
 	// and reserve room for a notice that survives legacy version-1 readers.
 	const budget = outputRecoveryByteLimit - 512
 	rows, shortened := checkpointRowsWithinBudget(state.Rows, budget, 10000)
+	blocks := checkpointBlockSuffix(state.Blocks, len(state.Rows)-len(rows), len(rows))
 	state.Truncated = state.Truncated || shortened
 	if state.Truncated {
 		original := state.Rows
+		originalBlocks := state.Blocks
 		if len(original) > 0 && original[0] == outputRecoveryTruncated {
 			original = original[1:]
+			originalBlocks = checkpointBlockSuffix(originalBlocks, 1, len(original))
 		}
 		notice, _ := json.Marshal(outputRecoveryTruncated)
 		rows, _ = checkpointRowsWithinBudget(original, budget-len(notice)-1, 9999)
+		blocks = checkpointBlockSuffix(originalBlocks, len(original)-len(rows), len(rows))
 		rows = append([]string{outputRecoveryTruncated}, rows...)
+		for i := range blocks {
+			blocks[i].First++
+			blocks[i].Last++
+		}
 	}
 	state.Rows = rows
+	state.Blocks = blocks
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
+	}
+	if len(data) > outputRecoveryByteLimit && len(state.Blocks) > 0 {
+		// Cosmetic state must never evict otherwise fitting transcript text.
+		state.Blocks = nil
+		data, err = json.Marshal(state)
+		if err != nil {
+			return err
+		}
 	}
 	f, err := os.CreateTemp(r.dir, ".checkpoint-")
 	if err != nil {
@@ -465,13 +506,19 @@ func (c *terminalCompositor) restoreOutputRecovery() {
 	if len(r.rows) > 0 {
 		c.viewport.write([]byte("[VUJA] Output restored; process not resumed\r\n"))
 	}
+	base := c.viewport.cursorLogicalRow()
 	for i, row := range r.rows {
 		if i > 0 {
 			c.viewport.write([]byte("\r\n"))
 		}
 		c.viewport.write([]byte(recoveryRow(row, r.linkFor, true)))
 	}
+	for _, b := range r.blocks {
+		c.viewport.blocks = append(c.viewport.blocks, blockSpan{base + uint64(b.First), base + uint64(b.Last), b.State})
+	}
 	r.rows = nil
+	r.blocks = nil
+	c.viewport.pruneBlockStates()
 }
 
 // Snapshot under compositor ownership; persistence runs only on its bounded
@@ -484,6 +531,7 @@ func (c *terminalCompositor) checkpointOutputRecovery() {
 	}
 	m := c.viewport.model
 	stored := retainedModelRows(m)
+	storedBlocks := c.viewport.checkpointBlocks(len(stored))
 	count := len(stored)
 	var rows []string
 	bytes := 0
@@ -506,10 +554,11 @@ func (c *terminalCompositor) checkpointOutputRecovery() {
 		rows = append(rows, line)
 	}
 	slices.Reverse(rows)
+	blocks := checkpointBlockSuffix(storedBlocks, count-len(rows), len(rows))
 	r.dirty = false
 	now := c.checkpointNow()
 	r.nextCheckpoint = now.Add(c.outputCheckpointInterval())
-	r.writer.submit(outputCheckpointSnapshot{rows: rows, savedAt: now.UTC(), truncated: shortened})
+	r.writer.submit(outputCheckpointSnapshot{rows: rows, blocks: blocks, savedAt: now.UTC(), truncated: shortened})
 }
 
 func (c *terminalCompositor) checkpointNow() time.Time {
@@ -559,7 +608,7 @@ func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded 
 			superseded = true
 			return nil
 		}
-		if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: snapshot.rows, SavedAt: snapshot.savedAt, Truncated: snapshot.truncated}); err != nil {
+		if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: snapshot.rows, Blocks: snapshot.blocks, SavedAt: snapshot.savedAt, Truncated: snapshot.truncated}); err != nil {
 			return err
 		}
 		return r.prune(snapshot.savedAt)

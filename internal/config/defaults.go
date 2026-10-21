@@ -30,6 +30,7 @@ func DefaultConfig() *Config {
 				Separator:                " · ",
 				Scrollback:               "blocks",
 				BlockDividers:            true,
+				BlockStates:              true,
 				SurfaceWidth:             "full-width",
 				OutputViewport:           "pinned",
 				OutputMouse:              "select",
