@@ -60,6 +60,7 @@ type terminalCompositor struct {
 	layout         bool
 	awaitingPrompt bool
 	marker         string
+	resumeLinkFor  func(string) string
 	width          int
 	height         int
 	closed         bool

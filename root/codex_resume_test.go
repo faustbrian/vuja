@@ -1,6 +1,7 @@
 package root
 
 import (
+	"bytes"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -225,16 +226,12 @@ func TestCodexResumeActionServerAcceptsOnlyObservedSessionIDs(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	actionURL := server.Observe(testCodexResumeID)
-	if err := dispatchCodexResumeURL(actionURL, actionsDir); err != nil {
+	var input bytes.Buffer
+	if err := dispatchResumeFixture(t, server, actionURL, actionsDir, false, "", 0, &input); err != nil {
 		t.Fatalf("dispatch observed resume URL: %v", err)
 	}
-	select {
-	case got := <-server.Actions():
-		if got != testCodexResumeID {
-			t.Fatalf("expected observed ID %q, got %q", testCodexResumeID, got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for observed resume action")
+	if input.String() != "codex resume "+testCodexResumeID+"\r" {
+		t.Fatal("observed activation did not submit the exact command")
 	}
 
 	parsed, err := url.Parse(actionURL)
@@ -242,12 +239,12 @@ func TestCodexResumeActionServerAcceptsOnlyObservedSessionIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed.Path = "/019fbd44-9268-7963-b8f5-a8aa6165da2f"
-	if err := dispatchCodexResumeURL(parsed.String(), actionsDir); err != nil {
-		t.Fatalf("dispatch well-formed unobserved URL: %v", err)
+	if err := dispatchCodexResumeURL(parsed.String(), actionsDir); err == nil {
+		t.Fatal("unobserved URL must report rejection")
 	}
 	select {
 	case got := <-server.Actions():
-		t.Fatalf("expected unobserved ID to be rejected, got %q", got)
+		t.Fatalf("expected unobserved ID to be rejected, got %q", got.id)
 	case <-time.After(50 * time.Millisecond):
 	}
 }
@@ -274,16 +271,12 @@ func TestCodexResumeActionServerFallsBackFromLongPrivateDirectory(t *testing.T) 
 	}
 
 	actionURL := server.Observe(testCodexResumeID)
-	if err := dispatchCodexResumeURL(actionURL, actionsDir); err != nil {
+	var input bytes.Buffer
+	if err := dispatchResumeFixture(t, server, actionURL, actionsDir, false, "", 0, &input); err != nil {
 		t.Fatalf("dispatch through fallback socket: %v", err)
 	}
-	select {
-	case got := <-server.Actions():
-		if got != testCodexResumeID {
-			t.Fatalf("expected observed ID %q, got %q", testCodexResumeID, got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for fallback resume action")
+	if input.String() != "codex resume "+testCodexResumeID+"\r" {
+		t.Fatal("fallback activation did not submit the exact command")
 	}
 }
 

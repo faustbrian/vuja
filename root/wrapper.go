@@ -285,11 +285,21 @@ func runWrapper() {
 		_ = w.Close()
 		return
 	}
+	resumeReader, resumeWriter, err := os.Pipe()
+	if err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		_ = historyAckReader.Close()
+		_ = historyAckWriter.Close()
+		return
+	}
 	defer func() {
 		_ = r.Close()
 		_ = w.Close()
 		_ = historyAckReader.Close()
 		_ = historyAckWriter.Close()
+		_ = resumeReader.Close()
+		_ = resumeWriter.Close()
 	}()
 
 	var shellName string
@@ -310,14 +320,18 @@ func runWrapper() {
 
 	ctx := context.Background()
 	c := exec.CommandContext(ctx, adapter.GetShellPath())
-	c.ExtraFiles = make([]*os.File, 12)
+	c.ExtraFiles = make([]*os.File, 13)
 	// pass write end of pipe to shell as fd 13 (since index 10 maps to 13)
 	c.ExtraFiles[10] = w
 	// pass the read end of the history acknowledgement pipe as fd 14. Shell
 	// pre-exec hooks wait for this acknowledgement before launching a command.
 	c.ExtraFiles[11] = historyAckReader
+	// Dedicated editor-action pipe; fd14 remains owned by history admission.
+	c.ExtraFiles[12] = resumeReader
 	c.Env = adapter.GetEnv(13, os.Getpid())
 	c.Env = append(c.Env, "VUJA_HISTORY_ACK_FD=14")
+	c.Env = replaceEnv(c.Env, "VUJA_RESUME_FD", "15")
+	resumeEditor := &shellResumeEditor{shell: shellName, requests: resumeWriter}
 	c.Env = slices.DeleteFunc(c.Env, func(value string) bool {
 		return strings.HasPrefix(value, "VUJA_MARKER=") ||
 			strings.HasPrefix(value, "VUJA_MANAGED_PROMPT=") ||
@@ -342,6 +356,7 @@ func runWrapper() {
 		_, _ = fmt.Fprintf(os.Stderr, "[VUJA] failed to start PTY: %v\n", err)
 		return
 	}
+	resumeEditor.wake = ptmx
 	defer func() { _ = ptmx.Close() }()
 
 	_ = pty.InheritSize(os.Stdin, ptmx)
@@ -572,12 +587,15 @@ func runWrapper() {
 		}
 	})
 	defer stopRuntimeDiagnostics()
-	var codexResumeActions <-chan string
+	var codexResumeActions <-chan *codexResumeAction
+	var codexResumeNotices <-chan string
+	var pendingResumeNotice string
 	var resumeLinkFor func(string) string
 	codexResumeLinks := newCodexResumeLinkifier(nil)
 	if codexResumeURLHandlerSupported() {
 		if server, serverErr := newCodexResumeActionServer(); serverErr == nil {
 			codexResumeActions = server.Actions()
+			codexResumeNotices = server.Notices()
 			resumeLinkFor = server.Observe
 			codexResumeLinks = newCodexResumeLinkifier(server.Observe)
 			defer server.Close()
@@ -585,6 +603,7 @@ func runWrapper() {
 			logger.Debugf("Clickable Codex resume actions unavailable: %v", serverErr)
 		}
 	}
+	display.SetCodexResumeLinker(resumeLinkFor)
 	if statePath, err := config.StatePath(); err == nil {
 		if err := display.ConfigureOutputRecovery(filepath.Join(filepath.Dir(statePath), "terminal-output"), outputRecoveryPaneID(os.Getenv), resumeLinkFor); err != nil {
 			writeNotification([]byte("[VUJA] output recovery unavailable; live output is unaffected"))
@@ -671,6 +690,9 @@ func runWrapper() {
 				writeNotification([]byte("[VUJA] command exceeds the history capture limit; execution remains available without recording"))
 			}
 			query := string(message)
+			if resumeEditor.Handle(query) {
+				continue
+			}
 			if handled, controlErr := handleHistoryRecordingMessage(query, &historyRecording, historyAckWriter); handled {
 				if controlErr != nil {
 					logger.Errorf("history recording control acknowledgement failed: %v", controlErr)
@@ -1265,6 +1287,10 @@ func runWrapper() {
 	}()
 inputLoop:
 	for {
+		if pendingResumeNotice != "" && !isExecuting() {
+			writeNotification([]byte("\r\n[VUJA] " + pendingResumeNotice + "\r\n"))
+			pendingResumeNotice = ""
+		}
 		var inputSlice []byte
 		var inputShell bool
 		if len(queuedInput) > 0 {
@@ -1322,24 +1348,52 @@ inputLoop:
 				viewportKeyTimeout = nil
 				inputShell = terminalReports.pendingOwner.shell
 				inputSlice = terminalReports.FlushEscape(display, overlay.IsVisible())
-			case id, ok := <-codexResumeActions:
+			case notice, ok := <-codexResumeNotices:
+				if !ok {
+					codexResumeNotices = nil
+					continue
+				}
+				pendingResumeNotice = notice
+				continue
+			case action, ok := <-codexResumeActions:
 				if !ok {
 					codexResumeActions = nil
 					continue
 				}
 				shellBusy := isExecuting()
-				bufferMu.Lock()
-				payload := codexResumeInput(id, shellBusy, naiveBuffer, cursorOffset)
-				bufferMu.Unlock()
-				if len(payload) == 0 {
-					continue
+				attempted := false
+				// Parent-side LBUFFER is only a suggestion prefix, never authority
+				// to insert input. The actual shell editor decides admission.
+				result := submitCodexResumeAction(action, shellBusy, resumeEditor, func() func() {
+					attempted = true
+					// Reserve submission before writing, just like ordinary Enter;
+					// preexec/foreground-process updates arrive asynchronously.
+					isCommandActive.Store(true)
+					status.SetCommandActive(true)
+					bufferMu.Lock()
+					lastSubmittedCommand = codexResumeCommand(action.id)
+					lastHistoryAdmission = historyRecording.capture()
+					lastCommandHistoryIgnored = false
+					pendingFeedback = suggestionFeedbackSubmission{}
+					pendingFeedbackCWD = ""
+					bufferMu.Unlock()
+					historyNav.Cancel()
+					historySearch.Close()
+					presentOverlay(overlay.ClearAndDisable)
+					disableGhostText.Store(false)
+					userNavigated.Store(false)
+					return func() {
+						isCommandActive.Store(false)
+						status.SetCommandActive(false)
+					}
+				})
+				if attempted && result.err != nil {
+					if !result.consumed {
+						bufferMu.Lock()
+						lastSubmittedCommand = ""
+						bufferMu.Unlock()
+					}
 				}
-				historyNav.Cancel()
-				historySearch.Close()
-				presentOverlay(overlay.ClearAndDisable)
-				disableGhostText.Store(false)
-				userNavigated.Store(false)
-				_, _ = ptmx.Write(payload)
 				continue
 			case next, ok := <-terminalInput:
 				if !ok {

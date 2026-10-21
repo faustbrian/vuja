@@ -245,6 +245,19 @@ an OSC 8 hyperlink. Activate the link with the terminal's normal link modifier
 the originating Vuja session. For safety, activation is accepted only while
 that shell is idle and its prompt is empty. `vuja setup` registers the private
 `vuja://` action handler on macOS and Linux; `vuja uninstall` removes it.
+Native-screen exit summaries keep working links after the prompt returns.
+Rejected clicks report a reason and do not queue execution for later; clear the
+prompt or wait for it to become idle, then click again. Links expire after ten
+minutes and successful submissions are single-use. If a link has expired, run
+the displayed resume command manually. Checkpoints never store activation
+credentials; restored panes obtain fresh links from their current owner.
+Reopen pre-upgrade Vuja sessions to use the acknowledged activation protocol.
+Automatic activation currently requires Zsh's editor integration. It checks the
+whole primary-prompt buffer inside ZLE, including text to the right of the
+cursor, before accepting the command. Bash, Fish, or an unavailable integration
+reject automatic activation with an explanation; the displayed command remains
+available to copy and run manually. Vuja never falls back to injecting command
+text into an editor whose actual state it cannot verify.
 
 ### Local SSH host discovery
 

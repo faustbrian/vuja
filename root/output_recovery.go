@@ -79,6 +79,7 @@ func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor f
 	if c.outputRecovery != nil {
 		return errors.New("output recovery is already configured for this session")
 	}
+	c.resumeLinkFor = linkFor
 	if pane == "" {
 		return nil
 	}

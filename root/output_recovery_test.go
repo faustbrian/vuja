@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func recoveryCompositor(t *testing.T, dir, pane, marker string, linkFor func(string) string) (*terminalCompositor, *bytes.Buffer) {
@@ -126,16 +125,12 @@ func TestOutputRecoveryFreshActionDispatchesOnlyRecoveredID(t *testing.T) {
 	if action == "" || !strings.Contains(out.String(), action) {
 		t.Fatal("restored session was not registered with the new action server")
 	}
-	if err := dispatchCodexResumeURL(action, actions); err != nil {
+	var input bytes.Buffer
+	if err := dispatchResumeFixture(t, fresh, action, actions, false, "", 0, &input); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case id := <-fresh.Actions():
-		if id != testCodexResumeID {
-			t.Fatal("wrong resumed session")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("restored action did not dispatch")
+	if input.String() != "codex resume "+testCodexResumeID+"\r" {
+		t.Fatal("restored action did not submit the exact command")
 	}
 }
 

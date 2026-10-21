@@ -27,7 +27,7 @@ type nativeOutputTail struct {
 	clearMode int
 }
 
-func newNativeOutputTail() *nativeOutputTail {
+func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 	s := &nativeOutputTail{accepting: true, clearOnly: true}
 	p := ansi.NewParser()
 	p.SetDataSize(4096)
@@ -79,9 +79,14 @@ func newNativeOutputTail() *nativeOutputTail {
 				s.resumeIDs = make(map[string]bool)
 			}
 			s.resumeIDs[id] = true
-			// Persist only the recognised metadata and a credential-free link.
-			// Restore obtains a fresh action from the current session's owner.
-			fmt.Fprintf(&s.output, "\r\nTo continue this session, run codex resume \x1b]8;;vuja://codex-resume/%s\x1b\\%s\x1b]8;;\x1b\\\r\n", id, id)
+			// Live retained rows need the same owner capability as direct output.
+			// Checkpoint serialization strips it; without an owner the bare target
+			// is metadata for recovery only and is suppressed by the renderer.
+			target := "vuja://codex-resume/" + id
+			if linkFor != nil {
+				target = linkFor(id)
+			}
+			fmt.Fprintf(&s.output, "\r\nTo continue this session, run codex resume \x1b]8;;%s\x1b\\%s\x1b]8;;\x1b\\\r\n", target, id)
 		}
 		return "" // Observation only: no terminal action or execution.
 	})

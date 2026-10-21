@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,9 +32,20 @@ const (
 	codexResumeLineLimit       = 2048
 	codexResumeTTL             = 10 * time.Minute
 	codexResumeSocketPathLimit = 100
+	codexResumeActionTimeout   = time.Second
 )
 
 var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+// Credential-free checkpoint placeholders are metadata, not working actions.
+// Keep them in retained rows for rebinding, but never advertise them as links.
+var bareCodexResumeLink = regexp.MustCompile(`\x1b]8;[^;\x07\x1b]*;vuja://codex-resume/[0-9a-fA-F-]{36}(?:\x07|\x1b\\)`)
+
+func (c *terminalCompositor) SetCodexResumeLinker(linkFor func(string) string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.resumeLinkFor = linkFor
+}
 
 type codexResumeLinkifier struct {
 	linkFor              func(string) string
@@ -287,11 +299,119 @@ type codexResumeActionServer struct {
 	listener   *net.UnixListener
 	socketPath string
 	token      string
-	actions    chan string
+	actions    chan *codexResumeAction
+	notices    chan string
+	stop       chan struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
 	mu         sync.Mutex
 	observed   map[string]time.Time
+}
+
+type codexResumeResult struct {
+	consumed bool
+	err      error
+}
+
+// Claiming and cancellation share a lock: a queued timeout cannot run later.
+// Once a terminal write starts, a timeout is ambiguous and must not re-arm it.
+type codexResumeAction struct {
+	id       string
+	deadline time.Time
+	mu       sync.Mutex
+	done     bool
+	result   chan codexResumeResult
+}
+
+func (a *codexResumeAction) reject(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.done {
+		a.done = true
+		a.result <- codexResumeResult{err: err}
+	}
+}
+
+func (a *codexResumeAction) run(submit func() codexResumeResult) codexResumeResult {
+	a.mu.Lock()
+	if a.done {
+		a.mu.Unlock()
+		return codexResumeResult{err: errors.New("resume request is no longer active")}
+	}
+	if !a.deadline.After(time.Now()) {
+		a.done = true
+		result := codexResumeResult{err: errors.New("resume activation request expired; click again")}
+		a.result <- result
+		a.mu.Unlock()
+		return result
+	}
+	a.done = true
+	a.mu.Unlock()
+	result := submit()
+	a.result <- result
+	return result
+}
+
+func (a *codexResumeAction) cancel(err error) codexResumeResult {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case result := <-a.result:
+		return result
+	default:
+	}
+	if !a.done {
+		a.done = true
+		return codexResumeResult{err: err}
+	}
+	return codexResumeResult{consumed: true, err: errors.New("resume submission status is unknown; inspect the terminal before retrying manually")}
+}
+
+func submitCodexResumeAction(a *codexResumeAction, shellBusy bool, writer io.Writer, reserve func() func()) codexResumeResult {
+	if shellBusy {
+		err := errors.New("shell is busy; click again at an idle empty prompt")
+		a.reject(err)
+		return codexResumeResult{err: err}
+	}
+	payload := codexResumeInput(a.id, false, "", 0)
+	if len(payload) == 0 {
+		err := errors.New("invalid Codex resume session ID")
+		a.reject(err)
+		return codexResumeResult{err: err}
+	}
+	editor, ok := writer.(codexResumeEditor)
+	if !ok {
+		err := errors.New("shell editor activation is unavailable; run the displayed command manually")
+		a.reject(err)
+		return codexResumeResult{err: err}
+	}
+	if err := editor.Prepare(a.id, a.deadline); err != nil {
+		a.reject(err)
+		return codexResumeResult{err: err}
+	}
+	defer editor.Cancel()
+	return a.run(func() codexResumeResult {
+		var rollback func()
+		if reserve != nil {
+			rollback = reserve()
+		}
+		n, err := writer.Write(payload)
+		if err == nil && n != len(payload) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			// Only a definite zero-byte failure releases the prompt reservation.
+			// Positive-byte errors may already have submitted a command.
+			if n == 0 && rollback != nil {
+				rollback()
+			}
+			if n > 0 {
+				return codexResumeResult{consumed: true, err: errors.New("resume input may have been submitted; inspect the terminal before retrying manually")}
+			}
+			return codexResumeResult{err: errors.New("resume input could not be submitted; click again when the terminal is available")}
+		}
+		return codexResumeResult{consumed: true}
+	})
 }
 
 func newCodexResumeActionServer() (*codexResumeActionServer, error) {
@@ -330,7 +450,8 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	}
 	server := &codexResumeActionServer{
 		listener: listener, socketPath: socketPath, token: token,
-		actions: make(chan string, 4), done: make(chan struct{}), observed: make(map[string]time.Time),
+		actions: make(chan *codexResumeAction, 4), notices: make(chan string, 4),
+		stop: make(chan struct{}), done: make(chan struct{}), observed: make(map[string]time.Time),
 	}
 	go server.serve()
 	return server, nil
@@ -398,16 +519,19 @@ func (s *codexResumeActionServer) Observe(id string) string {
 	}).String()
 }
 
-func (s *codexResumeActionServer) Actions() <-chan string {
+func (s *codexResumeActionServer) Actions() <-chan *codexResumeAction {
 	if s == nil {
 		return nil
 	}
 	return s.actions
 }
 
+func (s *codexResumeActionServer) Notices() <-chan string { return s.notices }
+
 func (s *codexResumeActionServer) serve() {
 	defer close(s.done)
 	defer close(s.actions)
+	defer close(s.notices)
 	for {
 		connection, err := s.listener.AcceptUnix()
 		if err != nil {
@@ -419,33 +543,74 @@ func (s *codexResumeActionServer) serve() {
 
 func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 	defer func() { _ = connection.Close() }()
+	reply := func(result codexResumeResult) {
+		_ = connection.SetWriteDeadline(time.Now().Add(codexResumeActionTimeout))
+		if result.err != nil {
+			_, _ = fmt.Fprintf(connection, "error\t%s\n", result.err)
+			select {
+			case s.notices <- result.err.Error():
+			default:
+			}
+		} else {
+			_, _ = io.WriteString(connection, "ok\n")
+		}
+	}
 	_ = connection.SetReadDeadline(time.Now().Add(time.Second))
 	line, err := bufio.NewReader(io.LimitReader(connection, 256)).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return
 	}
 	parts := strings.Split(strings.TrimSpace(line), "\t")
-	if len(parts) != 2 || parts[0] != s.token || !isCodexResumeID(parts[1]) {
+	if len(parts) != 3 || parts[0] != s.token || !isCodexResumeID(parts[1]) {
+		reply(codexResumeResult{err: errors.New("invalid resume activation credentials")})
 		return
 	}
 	id := strings.ToLower(parts[1])
 	now := time.Now()
+	deadlineNS, err := strconv.ParseInt(parts[2], 10, 64)
+	deadline := time.Unix(0, deadlineNS)
+	// Include the deadline in the request: a connection waiting in the Unix
+	// backlog must not execute after its caller has stopped waiting.
+	if err != nil || !deadline.After(now) || deadline.After(now.Add(codexResumeActionTimeout)) {
+		reply(codexResumeResult{err: errors.New("resume activation request expired; click again at an idle prompt")})
+		return
+	}
 	s.mu.Lock()
 	expires, observed := s.observed[id]
-	if observed && expires.After(now) {
-		delete(s.observed, id)
-	} else {
+	if !expires.After(now) {
 		delete(s.observed, id)
 		observed = false
 	}
 	s.mu.Unlock()
 	if !observed {
+		reply(codexResumeResult{err: errors.New("resume link expired or was already used; run the displayed resume command manually")})
 		return
 	}
+	action := &codexResumeAction{id: id, deadline: deadline, result: make(chan codexResumeResult, 1)}
 	select {
-	case s.actions <- id:
+	case s.actions <- action:
 	default:
+		reply(codexResumeResult{err: errors.New("resume receiver is busy; click again")})
+		return
 	}
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	var result codexResumeResult
+	select {
+	case result = <-action.result:
+	case <-timer.C:
+		result = action.cancel(errors.New("resume receiver did not respond; click again at an idle prompt"))
+	case <-s.stop:
+		result = action.cancel(errors.New("Vuja session closed before resume activation"))
+	}
+	if result.consumed {
+		s.mu.Lock()
+		if s.observed[id].Equal(expires) {
+			delete(s.observed, id)
+		}
+		s.mu.Unlock()
+	}
+	reply(result)
 }
 
 func (s *codexResumeActionServer) Close() {
@@ -453,6 +618,7 @@ func (s *codexResumeActionServer) Close() {
 		return
 	}
 	s.closeOnce.Do(func() {
+		close(s.stop)
 		_ = s.listener.Close()
 		<-s.done
 		_ = os.Remove(s.socketPath)
@@ -488,10 +654,24 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	}
 	defer func() { _ = connection.Close() }()
 	_ = connection.SetWriteDeadline(time.Now().Add(time.Second))
-	if _, err := fmt.Fprintf(connection, "%s\t%s\n", token, strings.ToLower(decodedID)); err != nil {
+	deadline := time.Now().Add(codexResumeActionTimeout).UnixNano()
+	if _, err := fmt.Fprintf(connection, "%s\t%s\t%d\n", token, strings.ToLower(decodedID), deadline); err != nil {
 		return fmt.Errorf("send Codex resume action: %w", err)
 	}
-	return nil
+	// A successful socket write is not acceptance by the owning shell. Older
+	// fire-and-forget servers close without a reply and must not look successful.
+	_ = connection.SetReadDeadline(time.Now().Add(3 * codexResumeActionTimeout))
+	reply, err := bufio.NewReader(io.LimitReader(connection, 512)).ReadString('\n')
+	if err != nil {
+		return errors.New("Vuja did not confirm resume activation; inspect the originating terminal")
+	}
+	if reply == "ok\n" {
+		return nil
+	}
+	if message, ok := strings.CutPrefix(strings.TrimSpace(reply), "error\t"); ok {
+		return fmt.Errorf("Codex resume: %s", message)
+	}
+	return errors.New("invalid Vuja resume activation response")
 }
 
 func codexResumeActionsDir() (string, error) {

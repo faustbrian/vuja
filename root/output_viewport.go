@@ -166,7 +166,7 @@ func (c *terminalCompositor) suspendOutputViewport() {
 	c.viewportPassthrough = true
 	if c.viewport != nil {
 		if c.viewport.native == nil {
-			c.viewport.native = newNativeOutputTail()
+			c.viewport.native = newNativeOutputTail(c.resumeLinkFor)
 		}
 		c.viewport.frozen = nil
 		c.viewport.newOutput = false
@@ -428,6 +428,9 @@ func (c *terminalCompositor) renderOutputViewport() {
 			}
 		} else {
 			line = viewportLine(v.model, row, c.width, false)
+		}
+		if strings.Contains(line, "vuja://codex-resume/") {
+			line = bareCodexResumeLink.ReplaceAllString(line, "")
 		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row+1, line)
 	}
