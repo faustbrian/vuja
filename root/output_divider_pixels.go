@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,7 +28,10 @@ type pixelDividers struct {
 	screen, uploadScreen      uint64
 	probe                     uint32
 	probeOK                   bool
+	itermGeometry             bool
 	cellWidth, cellHeight     int
+	windowWidth               int
+	backingScale              float64
 	image, upload             uint32
 	uploadEpoch               uint64
 	width, uploadWidth        int
@@ -56,16 +60,25 @@ func dividerNonce() uint32 {
 
 func (c *terminalCompositor) deleteDividerImage(free bool) {
 	d := &c.dividerPixels
-	if d.image != 0 && (free || len(d.placements) > 0) {
-		kind := "i"
+	if d.image != 0 {
 		if free {
-			kind = "I"
+			fmt.Fprintf(c.out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", d.image)
+		} else {
+			deleteDividerPlacements(c.out, d.image, len(d.placements))
 		}
-		fmt.Fprintf(c.out, "\x1b_Ga=d,d=%s,i=%d,q=2\x1b\\", kind, d.image)
 	}
 	d.placements = nil
 	if free {
 		d.image = 0
+	}
+}
+
+func deleteDividerPlacements(out io.Writer, image uint32, count int) {
+	// iTerm 3.7.3's image-wide d=i frees the pixels too; only p-scoped
+	// deletion retains the upload for redraw. KittyImageController.swift,
+	// executeDeleteImage, https://github.com/gnachman/iTerm2 (also probed live).
+	for i := range count {
+		fmt.Fprintf(out, "\x1b_Ga=d,d=i,i=%d,p=%d,q=2\x1b\\", image, i+1)
 	}
 }
 
@@ -77,6 +90,8 @@ func (c *terminalCompositor) invalidatePixelDividers() {
 	c.deleteDividerImage(true)
 	d.epoch++
 	d.cellWidth, d.cellHeight = 0, 0
+	d.windowWidth, d.backingScale = 0, 0
+	d.itermGeometry = false
 	// At most one outstanding probe and upload, even on unsupported terminals.
 	// Their tagged replies remain ours across resize or native handoff.
 }
@@ -115,8 +130,11 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 			d.probeEpoch, d.probeOK = d.epoch, false
 			// Non-storing capability query, cell pixels, then an ordered DA1
 			// fence. Missing replies mean no graphic, never a padded glyph row.
-			// CSI 16 t / CSI 6;h;w t: xterm ctlseqs, Window manipulation.
-			fmt.Fprintf(c.out, "\x1b_Ga=q,i=%d,f=24,s=1,v=1;AAAA\x1b\\\x1b[16t\x1b[c", d.probe)
+			// iTerm 3.7.3 ignores CSI 16 t but supports ReportCellSize, whose
+			// points and backing scale give native image pixels. CSI 14 t is
+			// not a substitute: iTerm reports a window frame including margins.
+			// https://iterm2.com/documentation-escape-codes.html (Report Cell Size)
+			fmt.Fprintf(c.out, "\x1b_Ga=q,i=%d,f=24,s=1,v=1;AAAA\x1b\\\x1b[16t\x1b]1337;ReportCellSize\x1b\\\x1b[14t\x1b[c", d.probe)
 		}
 		return
 	}
@@ -128,13 +146,32 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 		return
 	}
 	width, color := c.width*d.cellWidth, dividerGray(c.inputBoxTheme.Muted)
+	fullBleed := d.itermGeometry && c.chatboxConfig.SurfaceWidth != "content-width" && d.windowWidth > 0
+	if fullBleed {
+		// iTerm's image origin omits the side margins that EL-painted block
+		// backgrounds cover. Its CSI 14 t frame width is in points. Overscan
+		// to that width and let the terminal clip to its own pane surface.
+		// Verified in iTerm 3.7.3 with differently positioned strips in split
+		// panes: neither strip paints the neighboring pane. Content-width
+		// cards deliberately do not use this full-surface bleed.
+		pixels := math.Ceil(float64(d.windowWidth) * d.backingScale)
+		if pixels > float64(terminalWriterMaxPending/3) {
+			c.deleteDividerImage(true)
+			return
+		}
+		width = max(width, int(pixels))
+	}
 	if d.image != 0 && (d.width != width || d.color != color) {
 		c.deleteDividerImage(true)
 	}
 	var placements []pixelBoundary
 	for y, row := range rows {
 		if row.boundary && y < c.viewportContentRows() {
-			placements = append(placements, pixelBoundary{y, min(row.width, c.width) * d.cellWidth})
+			pixels := min(row.width, c.width) * d.cellWidth
+			if fullBleed {
+				pixels = width
+			}
+			placements = append(placements, pixelBoundary{y, pixels})
 		}
 	}
 	if len(placements) == 0 {
@@ -166,7 +203,7 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 	frame.WriteString(terminalSyncStart + "\x1b7")
 	// Erasing text does not erase Kitty images. Remove only our placements,
 	// never all graphics at a position/z-index or images owned by applications.
-	fmt.Fprintf(&frame, "\x1b_Ga=d,d=i,i=%d,q=2\x1b\\", d.image)
+	deleteDividerPlacements(&frame, d.image, len(d.placements))
 	for i, p := range placements {
 		// No c/r scaling: native one-pixel height, at the next header's very
 		// top pixel, not the underline baseline or center of a spare cell row.
@@ -225,7 +262,8 @@ func dividerReportPrefix(data []byte) bool {
 // tagged replies to our outstanding operations and their ordered probe fence
 // are consumed; unrelated application APC replies remain application input.
 func (c *terminalCompositor) ConsumeDividerReport(sequence []byte) bool {
-	if !bytes.HasPrefix(sequence, []byte("\x1b_G")) && !bytes.HasPrefix(sequence, []byte("\x1b[")) {
+	if !bytes.HasPrefix(sequence, []byte("\x1b_G")) && !bytes.HasPrefix(sequence, []byte("\x1b[")) &&
+		!bytes.HasPrefix(sequence, []byte("\x1b]1337;ReportCellSize=")) {
 		return false
 	}
 	c.mu.Lock()
@@ -258,12 +296,41 @@ func (c *terminalCompositor) ConsumeDividerReport(sequence []byte) bool {
 			}
 		}
 	} else if d.probe != 0 {
-		if strings.HasPrefix(text, "\x1b[6;") && strings.HasSuffix(text, "t") {
+		if value, ok := strings.CutPrefix(text, "\x1b]1337;ReportCellSize="); ok {
+			value = strings.TrimSuffix(strings.TrimSuffix(value, "\x1b\\"), "\x07")
+			parts := strings.Split(value, ";")
+			if len(parts) == 2 || len(parts) == 3 {
+				h, e1 := strconv.ParseFloat(parts[0], 64)
+				w, e2 := strconv.ParseFloat(parts[1], 64)
+				scale, e3 := 1.0, error(nil)
+				if len(parts) == 3 {
+					scale, e3 = strconv.ParseFloat(parts[2], 64)
+				}
+				height, width := math.Round(h*scale), math.Round(w*scale)
+				if e1 == nil && e2 == nil && e3 == nil && h > 0 && w > 0 && scale > 0 &&
+					height > 0 && height <= 65535 && width > 0 && width <= 65535 && d.probeEpoch == d.epoch {
+					d.cellWidth, d.cellHeight = int(width), int(height)
+					d.itermGeometry = true
+					d.backingScale = scale
+				}
+			}
+			consumed = true
+		} else if strings.HasPrefix(text, "\x1b[4;") && strings.HasSuffix(text, "t") {
+			parts := strings.Split(text[4:len(text)-1], ";")
+			if len(parts) == 2 {
+				_, e1 := strconv.ParseUint(parts[0], 10, 16)
+				width, e2 := strconv.ParseUint(parts[1], 10, 16)
+				if e1 == nil && e2 == nil && d.probeEpoch == d.epoch {
+					d.windowWidth = int(width)
+				}
+			}
+			consumed = true
+		} else if strings.HasPrefix(text, "\x1b[6;") && strings.HasSuffix(text, "t") {
 			parts := strings.Split(text[4:len(text)-1], ";")
 			if len(parts) == 2 {
 				h, e1 := strconv.ParseUint(parts[0], 10, 16)
 				w, e2 := strconv.ParseUint(parts[1], 10, 16)
-				if e1 == nil && e2 == nil && d.probeEpoch == d.epoch {
+				if e1 == nil && e2 == nil && !d.itermGeometry && d.probeEpoch == d.epoch {
 					d.cellWidth, d.cellHeight = int(w), int(h)
 				}
 			}

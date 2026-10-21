@@ -894,8 +894,9 @@ shared block boundary, not text rows or footer underlines. Full-width mode
 reaches every drawable column; content-width mode follows the next block's
 width. They add no text row or surrounding padding. The grey brightness follows
 the theme's muted color. This requires terminal support for Kitty graphics and
-cell-pixel reports (including current iTerm2 and Ghostty); when the capability
-probe fails, blocks stay flush without a divider rather than adding a glyph row.
+cell-pixel reports (xterm CSI 16 t, or iTerm2's ReportCellSize with backing scale).
+When the capability probe fails, blocks stay flush without a divider rather than
+adding a glyph row.
 Native terminal scrollback retains its text-rule behavior.
 Terminal-owned side margins remain outside the drawable grid. Plain search
 and native-scrollback views use the same rule styling.

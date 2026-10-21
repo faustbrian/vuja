@@ -15,11 +15,11 @@ import (
 // Independent wire oracle: decode the actual transmitted image and placements,
 // not the renderer's desired boundary structs. A VT text screen cannot measure
 // image geometry. Physical terminal appearance remains a separate acceptance.
-var dividerWireToken = regexp.MustCompile("\x1b_G([^\x1b]*)\x1b\\\\|\x1b\\[([0-9]+);([0-9]+)H|\x1b\\[16t|\x1b\\[c|\x1b\\[\\?1049[hl]")
+var dividerWireToken = regexp.MustCompile("\x1b_G([^\x1b]*)\x1b\\\\|\x1b\\[([0-9]+);([0-9]+)H|\x1b\\[16t|\x1b\\[14t|\x1b\\]1337;ReportCellSize\x1b\\\\|\x1b\\[c|\x1b\\[\\?1049[hl]")
 
 func dividerTextProjection(data []byte) []byte {
 	return dividerWireToken.ReplaceAllFunc(data, func(token []byte) []byte {
-		if bytes.HasPrefix(token, []byte("\x1b_G")) || string(token) == "\x1b[16t" || string(token) == "\x1b[c" {
+		if bytes.HasPrefix(token, []byte("\x1b_G")) || bytes.HasPrefix(token, []byte("\x1b]1337;")) || string(token) == "\x1b[16t" || string(token) == "\x1b[14t" || string(token) == "\x1b[c" {
 			return nil // The independent wire oracle, not VT's reply pipe, owns these.
 		}
 		return token
@@ -33,6 +33,8 @@ type dividerWireImage struct {
 type dividerWirePlacement struct{ x, y, w, h int }
 type dividerWire struct {
 	read, x, y, serial, uploads, cw, ch int
+	iterm                               bool
+	frameWidth                          int
 	images                              map[int]dividerWireImage
 	placements                          map[[2]int]dividerWirePlacement
 }
@@ -52,7 +54,16 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 			w.y, _ = strconv.Atoi(token[2])
 			w.x, _ = strconv.Atoi(token[3])
 		case token[0] == "\x1b[16t":
-			fmt.Fprintf(&replies, "\x1b[6;%d;%dt", w.ch, w.cw)
+			if !w.iterm {
+				fmt.Fprintf(&replies, "\x1b[6;%d;%dt", w.ch, w.cw)
+			}
+		case token[0] == "\x1b]1337;ReportCellSize\x1b\\":
+			if w.iterm {
+				// Captured iTerm2 3.7.3 reply; CSI 16 t is unanswered.
+				fmt.Fprintf(&replies, "\x1b]1337;ReportCellSize=%.1f;%.1f;2.0\x1b\\", float64(w.ch)/2, float64(w.cw)/2)
+			}
+		case token[0] == "\x1b[14t" && w.iterm && w.frameWidth > 0:
+			fmt.Fprintf(&replies, "\x1b[4;927;%dt", w.frameWidth)
 		case token[0] == "\x1b[c":
 			replies.WriteString("\x1b[?62;4c")
 		case strings.HasPrefix(token[0], "\x1b[?1049"):
@@ -109,11 +120,13 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 					t.Fatalf("cleanup addressed an image not owned by Vuja: %d", id)
 				}
 				for key := range w.placements {
-					if key[0] == id {
+					if key[0] == id && (number("p") == 0 || key[1] == number("p")) {
 						delete(w.placements, key)
 					}
 				}
-				if fields["d"] == "I" {
+				if fields["d"] == "I" || w.iterm && number("p") == 0 {
+					// iTerm's image-wide d=i also frees pixels. Captured by the
+					// physical compositor probe and its KittyImageController.
 					delete(w.images, id)
 				}
 			default:
@@ -122,6 +135,56 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 		}
 	}
 	return replies.String()
+}
+
+func TestInteractiveBlocksPixelDividerITermFullBleed(t *testing.T) {
+	for _, surface := range []string{"full-width", "content-width"} {
+		c, out := blocksFixture(t, "[ui.chatbox]\nsurface-width='"+surface+"'\n")
+		c.EnablePixelDividers()
+		blocksExecution(c, "first", "output\r\n", "1")
+		blocksExecution(c, strings.Repeat("second", 12), strings.Repeat("x", 60)+"\r\n", "0")
+		blocksPrompt(c, "input")
+		wire := newDividerWire(20, 66)
+		wire.iterm, wire.frameWidth = true, 641
+		wire.settle(t, c, out)
+		want := 60 * 20
+		if surface == "full-width" {
+			want = 641 * 2
+		}
+		if len(wire.placements) != 1 {
+			t.Fatalf("missing boundary in %s", surface)
+		}
+		for _, p := range wire.placements {
+			if p.w != want {
+				t.Fatalf("%s line must cover its painted surface, got %d want %d", surface, p.w, want)
+			}
+		}
+	}
+}
+
+func TestInteractiveBlocksPixelDividerITermCellSize(t *testing.T) {
+	c, out := blocksFixture(t, "")
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "first-output\r\n", "1")
+	blocksExecution(c, "second", "second-output\r\n", "0")
+	blocksPrompt(c, "pending-input")
+	wire := newDividerWire(20, 66)
+	wire.iterm = true
+	for _, geometry := range [][4]int{{60, 24, 20, 66}, {70, 30, 21, 67}} {
+		wire.cw, wire.ch = geometry[2], geometry[3]
+		c.Resize(geometry[0], geometry[1])
+		wire.settle(t, c, out)
+		if len(wire.placements) != 1 {
+			t.Fatalf("iTerm's actual cell-size reply must produce a visible boundary, got %d placements", len(wire.placements))
+		}
+		lines := terminalScreenLines(applyTerminalOutput(t, dividerTextProjection(out.Bytes()), geometry[0], geometry[1]))
+		header := terminalLineIndex(lines, "second", 0)
+		for _, p := range wire.placements {
+			if p != (dividerWirePlacement{0, header * wire.ch, geometry[0] * wire.cw, 1}) {
+				t.Fatalf("iTerm backing scale must preserve the full-width shared pixel boundary: %+v, header %d", p, header)
+			}
+		}
+	}
 }
 
 func (w *dividerWire) settle(t *testing.T, c *terminalCompositor, out *bytes.Buffer) {
@@ -195,7 +258,7 @@ func TestInteractiveBlocksPixelDividerWireGeometry(t *testing.T) {
 }
 
 func TestDividerReportsFramingAndOwnership(t *testing.T) {
-	for _, report := range []string{"\x1b_Gi=555;OK\x1b\\", "\x1b_Gi=777,I=666;OK\x1b\\", "\x1b[6;19;9t", "\x1b[?62;4c"} {
+	for _, report := range []string{"\x1b_Gi=555;OK\x1b\\", "\x1b_Gi=777,I=666;OK\x1b\\", "\x1b[6;19;9t", "\x1b[4;927;881t", "\x1b]1337;ReportCellSize=33.0;10.0;1.0\x1b\\", "\x1b]1337;ReportCellSize=33.0;10.0\x07", "\x1b[?62;4c"} {
 		for split := 0; split <= len(report); split++ {
 			c, _ := blocksFixture(t, "")
 			c.dividerPixels = pixelDividers{enabled: true, probe: 555, upload: 666}
@@ -214,7 +277,7 @@ func TestDividerReportsFramingAndOwnership(t *testing.T) {
 	if got := f.FilterInput([]byte(unowned), c, false, false); string(got) != unowned {
 		t.Fatalf("application's graphics response was stolen: %q", got)
 	}
-	paste := "\x1b[200~\x1b_Gi=555;OK\x1b\\\x1b[6;19;9t\x1b[201~"
+	paste := "\x1b[200~\x1b_Gi=555;OK\x1b\\\x1b[6;19;9t\x1b]1337;ReportCellSize=33;10;2\x07\x1b[201~"
 	for split := 0; split <= len(paste); split++ {
 		var p terminalInputFilter
 		got := p.FilterInput([]byte(paste[:split]), c, false, true)
@@ -282,7 +345,11 @@ func TestInteractiveBlocksPixelDividerLifecycle(t *testing.T) {
 }
 
 func TestInteractiveBlocksPixelDividerUnsupportedGeometryStaysFlush(t *testing.T) {
-	for _, response := range []string{"\x1b[?62c", "\x1b[6;0;0t\x1b[?62c", "\x1b[6;65535;65535t\x1b[?62c", "\x1b[6;broken;9t\x1b[?62c"} {
+	responses := []string{"", "\x1b[6;0;0t", "\x1b[6;65535;65535t", "\x1b[6;broken;9t"}
+	for _, value := range []string{"NaN;10;2", "33;+Inf;2", "33;10;0", "33;10;-1", "33;10;NaN", "33;10;+Inf", "65535;65535;2", "33;0.1;1", "33;10;1;2", "broken;10;1"} {
+		responses = append(responses, "\x1b]1337;ReportCellSize="+value+"\x1b\\")
+	}
+	for _, response := range responses {
 		c, out := blocksFixture(t, "")
 		c.EnablePixelDividers()
 		blocksExecution(c, "first", "out\r\n", "1")
@@ -290,7 +357,7 @@ func TestInteractiveBlocksPixelDividerUnsupportedGeometryStaysFlush(t *testing.T
 		blocksPrompt(c, "input")
 		d := &c.dividerPixels
 		var f terminalInputFilter
-		f.FilterInput([]byte(fmt.Sprintf("\x1b_Gi=%d;OK\x1b\\", d.probe)+response), c, false, true)
+		f.FilterInput([]byte(fmt.Sprintf("\x1b_Gi=%d;OK\x1b\\", d.probe)+response+"\x1b[?62c"), c, false, true)
 		for range 10 {
 			c.ComposeUI(func() []byte { return nil })
 		}
@@ -301,6 +368,41 @@ func TestInteractiveBlocksPixelDividerUnsupportedGeometryStaysFlush(t *testing.T
 		if terminalLineIndex(lines, "second", 0) != terminalLineIndex(lines, "exit 1", 0)+1 {
 			t.Fatal("unsupported terminal fell back to a padded glyph row")
 		}
+	}
+}
+
+func TestDividerITermGeometryPrecedenceAndOwnership(t *testing.T) {
+	legacy := "\x1b]1337;ReportCellSize=33.25;10.5;2.0\x1b\\"
+	for _, reports := range []string{legacy + "\x1b[6;33;11t", "\x1b[6;33;11t" + legacy} {
+		c, _ := blocksFixture(t, "")
+		c.dividerPixels = pixelDividers{enabled: true, probe: 555}
+		var filter terminalInputFilter
+		if got := filter.FilterInput([]byte(reports), c, false, false); len(got) != 0 {
+			t.Fatalf("owned geometry reached application input: %q", got)
+		}
+		if c.dividerPixels.cellWidth != 21 || c.dividerPixels.cellHeight != 67 {
+			t.Fatalf("point geometry must use backing pixels regardless of reply order: %+v", c.dividerPixels)
+		}
+		filter.FilterInput([]byte("\x1b[?64c"), c, false, false)
+		if got := filter.FilterInput([]byte(legacy), c, false, false); string(got) != legacy {
+			t.Fatalf("unsolicited application geometry was consumed: %q", got)
+		}
+	}
+}
+
+func TestInteractiveBlocksPixelDividerITermFrameAllocationBound(t *testing.T) {
+	c, out := blocksFixture(t, "")
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "out\r\n", "0")
+	blocksExecution(c, "second", "out\r\n", "0")
+	blocksPrompt(c, "input")
+	var filter terminalInputFilter
+	// Individually finite cell dimensions can coexist with an absurd scale.
+	// Applying that scale to window geometry must not cause a huge image.
+	reports := fmt.Sprintf("\x1b_Gi=%d;OK\x1b\\\x1b]1337;ReportCellSize=0.000000033;0.00000001;1000000000\x07\x1b[4;927;881t\x1b[?64c", c.dividerPixels.probe)
+	filter.FilterInput([]byte(reports), c, false, true)
+	if strings.Contains(out.String(), "\x1b_Ga=t,") {
+		t.Fatal("untrusted window scale exceeded the image allocation budget")
 	}
 }
 
