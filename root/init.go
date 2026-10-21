@@ -216,6 +216,18 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
     _vuja_unmark_prompts
     if [[ -n $VUJA_MARKER ]]; then
       builtin printf '\e]777;vuja;%%s;command-start\a' "$VUJA_MARKER"
+      local -a _vuja_execution_words
+      # zshmisc's preexec contract supplies full alias-expanded text as $3.
+      _vuja_execution_words=("${(@z)3}")
+      # Zsh's PROMPT_SP decoration precedes precmd, so the byte interval up
+      # to command-end is not just executable output. Carry the external
+      # clear intent in the ordered PTY stream, never infer it from a canvas.
+      if (( ${#_vuja_execution_words} == 1 && ! $+functions[clear] )) &&
+         [[ ${_vuja_execution_words[1]} == clear ]]; then
+        # Additive metadata keeps older running compositors compatible when
+        # users source an updated hook without replacing their parent process.
+        builtin printf '\e]777;vuja;%%s;command-clear\a' "$VUJA_MARKER"
+      fi
     fi
     local _vuja_history_marker="VUJA_CMD_START"
     # The shared admission gate handles leading-space privacy, distinguishing

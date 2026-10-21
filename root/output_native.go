@@ -169,9 +169,10 @@ func (c *terminalCompositor) recordNativeOutput(data []byte) {
 func (c *terminalCompositor) finishNativeOutput() {
 	if v := c.viewport; v != nil && v.native != nil {
 		// A primary-screen application can begin with exactly clear's home/ED
-		// bytes. Only classify a control-only command after completion; admitting
-		// following canvas text would violate nativeOutputTail's privacy boundary.
-		if v.native.clearOnly && v.native.clearMode > 0 && v.native.parser.State() == ansiparser.GroundState {
+		// bytes. Without explicit shell intent, only classify a control-only
+		// command after completion. Zsh's external-clear marker also admits its
+		// PROMPT_SP/precmd decoration, without retaining arbitrary canvas text.
+		if (v.native.clearOnly || c.commandClearIntent) && v.native.clearMode > 0 && v.native.parser.State() == ansiparser.GroundState {
 			c.clearOutputViewport(v.native.clearMode)
 		}
 		if retained := v.native.finish(); len(retained) > 0 {

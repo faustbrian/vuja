@@ -3,14 +3,21 @@ package root
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func clearOutputFixture(t *testing.T, mode string) (*terminalCompositor, *bytes.Buffer, func()) {
+	return clearOutputFixtureWidth(t, mode, 60)
+}
+
+func clearOutputFixtureWidth(t *testing.T, mode string, width int) (*terminalCompositor, *bytes.Buffer, func()) {
 	t.Helper()
 	var out bytes.Buffer
-	c := newTerminalCompositor(&out, "bottom", "clear", 60, 12)
+	c := newTerminalCompositor(&out, "bottom", "clear", width, 12)
 	t.Cleanup(c.Close)
 	c.SetInputBoxTheme(testInputBoxTheme())
 	c.SetChatboxConfig(terminalChatboxConfig{Prompt: "› ", Scrollback: mode, OutputViewport: "pinned", OutputLines: 100})
@@ -24,7 +31,7 @@ func clearOutputFixture(t *testing.T, mode string) (*terminalCompositor, *bytes.
 	c.WritePTY([]byte("old-output-before-clear\r\n"))
 	c.WritePTY(terminalMarkerBytes("clear", "command-end:0"))
 	prompt()
-	if !terminalContainsLine(applyTerminalOutput(t, out.Bytes(), 60, 12), "old-output-before-clear") {
+	if !terminalContainsLine(applyTerminalOutput(t, out.Bytes(), width, 12), "old-output-before-clear") {
 		t.Fatal("invalid fixture: prior output is not visible")
 	}
 	return c, &out, prompt
@@ -89,8 +96,103 @@ func TestOutputClearPromptRedrawClearsVisiblePane(t *testing.T) {
 	}
 }
 
+func TestOutputClearIncludesShellCompletionDecoration(t *testing.T) {
+	// An isolated Zsh PTY emits this PROMPT_SP decoration after /usr/bin/clear
+	// and before precmd (where our command-end marker is emitted). The final
+	// CR/space/CR erases the temporary partial-line marker, leaving a blank canvas.
+	start := zshClearStartMarker(t, "", "clear", "clear")
+	for _, mode := range []string{"output", "snapshot"} {
+		for _, width := range []int{60, 83} {
+			decoration := "\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m" + strings.Repeat(" ", width-1) + "\r \r\x1b]0;fixture-title\x1b\\"
+			for split := 0; split <= len(decoration)+1; split++ {
+				t.Run(fmt.Sprintf("%s/%d/%d", mode, width, split), func(t *testing.T) {
+					c, out, prompt := clearOutputFixtureWidth(t, mode, width)
+					c.WritePTY(start)
+					c.WritePTY([]byte("\x1b[3J\x1b[H\x1b[2J"))
+					if split > len(decoration) {
+						for _, b := range []byte(decoration) {
+							c.WritePTY([]byte{b})
+						}
+					} else {
+						c.WritePTY([]byte(decoration[:split]))
+						c.WritePTY([]byte(decoration[split:]))
+					}
+					c.WritePTY(terminalMarkerBytes("clear", "command-end:0"))
+					prompt()
+					physical := applyTerminalOutput(t, out.Bytes(), width, 12)
+					if terminalContainsLine(physical, "old-output-before-clear") || !terminalContainsLine(physical, "›") {
+						t.Fatalf("clear plus shell completion restored old output: %q", terminalScreenLines(physical))
+					}
+					out.Reset()
+					c.Resize(width-4, 14)
+					if terminalContainsLine(applyTerminalOutput(t, out.Bytes(), width-4, 14), "old-output-before-clear") {
+						t.Fatal("resize resurrected output cleared by the shell")
+					}
+				})
+			}
+		}
+	}
+}
+
+func zshClearStartMarker(t *testing.T, setup, typed, expanded string) []byte {
+	t.Helper()
+	path, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh is not installed")
+	}
+	hook := filepath.Join(t.TempDir(), "init.zsh")
+	if err := os.WriteFile(hook, []byte(shellInitScript("zsh", "/unused/vuja")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// -d/-f and the private runner environment exclude user startup and live
+	// session identities. The sentinel PID prevents this fixture's autostart;
+	// this script never invokes or signals that PID or the unused executable.
+	command := exec.CommandContext(t.Context(), path, "-d", "-f", "-c", setup+`
+source "$1"
+_vuja_preexec "$2" "$3" "$3"
+`, "vuja-clear-producer", hook, typed, expanded)
+	command.Env = append(os.Environ(), "VUJA_PID=1", "VUJA_FD=2", "VUJA_MARKER=clear")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("isolated Zsh preexec failed: %v", err)
+	}
+	return output
+}
+
+func TestOutputClearZshIntentExcludesFunctionsAliasesAndCompoundCommands(t *testing.T) {
+	for _, test := range []struct {
+		name, setup, typed, expanded string
+		clear                        bool
+	}{
+		{"external", "", "clear", "clear", true},
+		{"whitespace", "", " clear ", " clear ", true},
+		{"function", "clear() { :; }\n", "clear", "clear", false},
+		{"alias", "alias clear=codex\n", "clear", "codex", false},
+		{"external alias", "alias clear=clear\n", "clear", "clear", true},
+		{"compound", "", "clear; codex", "clear; codex", false},
+		{"native", "", "codex", "codex", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := terminalMarkerBytes("clear", "command-start")
+			if test.clear {
+				want = append(want, terminalMarkerBytes("clear", "command-clear")...)
+			}
+			if got := zshClearStartMarker(t, test.setup, test.typed, test.expanded); !bytes.Equal(got, want) {
+				t.Fatalf("expected %q, got %q", want, got)
+			}
+		})
+	}
+}
+
+func TestOutputClearZshPreservesTheExistingCommandStartProtocol(t *testing.T) {
+	wire := zshClearStartMarker(t, "", "clear", "clear")
+	if bytes.Count(wire, terminalMarkerBytes("clear", "command-start")) != 1 {
+		t.Fatalf("an older compositor would miss the clear execution start: %q", wire)
+	}
+}
+
 func TestOutputClearNativeCanvasDoesNotEraseRetainedPane(t *testing.T) {
-	for _, controls := range []string{"\x1b[H\x1b[2Jprivate-canvas", "\x1b[?1049h\x1b[H\x1b[2Jprivate-canvas\x1b[?1049l"} {
+	for _, controls := range []string{"\x1b[H\x1b[2Jprivate-canvas", "\x1b[?1049h\x1b[H\x1b[2Jprivate-canvas\x1b[?1049l", "\x1b[H\x1b[2J\x1b[2;2H", "\x1b[H\x1b[2Jprivate-canvas\x1b[1m\x1b[7m%\x1b[27m\x1b[0m" + strings.Repeat(" ", 59) + "\r \r\x1b]0;fixture-title\a"} {
 		c, out, prompt := clearOutputFixture(t, "output")
 		c.WritePTY(terminalMarkerBytes("clear", "command-start"))
 		out.Reset()

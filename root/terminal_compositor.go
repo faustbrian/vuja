@@ -116,6 +116,7 @@ type terminalCompositor struct {
 	statusLinesCache        []string
 	chatboxColorCodes       map[string]string
 	commandContext          string
+	commandClearIntent      bool
 	commandCardOpen         bool
 	commandOutputDirect     bool
 	commandOutputLineOpen   bool
@@ -637,7 +638,12 @@ func (c *terminalCompositor) writePTYChunk(data []byte) {
 			c.updateSurfaceBottom()
 			c.writeTerminal([]byte(terminalBracketedPasteEnable))
 			dirtyInput = true
+		case event == "command-clear":
+			if c.phase == terminalOutput && !c.commandStartedAt.IsZero() {
+				c.commandClearIntent = true
+			}
 		case event == "command-start":
+			c.commandClearIntent = false
 			c.multilineInput = false
 			c.writeTerminal([]byte(terminalBracketedPasteDisable))
 			c.startCommandExecution()
@@ -1455,6 +1461,7 @@ func (c *terminalCompositor) beginPrompt(continuation bool) {
 		return
 	}
 	if c.phase == terminalOutput {
+		c.commandClearIntent = false
 		c.viewportCommand = false
 		c.viewportPassthrough = false
 		if c.historySpacingRows > 0 {
