@@ -696,8 +696,16 @@ the default. Set `surface-width = "content-width"` to keep the background to a
 left-aligned rectangle around the visible prompt and buffer instead.
 `output-viewport = "pinned"` keeps ordinary command output in a scrollable
 alternate screen above the fixed chatbox. In iTerm this also lets the full-width
-input background extend into the terminal's existing side margins. By default,
-`output-mouse = "select"` leaves ordinary drag selection to the terminal; Page Up
+input background extend into the terminal's existing side margins. Blocks default
+to `output-mouse = "interact"`: click to activate a block, then use the wheel or
+Page Up/Page Down to scroll its output. Click outside a block, press Escape, or
+start typing to return focus to the shell; unfocused wheel input browses history.
+Plain dragging selects text without a modifier. Ctrl+C copies a nonempty managed
+selection; otherwise it remains the normal interrupt. This selection belongs to
+Vuja, not the terminal's native selection menus or platform shortcuts. Search and
+legacy text-only views return pointer selection to the terminal.
+Set `output-mouse = "select"` to leave ordinary drag selection to the terminal;
+card navigation and Copy/Save remain keyboard accessible. In text-only modes Page Up
 browses older output, Page Down moves toward the latest output, and Down, End or
 Escape returns to the bottom while browsing. Set `output-mouse = "navigate"` to
 use the wheel for output browsing and enable hover/click on the centered
@@ -715,8 +723,8 @@ activity notices, action hints and query text.
 Escape or Ctrl+C closes search while preserving the reading position; then
 Escape or End returns to the latest output. Search never submits a command,
 does not intercept native application input, and preserves normal drag
-selection in the default `output-mouse = "select"` mode.
-F10 opens the newest completed execution's output; repeated F10 moves to older
+selection in `output-mouse = "select"` mode.
+Outside block layout, F10 opens the newest completed execution's output; repeated F10 moves to older
 executions and Shift+F10 moves to newer ones, clamping at either end. The
 execution number identifies a local output capture, not a durable history ID.
 F11 requests terminal clipboard copy of the selected execution's rendered
@@ -845,9 +853,23 @@ working directory. Native scrollback mode does not create these checkpoints.
 Recovery is disabled inside tmux because its panes inherit the outer terminal's
 session identifier.
 Completed commands default to `scrollback = "blocks"`: each submitted command
-stays above its associated output, with a thin horizontal divider and the
+stays above its associated output, with a thin muted boundary at its edge and the
 configured duration/exit outcome. Silent commands still form a visible block.
 Blocks use the terminal background rather than repeating the full chatbox.
+Short output uses its natural height; `block-max-height = 12` caps the number of
+displayed output rows (1–1000), independently of retained `output-lines`. Clipping
+the view is not output loss. Each block has top-right Copy and Save controls
+(icons only in narrow panes). They act on all currently retained output, not the
+visible crop; Copy requests terminal clipboard permission and Save writes a
+private text file in the cache exports directory. Actual retention loss remains
+disclosed. Native application canvases are never actionable output captures.
+Vuja notices remain visible but are not execution output. If a card contains
+interleaved notices and its semantic capture has expired or was not restored,
+Copy/Save are unavailable rather than reconstructing an ambiguous mixed output.
+F10/Shift+F10 activate older/newer blocks; F11 copies and F12 saves the active
+block. A focused output snapshot stays stable while newer output arrives; return
+to the latest view to see live changes. Full-width surfaces reach every drawable
+column; content-width mode keeps its background within the content rectangle.
 By default, failed blocks in the pinned output pane have a red-tinted background
 and a thick left rail. Every known nonzero exit is a failure; amber instead marks
 Vuja's own clipped command labels or incomplete retained output, with failure
@@ -857,21 +879,30 @@ of dividers. The rail reserves two drawable columns; semantic search, copy and
 export remain undecorated. Colors follow `exit-failure` and `session-warning`.
 Drawn background/reverse styles yield to the state tint; foregrounds and links
 remain intact. Selected search matches use double underlines on tinted rows.
-Checkpoint restoration preserves bounded presentation state, not command identity;
+Checkpoint restoration preserves bounded presentation/text-region state, not command identity;
 at the storage byte cap cosmetic state may be dropped before transcript text.
 Native terminal scrollback cannot be repainted retrospectively, so that mode uses
 a colored completion indicator instead. Application-owned canvases remain untouched.
 If input outgrows the pane, its block label retains visible rows with an explicit
 truncation notice; resizing does not erase that disclosure.
 Set `block-dividers = false` under `[ui.chatbox]` to hide the rules without
-hiding commands. `history-spacing = 0` makes blocks compact; the default is one
-blank row between executions (0–3 are supported). Spacing and divider visibility
+hiding commands. Blocks have no blank gap by default; `history-spacing` adds
+0–3 blank rows between executions. Spacing and divider visibility
 are independent, including in the minimal preset.
+In the pinned card pane, the boundary shares the last card row: it adds no
+separator-only row, padding or background band. Full-width borders cover every
+drawable column. Terminal-owned side margins remain outside that grid; unlike
+background erasure, text-cell decoration cannot promise physical window-edge
+coverage. Plain search and native-scrollback views retain their text rules.
 Dividers resize to the current pane width without wrapping. They do not appear
 in output search or plain-text exports; whole-pane exports include command
 labels, while F10/F11/F12 execution captures remain output-only. Display rows,
 including command labels and dividers, share the existing pane retention budget.
 Restored checkpoints remain display rows, not newly inferred execution IDs.
+New checkpoints can retain numeric output regions for text-only Copy/Save actions;
+older checkpoints without these regions remain ordinary searchable display text.
+Divider origin is retained separately from application hyperlinks. Unattributed
+legacy rows remain text, including literal rules, rather than being discarded.
 Private, ignored, paused or unclassified commands use `[private command]`
 instead of retaining their input text in blocks. The shell's history-admission
 acknowledgement controls this label; command output itself can still be sensitive.

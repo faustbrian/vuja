@@ -67,8 +67,18 @@ func (c *terminalCompositor) clearOutputViewport(mode int) {
 	}
 	v.write([]byte(controls))
 	v.setFrozen(nil)
+	v.cards.releasePointer()
+	v.cards.focus, v.cards.focused = nil, nil
+	v.cards.history, v.cards.total = 0, 0
+	v.cards.browsing = false
+	v.cards.clearAt = v.cursorLogicalRow()
+	v.cards.pending = nil
 	if mode == 3 {
 		v.blocks = nil
+		v.cards.completed = nil
+		v.cards.offsets = nil
+		v.cards.layouts = nil
+		v.cards.document = nil
 		if v.blockActive {
 			// ED3 discards earlier command rows, not its pending outcome.
 			v.blockStart, v.blockEnd = v.cursorLogicalRow(), 0

@@ -15,7 +15,7 @@ version, shell/version, and relevant configuration. Run the core cases in each
 available pairing of iTerm2/Ghostty with Zsh/Bash/Fish. Mark missing pairings
 as not run, not passed. Use the terminal's ordinary profile/shell startup.
 
-Keep the default `output-mouse = "select"` and `surface-width = "full-width"`
+Keep the default `output-mouse = "interact"` and `surface-width = "full-width"`
 unless the case explicitly changes them. Record `output-viewport`,
 `output-lines`, checkpoint mode/interval/retention and density. Do not include
 credentials, real command output, identifying paths, or account email in a
@@ -25,7 +25,9 @@ shared acceptance report.
 
 | Case | Action | Pass condition |
 | --- | --- | --- |
-| Ordinary selection | Drag over output with no modifier; copy normally. Also select across wrapped lines. | Drag creates native selection immediately. Copied text is exact; no mouse-reporting warning or extra selection key is required. |
+| Ordinary managed selection | Drag over output with no modifier, then press Ctrl+C. Also select across wrapped lines, status rows and gaps. | Drag highlights immediately; copied text and hard line breaks are exact. No extra selection key is required. With no selection, Ctrl+C remains interrupt. Native terminal menus/platform shortcuts are not this managed selection. |
+| Explicit native selection | Set `output-mouse = "select"`, reopen the disposable session, then drag and use the terminal's usual copy action. | Drag creates native selection with no modifier or Vuja pointer capture. Keyboard card navigation and Copy/Save remain usable. Restore `interact` afterward. |
+| Interactive cards | Click a long block; wheel within it, then click outside and wheel again. Exercise its Copy/Save controls, F10/Shift+F10, F11/F12 and Escape. | Only the active block's crop moves while focused; outside focus the enclosing history moves. Short blocks remain compact. Copy/Save include complete retained execution output, not the crop, neighboring commands or Vuja notices. |
 | Multiline paste | Paste the fixture below without pressing Enter, edit its middle line, then press Enter once. | Nothing executes during paste. All lines remain inside the growing chatbox with one consistent background. One Enter submits the pasted input. |
 | Running command | Run the quiet fixture below; resize and move the window while it sleeps. | Output, title and status stay visible. A smooth running indicator remains visible; completion replaces it with the outcome. |
 | Frozen reading | Generate the large fixture, browse upward, then generate more output. | The input remains fixed; incoming output does not move the reading anchor. Down/End/Esc returns to the latest output. |
@@ -65,7 +67,10 @@ be disclosed as truncation, not mistaken for a search or resize failure.
 Output-tool key bindings and retention disclosures are documented in the
 README. Test both narrow and wide panes and both light and dark palettes. Also
 test content-width mode and explicit mouse-navigation mode separately; do not
-credit modifier-based selection there as proof of the default native-drag case.
+credit modifier-based selection as proof of default unmodified drag. Check
+actual clipboard permission allowed/denied behavior; a request notice must not
+claim that a clipboard write succeeded. In full-width mode inspect both edges,
+compact gaps, dim untinted separators, and red failure/amber retention-loss rails.
 
 ## Recovery and privacy cases
 

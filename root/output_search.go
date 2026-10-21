@@ -68,11 +68,32 @@ func (c *terminalCompositor) freezeOutputViewport() {
 	if v.frozen != nil {
 		return
 	}
-	v.setFrozen(retainedModelRows(v.model))
-	v.frozenBase, _ = v.model.LogicalRowPositions()
+	var rows []string
+	var base uint64
+	var states []blockState
+	var dividers map[int]bool
+	truncated := v.outputTruncated()
+	if reading := v.cards.reading; reading != nil {
+		// Search and whole-pane export keep the same immutable document
+		// that card browsing established, even after live source eviction.
+		rows, base, truncated = reading.rows, reading.base, reading.truncated
+		dividers = reading.dividers
+		states = make([]blockState, len(rows))
+		for i := range states {
+			states[i] = blockStateAt(reading.states, base+uint64(i))
+		}
+	} else {
+		rows = retainedModelRows(v.model)
+		base, _ = v.model.LogicalRowPositions()
+		states = v.rowStates(len(rows))
+		dividers = v.paneDividerIndexes(base, rows)
+	}
+	v.setFrozen(rows)
+	v.frozenBase = base
 	v.frozenPane = true
-	v.frozenStates = v.rowStates(len(v.frozen))
-	v.frozenTruncated = v.outputTruncated()
+	v.frozenStates = states
+	v.frozenDividers = dividers
+	v.frozenTruncated = truncated
 	v.layoutFrozen(c.outputContentWidth())
 	v.top = max(len(v.frozenLayout)-(c.height-c.surfaceRows), 0)
 }
@@ -132,7 +153,7 @@ func (c *terminalCompositor) refreshOutputSearch() {
 	needle := foldedOutputSearchText(string(s.query))
 scan:
 	for row, line := range v.frozen {
-		if isOutputBlockDivider(line) {
+		if v.frozenDividers[row] {
 			continue
 		}
 		text := ansi.Strip(line)

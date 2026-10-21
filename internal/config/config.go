@@ -65,6 +65,7 @@ type ChatboxConfig struct {
 	Scrollback               string              `toml:"scrollback"`
 	BlockDividers            bool                `toml:"block-dividers"`
 	BlockStates              bool                `toml:"block-states"`
+	BlockMaxHeight           int                 `toml:"block-max-height"`
 	SurfaceWidth             string              `toml:"surface-width"`
 	OutputViewport           string              `toml:"output-viewport"`
 	OutputMouse              string              `toml:"output-mouse"`
@@ -752,8 +753,11 @@ func validateChatbox(chatbox ChatboxConfig) error {
 	if chatbox.OutputViewport != "pinned" && chatbox.OutputViewport != "terminal" {
 		return fmt.Errorf("ui.chatbox.output-viewport: invalid value %q (want: pinned|terminal)", chatbox.OutputViewport)
 	}
-	if chatbox.OutputMouse != "select" && chatbox.OutputMouse != "navigate" {
-		return fmt.Errorf("ui.chatbox.output-mouse: invalid value %q (want: select|navigate)", chatbox.OutputMouse)
+	if !oneOf(chatbox.OutputMouse, "select", "navigate", "interact") {
+		return fmt.Errorf("ui.chatbox.output-mouse: invalid value %q (want: select|navigate|interact)", chatbox.OutputMouse)
+	}
+	if chatbox.BlockMaxHeight < 1 || chatbox.BlockMaxHeight > 1000 {
+		return fmt.Errorf("ui.chatbox.block-max-height: must be between 1 and 1000 output rows")
 	}
 	if chatbox.OutputLines < 1 || chatbox.OutputLines > 10000 {
 		return fmt.Errorf("ui.chatbox.output-lines: must be between 1 and 10000")

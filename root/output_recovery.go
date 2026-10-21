@@ -153,9 +153,7 @@ func (c *terminalCompositor) ConfigureOutputRecovery(dir, pane string, linkFor f
 		if err != nil && !r.failed {
 			r.failed = true
 			if c.viewport != nil {
-				c.viewport.write([]byte("\r\n[VUJA] output recovery unavailable; live output is unaffected\r\n"))
-				c.viewport.dirty = true
-				c.renderOutputViewport()
+				c.writeViewportNotification([]byte("\r\n[VUJA] output recovery unavailable; live output is unaffected\r\n"))
 			}
 		}
 	})
@@ -302,12 +300,34 @@ func readOutputRecoveryState(path string) (outputRecoveryState, error) {
 	// Optional display metadata never determines which text can be restored.
 	// Old checkpoints have none; invalid/future values restore neutral text.
 	last := -1
-	for _, b := range state.Blocks {
+	for i, b := range state.Blocks {
 		if b.First <= last || b.Last < b.First || b.Last >= len(state.Rows) || b.State < blockNeutral || b.State > blockError {
 			state.Blocks = nil
 			break
 		}
 		last = b.Last
+		// Cursor-addressed output or stale cosmetic metadata may replace the
+		// original row. Origin alone must never hide that replacement text.
+		state.Blocks[i].Divider = b.Divider && isOutputBlockDivider(state.Rows[b.First])
+		if card := b.Card; card != nil && (card.BodyFirst < b.First || card.BodyEnd < card.BodyFirst || card.BodyEnd > b.Last+1 ||
+			card.OutcomeFirst < 0 || card.OutcomeEnd < card.OutcomeFirst || card.OutcomeEnd > b.Last+1 || card.OutcomeEnd > 0 && card.OutcomeFirst < card.BodyEnd) {
+			state.Blocks[i].Card = nil
+		}
+		if card := state.Blocks[i].Card; card != nil {
+			previous := card.BodyFirst - 1
+			for _, notice := range card.Notices {
+				if !card.PaneOnly || notice.First <= previous || notice.First < card.BodyFirst || notice.Last < notice.First || notice.Last >= card.BodyEnd {
+					state.Blocks[i].Card = nil
+					break
+				}
+				previous = notice.Last
+			}
+		}
+		if card := state.Blocks[i].Card; card != nil && card.BodyFirst > b.First && isOutputBlockDivider(state.Rows[b.First]) {
+			// Older card metadata identifies the compositor-owned header even
+			// without the divider flag. Never infer origin from a program body.
+			state.Blocks[i].Divider = true
+		}
 	}
 	// Early version-1 checkpoints carried only this reserved leading notice.
 	// Lift it into metadata before a smaller live model can evict the row.
@@ -328,7 +348,7 @@ func (r *outputRecovery) writeState(state outputRecoveryState) error {
 	// and reserve room for a notice that survives legacy version-1 readers.
 	const budget = outputRecoveryByteLimit - 512
 	rows, shortened := checkpointRowsWithinBudget(state.Rows, budget, 10000)
-	blocks := checkpointBlockSuffix(state.Blocks, len(state.Rows)-len(rows), len(rows))
+	blocks := checkpointBlocksForRows(state.Blocks, state.Rows, rows)
 	state.Truncated = state.Truncated || shortened
 	if state.Truncated {
 		original := state.Rows
@@ -339,11 +359,23 @@ func (r *outputRecovery) writeState(state outputRecoveryState) error {
 		}
 		notice, _ := json.Marshal(outputRecoveryTruncated)
 		rows, _ = checkpointRowsWithinBudget(original, budget-len(notice)-1, 9999)
-		blocks = checkpointBlockSuffix(originalBlocks, len(original)-len(rows), len(rows))
+		blocks = checkpointBlocksForRows(originalBlocks, original, rows)
 		rows = append([]string{outputRecoveryTruncated}, rows...)
 		for i := range blocks {
 			blocks[i].First++
 			blocks[i].Last++
+			if card := blocks[i].Card; card != nil {
+				card.BodyFirst++
+				card.BodyEnd++
+				if card.OutcomeEnd > 0 {
+					card.OutcomeFirst++
+					card.OutcomeEnd++
+				}
+				for j := range card.Notices {
+					card.Notices[j].First++
+					card.Notices[j].Last++
+				}
+			}
 		}
 	}
 	state.Rows = rows
@@ -514,7 +546,23 @@ func (c *terminalCompositor) restoreOutputRecovery() {
 		c.viewport.write([]byte(recoveryRow(row, r.linkFor, true)))
 	}
 	for _, b := range r.blocks {
-		c.viewport.blocks = append(c.viewport.blocks, blockSpan{base + uint64(b.First), base + uint64(b.Last), b.State})
+		c.viewport.blocks = append(c.viewport.blocks, blockSpan{first: base + uint64(b.First), last: base + uint64(b.Last), state: b.State, divider: b.Divider})
+		if stored := b.Card; stored != nil {
+			// Early mixed-pane metadata had no attribution ranges. Keep those
+			// rows in the uncapped text view, rather than hiding unknown notices.
+			if stored.PaneOnly && len(stored.Notices) == 0 {
+				continue
+			}
+			card := outputCard{first: base + uint64(b.First), last: base + uint64(b.Last), bodyFirst: base + uint64(stored.BodyFirst), bodyEnd: base + uint64(stored.BodyEnd), state: b.State, newline: stored.Newline, native: stored.Native, truncated: stored.Truncated, paneOnly: stored.PaneOnly, divider: b.Divider}
+			for _, notice := range stored.Notices {
+				card.notices = append(card.notices, blockSpan{first: base + uint64(notice.First), last: base + uint64(notice.Last)})
+			}
+			if stored.OutcomeEnd > 0 {
+				card.outcomeFirst, card.outcomeEnd = base+uint64(stored.OutcomeFirst), base+uint64(stored.OutcomeEnd)
+				card.outcome = slices.Clone(r.rows[stored.OutcomeFirst:stored.OutcomeEnd])
+			}
+			c.viewport.cards.completed = append(c.viewport.cards.completed, card)
+		}
 	}
 	r.rows = nil
 	r.blocks = nil
@@ -554,7 +602,7 @@ func (c *terminalCompositor) checkpointOutputRecovery() {
 		rows = append(rows, line)
 	}
 	slices.Reverse(rows)
-	blocks := checkpointBlockSuffix(storedBlocks, count-len(rows), len(rows))
+	blocks := checkpointBlocksForRows(storedBlocks, stored, rows)
 	r.dirty = false
 	now := c.checkpointNow()
 	r.nextCheckpoint = now.Add(c.outputCheckpointInterval())
@@ -621,9 +669,6 @@ func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded 
 // Never replay cursor controls, notifications, OSC52 clipboard writes or old
 // process capabilities. Rebinding also works across a UUID's wrapped rows.
 func recoveryRow(row string, linkFor func(string) string, restore bool) string {
-	if isOutputBlockDivider(row) {
-		return outputBlockDividerRow
-	}
 	var out strings.Builder
 	for i := 0; i < len(row); {
 		if row[i] != '\x1b' {
@@ -659,6 +704,11 @@ func recoveryRow(row string, linkFor func(string) string, restore bool) string {
 				if ok {
 					if target == "" {
 						out.WriteString("\x1b]8;;\x1b\\")
+					} else if target == outputBlockDividerTarget {
+						// This fixed non-action URI can occur in application output
+						// too. Preserve its text/style through normal conversion;
+						// only the separate row provenance can establish chrome.
+						fmt.Fprintf(&out, "\x1b]8;;%s\x1b\\", target)
 					} else if id := recoveryResumeID(target); id != "" {
 						target = "vuja://codex-resume/" + id
 						if restore {

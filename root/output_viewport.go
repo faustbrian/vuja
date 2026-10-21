@@ -42,6 +42,9 @@ type outputViewport struct {
 	frozenBase        uint64
 	frozenPane        bool
 	frozenStates      []blockState
+	frozenDividers    map[int]bool
+	cards             outputCards
+	revision          uint64
 }
 
 // The SDK owns live eviction, including writes made during restoration. Prior
@@ -53,6 +56,7 @@ func (v *outputViewport) outputTruncated() bool {
 func (v *outputViewport) write(data []byte) {
 	data = sanitizeTerminalModelCSI(data, &v.csiTail, v.model.Width(), v.model.Height())
 	v.text.write(v.model, data)
+	v.revision++
 }
 
 var viewportKeys = []string{"\x1b[5~", "\x1b[6~", "\x1b[4~", "\x1b[F", "\x1bOF", "\x1b[B", "\x1bOB", "\x1b[18~", "\x1b[19~", "\x1b[19;2~", "\x1b[21~", "\x1b[21;2~", "\x1b[23~", "\x1b[24~"}
@@ -80,6 +84,7 @@ func (c *terminalCompositor) ensureOutputViewport() {
 	} else if c.viewport.model.Width() != c.width || c.viewport.model.Height() != rows {
 		c.viewport.text.resize(c.viewport.model, c.width, rows)
 		c.viewport.dirty = true
+		c.viewport.revision++
 	}
 }
 
@@ -96,9 +101,39 @@ func (c *terminalCompositor) closeOutputViewport() {
 }
 
 func (c *terminalCompositor) writeViewportOutput(data []byte) {
+	c.writeViewportText(data, false)
+}
+
+func (c *terminalCompositor) writeViewportNotification(data []byte) {
+	c.writeViewportText(data, true)
+}
+
+func (c *terminalCompositor) writeViewportText(data []byte, notification bool) {
 	c.ensureOutputViewport()
 	if len(data) > 0 {
-		c.recordViewportOutput(data)
+		card, capture := c.viewport.cards.pending, c.viewport.executions.active
+		if notification && card != nil && capture != nil && !capture.applicationOwned {
+			// Operational notices belong to the pane, never the execution
+			// capture. Isolated hard rows keep later PTY bytes from sharing them.
+			if c.viewport.model.CursorPosition().X > 0 {
+				c.recordViewportOutput([]byte("\r\n"))
+			}
+			first := c.viewport.cursorLogicalRow()
+			c.recordViewportOutput(data)
+			if c.viewport.model.CursorPosition().X > 0 {
+				c.recordViewportOutput([]byte("\r\n"))
+			}
+			if end := c.viewport.cursorLogicalRow(); end > first {
+				card.paneOnly = true
+				if n := len(card.notices); n > 0 && card.notices[n-1].last+1 >= first {
+					card.notices[n-1].last = end - 1
+				} else {
+					card.notices = append(card.notices, blockSpan{first: first, last: end - 1})
+				}
+			}
+		} else {
+			c.recordViewportOutput(data)
+		}
 		// Rendering cells must not swallow nonvisual terminal effects. OSC 8
 		// hyperlinks remain in cells; titles, cwd, notifications and other OSC
 		// effects retain their native terminal owner.
@@ -132,7 +167,7 @@ func (c *terminalCompositor) recordViewportOutput(data []byte) {
 		c.outputRecovery.dirty = true
 	}
 	c.viewport.dirty = true
-	if c.viewport.frozen != nil {
+	if c.viewport.frozen != nil || c.viewport.cards.reading != nil {
 		c.viewport.newOutput = true
 	}
 }
@@ -178,6 +213,8 @@ func (c *terminalCompositor) suspendOutputViewport() {
 			c.viewport.native = newNativeOutputTail(c.resumeLinkFor)
 		}
 		c.viewport.frozen = nil
+		c.viewport.cards.reading = nil
+		c.viewport.cards.history, c.viewport.cards.total, c.viewport.cards.browsing = 0, 0, false
 		c.viewport.newOutput = false
 		c.viewport.search = nil
 		c.viewport.executions.selected = nil
@@ -197,6 +234,8 @@ func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
 		c.viewport.search = nil
 		c.viewport.executions.selected = nil
 		c.viewport.executions.notice = ""
+		c.viewport.cards.releasePointer()
+		c.viewport.cards.focus, c.viewport.cards.focused = nil, nil
 	}
 	if c.viewportAlternate == enabled {
 		return false
@@ -224,9 +263,17 @@ func (c *terminalCompositor) setViewportMouse(enabled bool) {
 	// Xterm mouse tracking reports clicks as well as wheel input. With native
 	// selection preferred, leave the pointer to the terminal even while the
 	// pinned output viewport owns the screen.
-	enabled = enabled && c.chatboxConfig.OutputMouse == "navigate"
+	enabled = enabled && (c.chatboxConfig.OutputMouse == "navigate" || c.interactiveBlockMouse())
+	if c.interactiveBlockMouse() && c.viewport != nil && (c.viewport.search != nil || c.viewport.frozen != nil) {
+		// Text-only search/legacy snapshots have no card hit targets. Return
+		// selection to the terminal instead of capturing and discarding drags.
+		enabled = false
+	}
 	if !enabled {
 		c.setViewportMotion(false)
+		if c.viewportMouse && c.viewport != nil {
+			c.viewport.cards.releasePointer()
+		}
 	}
 	if c.viewportMouse == enabled {
 		c.setViewportMotion(enabled && c.viewport != nil && c.viewport.frozen != nil)
@@ -234,10 +281,15 @@ func (c *terminalCompositor) setViewportMouse(enabled bool) {
 	}
 	c.viewportMouse = enabled
 	if enabled {
-		_, _ = io.WriteString(c.out, "\x1b[?1000h\x1b[?1006h")
+		if c.interactiveBlockMouse() {
+			// Button-motion reports let ordinary drags select without modifiers.
+			_, _ = io.WriteString(c.out, "\x1b[?1002h\x1b[?1006h")
+		} else {
+			_, _ = io.WriteString(c.out, "\x1b[?1000h\x1b[?1006h")
+		}
 		c.setViewportMotion(c.viewport != nil && c.viewport.frozen != nil)
 	} else {
-		_, _ = io.WriteString(c.out, "\x1b[?1000l\x1b[?1006l")
+		_, _ = io.WriteString(c.out, "\x1b[?1002l\x1b[?1000l\x1b[?1006l")
 	}
 }
 
@@ -257,7 +309,11 @@ func (c *terminalCompositor) setViewportMotion(enabled bool) {
 		// Tracking protocols are mutually exclusive in terminals such as iTerm.
 		// Leaving all-motion mode must restore normal reporting for wheel input.
 		if c.viewportMouse {
-			_, _ = io.WriteString(c.out, "\x1b[?1000h")
+			mode := "1000"
+			if c.interactiveBlockMouse() {
+				mode = "1002"
+			}
+			_, _ = fmt.Fprintf(c.out, "\x1b[?%sh", mode)
 		}
 	}
 }
@@ -314,7 +370,7 @@ func (c *terminalCompositor) viewportBadgeRow() int {
 }
 
 func (c *terminalCompositor) viewportBadgeTitleLine() string {
-	if c.viewport.frozen == nil || c.viewport.toolbarActive() {
+	if c.viewport.frozen == nil && c.viewport.cards.reading == nil || c.viewport.toolbarActive() {
 		return c.inputBoxTitleLine()
 	}
 	_, start, width := c.viewportBadge()
@@ -344,7 +400,9 @@ func (c *terminalCompositor) renderStatusSegmentsWithin(segments []terminalStatu
 func (c *terminalCompositor) appendViewportSnapshot() {
 	if c.chatboxConfig.Scrollback == "blocks" {
 		c.startBlockRows()
-		c.writeViewportOutput([]byte(strings.Join(c.blockCommandRows(), "\x1b[0m\r\n") + "\x1b[0m\r\n"))
+		c.recordViewportOutput([]byte(strings.Join(c.blockCommandRows(), "\x1b[0m\r\n") + "\x1b[0m\r\n"))
+		c.beginCardOutput()
+		c.renderOutputViewport()
 		return
 	}
 	if c.chatboxConfig.Scrollback != "snapshot" {
@@ -378,6 +436,11 @@ func (c *terminalCompositor) appendViewportOutcome(exitCode *int) {
 		now = c.now
 	}
 	lines := c.completedExecutionOutcomeLines(max(now().Sub(c.commandStartedAt), 0), *exitCode)
+	if c.viewport.cards.pending != nil {
+		c.viewport.cards.pending.outcome = append([]string(nil), lines...)
+		c.viewport.cards.pending.outcomeFirst = c.viewport.cursorLogicalRow() + 1
+		c.viewport.cards.pending.outcomeEnd = c.viewport.cards.pending.outcomeFirst + uint64(len(lines))
+	}
 	c.writeCompletedViewportOutput([]byte("\r\n" + strings.Join(lines, "\x1b[0m\r\n") + "\x1b[0m\r\n"))
 }
 
@@ -433,16 +496,26 @@ func (c *terminalCompositor) renderOutputViewport() {
 	var frame strings.Builder
 	frame.WriteString(terminalSyncStart + "\x1b7\x1b[?25l\x1b[?7l")
 	var projected []vt.RetainedViewRow
-	if v.frozen == nil && c.blockGutter() > 0 {
+	cardRows, usingCards := c.layoutOutputCards(c.viewportContentRows())
+	var liveRows []uint64
+	if !usingCards && v.frozen == nil && c.blockGutter() > 0 {
 		projected = v.model.RetainedTail(c.outputContentWidth(), rows)
+	} else if !usingCards && v.frozen == nil {
+		_, liveRows = v.model.LogicalRowPositions()
 	}
 	for row := 0; row < rows; row++ {
 		line := ""
 		state := blockNeutral
-		if v.frozen != nil {
+		divider := false
+		if usingCards {
+			if row < len(cardRows) {
+				line = c.paintCardRow(cardRows[row], row)
+			}
+		} else if v.frozen != nil {
 			index := v.top + row
 			if index < len(v.frozenLayout) && row < c.viewportContentRows() {
 				span := v.frozenLayout[index]
+				divider = v.frozenDividers[span.logical]
 				if span.logical < len(v.frozenStates) {
 					state = v.frozenStates[span.logical]
 				}
@@ -456,11 +529,16 @@ func (c *terminalCompositor) renderOutputViewport() {
 		} else {
 			line = viewportLine(v.model, row, c.width, false)
 		}
-		divider := isOutputBlockDivider(line)
-		if divider {
+		switch {
+		case row < len(projected):
+			divider = v.paneDividerAt(projected[row].Logical, line)
+		case row < len(liveRows):
+			divider = v.paneDividerAt(liveRows[row], line)
+		}
+		if divider && !usingCards {
 			line = c.blockDividerLine()
 		}
-		if c.blockGutter() > 0 && (!divider || state != blockNeutral) {
+		if !usingCards && c.blockGutter() > 0 && !divider {
 			line = c.blockStateLine(line, state, c.width)
 		}
 		if strings.Contains(line, "vuja://codex-resume/") {
@@ -470,7 +548,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 	}
 	frame.WriteString("\x1b8\x1b[?7h\x1b[?25h" + terminalSyncEnd)
 	data := []byte(frame.String())
-	if c.viewportCommand {
+	if c.viewportCommand || v.cards.restoreInput {
 		start, statusLines := c.commandStatusLines()
 		copy(c.renderedLines[start:], statusLines)
 		// The shell is busy: keep its submitted command and metadata visible,
@@ -486,6 +564,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 		}
 		chrome.WriteString("\x1b8\x1b[?7h" + terminalSyncEnd)
 		data = append(data, []byte(chrome.String())...)
+		v.cards.restoreInput = false
 	}
 	// Paint after busy chrome too, and restore the unobstructed title at latest.
 	var badge strings.Builder
@@ -494,7 +573,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 	if c.inputBoxTitleEnabled() && c.inputBoxDecorationRows() > 0 {
 		fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", rows+1, c.viewportBadgeTitleLine())
 	}
-	if v.frozen != nil {
+	if v.frozen != nil || v.cards.reading != nil || v.toolbarActive() {
 		label, left, _ := c.viewportBadge()
 		if badgeRow == rows {
 			fmt.Fprintf(&badge, "\x1b[%d;1H\x1b[0m\x1b[2K", badgeRow)
@@ -507,6 +586,15 @@ func (c *terminalCompositor) renderOutputViewport() {
 	}
 	badge.WriteString("\x1b8\x1b[?7h" + terminalSyncEnd)
 	data = append(data, []byte(badge.String())...)
+	if selection := v.cards.selection; selection != nil && selection.dragged {
+		var inputSelection strings.Builder
+		inputSelection.WriteString(terminalSyncStart + "\x1b7")
+		for y := rows; y < min(len(selection.frame), c.height); y++ {
+			fmt.Fprintf(&inputSelection, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", y+1, c.paintCardRow(selection.frame[y], y))
+		}
+		inputSelection.WriteString("\x1b8" + terminalSyncEnd)
+		data = append(data, []byte(inputSelection.String())...)
+	}
 	_, _ = c.out.Write(data)
 	// Save the visible output for suggestion-overlay restoration, never feed the
 	// frozen view back into the live output model.
@@ -528,6 +616,9 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	defer c.mu.Unlock()
 	if c.closed || !c.outputViewportEnabled() || bytes.Contains(data, bracketedPasteStart) {
 		return false
+	}
+	if c.handleCardInput(data, suggestions) {
+		return true
 	}
 	if c.viewport != nil && c.viewport.search != nil {
 		// A pending suggestion result does not transfer modal pointer ownership.

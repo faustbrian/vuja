@@ -27,7 +27,7 @@ func (c *terminalCompositor) blockDividerLine() string {
 	if !c.chatboxConfig.BlockDividers {
 		return ""
 	}
-	return terminalDefaultBackground + terminalTrueColor("38", c.inputBoxTheme.Muted) + strings.Repeat("─", max(c.width, 1)) + "\x1b[0m"
+	return terminalDefaultBackground + "\x1b[2m" + terminalTrueColor("38", c.inputBoxTheme.Muted) + strings.Repeat("─", max(c.width, 1)) + "\x1b[0m"
 }
 
 func (c *terminalCompositor) blockCommandRows() []string {
@@ -74,8 +74,10 @@ func (c *terminalCompositor) enterBlockCommandOutput() {
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[2K", row+1)
 	}
 	fmt.Fprintf(&frame, "\x1b[%d;1H", top+1)
-	for _, line := range c.blockCommandRows() {
-		if isOutputBlockDivider(line) {
+	for i, line := range c.blockCommandRows() {
+		// Only the generator's injected first row is chrome. Command-label
+		// cells may carry the same non-action hyperlink without being a rule.
+		if i == 0 && c.chatboxConfig.BlockDividers {
 			line = c.blockDividerLine()
 		}
 		frame.WriteString(line + "\x1b[0m\r\n")

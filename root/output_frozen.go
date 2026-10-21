@@ -9,9 +9,14 @@ type frozenOutputRow struct {
 }
 
 func (v *outputViewport) setFrozen(rows []string) {
+	v.cards.releasePointer()
+	v.cards.reading = nil
+	v.cards.history, v.cards.total, v.cards.browsing = 0, 0, false
+	v.cards.focus, v.cards.focused = nil, nil
 	v.frozen = rows
 	v.frozenPane = false
 	v.frozenStates = nil
+	v.frozenDividers = nil
 	v.frozenLayout = nil
 	v.frozenWidth = 0
 	v.frozenTruncated = false

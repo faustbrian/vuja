@@ -135,8 +135,8 @@ func TestOutputViewportConfiguration(t *testing.T) {
 		}
 	}
 	cfg := DefaultConfig()
-	if cfg.UI.Chatbox.OutputViewport != "pinned" || cfg.UI.Chatbox.OutputMouse != "select" {
-		t.Fatal("viewport must default to pinned with native mouse selection")
+	if cfg.UI.Chatbox.OutputViewport != "pinned" || cfg.UI.Chatbox.OutputMouse != "interact" {
+		t.Fatal("viewport must default to pinned with managed block interaction")
 	}
 	cfg.UI.Chatbox.OutputMouse = "invalid"
 	if Validate(cfg) == nil {

@@ -18,6 +18,7 @@ const executionClipboardBytes = 256 * 1024
 // Only one extra emulator is alive: completed executions are bounded rows.
 type outputExecutions struct {
 	nextID   uint64
+	revision uint64
 	active   *outputExecutionCapture
 	retained []retainedExecution
 	selected *retainedExecution
@@ -158,6 +159,7 @@ func (c *terminalCompositor) finishOutputExecution(interrupted bool) bool {
 	r.truncated = r.truncated || interrupted
 	abandonTerminalModel(a.model, a.done)
 	e.retained = append(e.retained, r)
+	e.revision++
 	// Completed execution rows share one global cap, not a per-command cap.
 	// Empty executions cost one slot, so silent commands cannot grow forever.
 	lines, bytes := clamp(c.chatboxConfig.OutputLines, 1, 10000), retainedExecutionBytes
@@ -217,11 +219,10 @@ func (r retainedExecution) plainText() string {
 		return ""
 	}
 	var out strings.Builder
+	// Execution rows are program-owned. Pane callers remove their separately
+	// attributed chrome before conversion; a hyperlink URI is not provenance.
 	first := true
 	for _, row := range r.rows {
-		if isOutputBlockDivider(row) {
-			continue
-		}
 		if !first {
 			out.WriteByte('\n')
 		}
@@ -286,6 +287,9 @@ func (e *outputExecutions) label() string {
 		return ""
 	}
 	caption := fmt.Sprintf("Execution #%d", e.selected.id)
+	if e.selected.id == 0 {
+		caption = "Retained block"
+	}
 	if e.selected.applicationOwned {
 		caption = "not captured · " + caption + " · application output"
 	} else if e.selected.truncated {

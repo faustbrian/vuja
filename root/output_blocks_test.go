@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/internal/vt"
 )
 
 func blocksFixture(t *testing.T, document string) (*terminalCompositor, *bytes.Buffer) {
@@ -51,13 +53,25 @@ func blocksExecution(c *terminalCompositor, command, output, exit string) {
 	c.WritePTY(terminalMarkerBytes("blocks", "command-end:"+exit))
 }
 
+func blockEdgeCount(screen *vt.Emulator) int {
+	count := 0
+	for y := 0; y < screen.Height(); y++ {
+		cell := screen.CellAt(0, y)
+		if cell != nil && cell.Style.Underline == uv.UnderlineSingle && blockTestRGB(cell.Style.UnderlineColor) == [3]uint8{36, 40, 50} {
+			count++
+		}
+	}
+	return count
+}
+
 func TestOutputBlocksDefaultGroupsCommandsIncludingSilentExecutions(t *testing.T) {
 	c, out := blocksFixture(t, "")
 	blocksExecution(c, "first-command", "first-result café 日本語\r\n", "0")
 	blocksExecution(c, "silent-command", "", "0")
 	blocksExecution(c, "failed-command", "failure-result", "1")
 	blocksPrompt(c, "next-input")
-	lines := terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24))
+	screen := applyTerminalOutput(t, out.Bytes(), 60, 24)
+	lines := terminalScreenLines(screen)
 	last := -1
 	for _, want := range []string{"› first-command", "first-result", "› silent-command", "› failed-command", "failure-result", "exit 1", "› next-input"} {
 		found := terminalLineIndex(lines, want, last+1)
@@ -66,17 +80,23 @@ func TestOutputBlocksDefaultGroupsCommandsIncludingSilentExecutions(t *testing.T
 		}
 		last = found
 	}
-	dividers := 0
-	for _, line := range lines {
-		if strings.Contains(line, "────────") {
-			dividers++
-		}
-	}
+	dividers := blockEdgeCount(screen)
 	if dividers != 3 {
 		t.Fatalf("want one divider per execution, got %d: %q", dividers, lines)
 	}
-	if strings.Contains(out.String(), "\x1b[?1000h") || strings.Contains(out.String(), "\x1b[?1003h") {
-		t.Fatal("blocks captured ordinary native selection")
+	if !strings.Contains(out.String(), "\x1b[?1002h") || strings.Contains(out.String(), "\x1b[?1003h") {
+		t.Fatal("interactive blocks require button-motion selection without all-motion capture")
+	}
+}
+
+func TestOutputBlocksExplicitSelectKeepsNativePointerOwnership(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\noutput-mouse='select'\n")
+	blocksExecution(c, "command", "output\r\n", "0")
+	blocksPrompt(c, "pending-input")
+	for _, mode := range []string{"1000", "1002", "1003", "1006"} {
+		if strings.Contains(out.String(), "\x1b[?"+mode+"h") {
+			t.Fatalf("explicit native selection enabled mouse reporting %s", mode)
+		}
 	}
 }
 
@@ -95,7 +115,7 @@ func TestOutputBlocksConfigurationReachesRendering(t *testing.T) {
 			blocksExecution(c, "submitted-command", "owned-output\r\n", "0")
 			blocksPrompt(c, "next-input")
 			screen := applyTerminalOutput(t, out.Bytes(), 60, 24)
-			if terminalContainsLine(screen, "submitted-command") != test.command || terminalContainsLine(screen, "────────") != test.divider || !terminalContainsLine(screen, "owned-output") {
+			if terminalContainsLine(screen, "submitted-command") != test.command || (blockEdgeCount(screen) > 0) != test.divider || !terminalContainsLine(screen, "owned-output") {
 				t.Fatalf("wrong configuration-to-renderer behavior: %q", terminalScreenLines(screen))
 			}
 		})
@@ -112,9 +132,9 @@ func TestOutputBlocksSpacingAndOutputOnlyCopy(t *testing.T) {
 			lines := terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24))
 			command := terminalLineIndex(lines, "› neighbor-command", 0)
 			prior := terminalLineIndex(lines, "exit 0", 0)
-			wantGap := 2
+			wantGap := 1
 			if spacing == "3" {
-				wantGap = 5
+				wantGap = 4
 			}
 			if command-prior != wantGap {
 				t.Fatalf("spacing=%s: command/outcome gap=%d, want %d: %q", spacing, command-prior, wantGap, lines)
@@ -124,9 +144,8 @@ func TestOutputBlocksSpacingAndOutputOnlyCopy(t *testing.T) {
 			out.Reset()
 			input.FilterInput([]byte("\x1b[23~"), c, false, true)
 			assertExecutionClipboard(t, out.String(), "owned café 日本語\n")
-			if strings.Contains(ansi.Strip(out.String()), "copy-command") {
-				t.Fatal("output-only selection included block command chrome")
-			}
+			// The clipboard assertion above checks output-only bytes. The card
+			// remains visible, so its repaint may legitimately contain the label.
 		})
 	}
 }
@@ -165,10 +184,19 @@ func TestOutputBlocksResizeSearchAndPaneExportDoNotExposeDecorations(t *testing.
 			t.Fatalf("divider wrapped or duplicated after resize to %d: %q", width, terminalScreenLines(physical))
 		}
 	}
-	path, err := writeRetainedOutputExport(retainedExecution{rows: c.viewport.frozen, newline: true})
-	if err != nil {
-		t.Fatal(err)
+	c.HandleViewportInput([]byte("\x1b[24~"), false)
+	c.mu.Lock()
+	done := c.outputExportDone
+	c.mu.Unlock()
+	if done == nil {
+		t.Fatal("pane export did not start")
 	}
+	<-done
+	paths, err := filepath.Glob(filepath.Join(os.Getenv("XDG_CACHE_HOME"), "vuja", "exports", "*.txt"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("expected one pane export: %v %v", paths, err)
+	}
+	path := paths[0]
 	text, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +232,25 @@ func TestOutputBlocksNativeViewportPreservesApplicationOwnership(t *testing.T) {
 	}
 }
 
+func TestOutputBlocksNativeCommandLabelCannotBecomeADivider(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\noutput-viewport='terminal'\n")
+	blocksPrompt(c, "first-line\n\x1b]8;;vuja:block-divider\x1b\\  ─\x1b]8;;\x1b\\")
+	c.WritePTY(terminalMarkerBytes("blocks", "command-public"))
+	c.WritePTY(terminalMarkerBytes("blocks", "command-start"))
+	lines := terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24))
+	rules, labels := 0, 0
+	for _, line := range lines {
+		if line == strings.Repeat("─", 60) {
+			rules++
+		} else if strings.TrimSpace(line) == "─" {
+			labels++
+		}
+	}
+	if rules != 1 || labels != 1 {
+		t.Fatalf("only the injected boundary may expand; preserve the linked command label: %q", lines)
+	}
+}
+
 func TestOutputBlocksRestoreAndClearKeepFlatPrivateCheckpoints(t *testing.T) {
 	dir := t.TempDir()
 	a, _ := blocksFixture(t, "")
@@ -218,7 +265,7 @@ func TestOutputBlocksRestoreAndClearKeepFlatPrivateCheckpoints(t *testing.T) {
 	}
 	blocksPrompt(b, "restored-input")
 	physical := applyTerminalOutput(t, out.Bytes(), 60, 24)
-	if !terminalContainsLine(physical, "stored-command") || !terminalContainsLine(physical, "stored-result") || !terminalContainsLine(physical, "────────") {
+	if !terminalContainsLine(physical, "stored-command") || !terminalContainsLine(physical, "stored-result") || blockEdgeCount(physical) != 1 {
 		t.Fatalf("restored block lost display rows: %q", terminalScreenLines(physical))
 	}
 	if len(b.viewport.executions.retained) != 0 {
@@ -260,14 +307,10 @@ func TestOutputBlocksMultilineAndSplitMarkersDoNotDuplicateBoundaries(t *testing
 		c.WritePTY(terminalMarkerBytes("blocks", "command-end:0"))
 		blocksPrompt(c, "next-input")
 		c.SetStatusSnapshot(statusSnapshot{})
-		lines := terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24))
+		screen := applyTerminalOutput(t, out.Bytes(), 60, 24)
+		lines := terminalScreenLines(screen)
 		all := strings.Join(lines, "\n")
-		dividers := 0
-		for _, line := range lines {
-			if line == strings.Repeat("─", 60) {
-				dividers++
-			}
-		}
+		dividers := blockEdgeCount(screen)
 		if !strings.Contains(all, "printf first") || !strings.Contains(all, "second-line") || !strings.Contains(all, "result-tail") || dividers != 1 {
 			t.Fatalf("multiline command or block boundary corrupted: %q", lines)
 		}

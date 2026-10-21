@@ -237,6 +237,7 @@ type terminalChatboxConfig struct {
 	Scrollback               string
 	BlockDividers            bool
 	BlockStates              bool
+	BlockMaxHeight           int
 	SurfaceWidth             string
 	OutputViewport           string
 	OutputMouse              string
@@ -886,6 +887,15 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 	if c.closed {
 		return
 	}
+	if c.viewport != nil {
+		c.viewport.cards.releasePointer()
+		c.viewport.cards.layouts = nil
+		c.viewport.cards.document = nil
+		c.viewport.cards.reading = nil
+		c.viewport.cards.history, c.viewport.cards.total, c.viewport.cards.browsing = 0, 0, false
+		c.viewport.cards.focus, c.viewport.cards.focused = nil, nil
+		c.setViewportMouse(false)
+	}
 	if r := c.outputRecovery; r != nil && (chatbox.OutputCheckpoints == "off" || chatbox.OutputViewport != "pinned") {
 		stopRecovery, r.writer = r.writer, nil
 	}
@@ -895,6 +905,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		Scrollback:               chatbox.Scrollback,
 		BlockDividers:            chatbox.BlockDividers,
 		BlockStates:              chatbox.BlockStates,
+		BlockMaxHeight:           chatbox.BlockMaxHeight,
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,
@@ -1111,7 +1122,7 @@ func (c *terminalCompositor) WriteNotification(data []byte) {
 		return
 	}
 	if c.outputViewportEnabled() {
-		c.writeViewportOutput(data)
+		c.writeViewportNotification(data)
 		return
 	}
 	if c.layout && c.phase != terminalOutput && c.surfaceRows > 0 {
@@ -1128,6 +1139,9 @@ func (c *terminalCompositor) Resize(width, height int) {
 
 	if c.closed || !c.enabled {
 		return
+	}
+	if c.viewport != nil {
+		c.viewport.cards.releasePointer()
 	}
 	if width <= 0 || height <= 1 {
 		if c.layout {
@@ -1751,6 +1765,7 @@ func (c *terminalCompositor) finishCommandOutput(exitCode *int) {
 			c.viewportControlTail = nil
 		}
 		c.finishNativeOutput()
+		c.endCardOutput()
 		c.appendViewportOutcome(exitCode)
 		c.endBlockRows()
 		c.writeCompletedViewportOutput([]byte(strings.Repeat("\r\n", max(c.chatboxConfig.HistorySpacing, 0))))

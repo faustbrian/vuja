@@ -121,8 +121,9 @@ func TestOutputBlockStatesRetainTextAcrossFrozenResizeAndTools(t *testing.T) {
 		out.Reset()
 		c.Resize(width, 24)
 		physical := applyTerminalOutput(t, out.Bytes(), width, 24)
-		if cell := physical.CellAt(0, 0); cell == nil || cell.Content != "▌" {
-			t.Fatalf("frozen wrapped block lost rail at width %d", width)
+		y := terminalLineIndex(terminalScreenLines(physical), "longer", 0)
+		if y < 0 || physical.CellAt(0, y).Content != "▌" {
+			t.Fatalf("browsed wrapped block lost rail at width %d: %q", width, terminalScreenLines(physical))
 		}
 		if got := (retainedExecution{rows: retainedModelRows(c.viewport.model)}).plainText(); got != before {
 			t.Fatalf("resize changed semantic output: %q", got)
@@ -236,7 +237,7 @@ func TestOutputBlockStatesCheckpointMetadataNeverEvictsFittingText(t *testing.T)
 	rows := make([]string, 10000)
 	blocks := make([]checkpointBlockSpan, len(rows))
 	for i := range rows {
-		rows[i], blocks[i] = strings.Repeat("x", 101), checkpointBlockSpan{i, i, blockError}
+		rows[i], blocks[i] = strings.Repeat("x", 101), checkpointBlockSpan{First: i, Last: i, State: blockError}
 	}
 	if err := r.writeState(outputRecoveryState{Version: 1, Owner: r.owner, Rows: rows, Blocks: blocks}); err != nil {
 		t.Fatal(err)
@@ -253,8 +254,8 @@ func TestOutputBlockStatesCheckpointMetadataNeverEvictsFittingText(t *testing.T)
 
 func TestOutputBlockStatesInvalidCheckpointRangesPreserveText(t *testing.T) {
 	for _, blocks := range [][]checkpointBlockSpan{
-		{{-1, 0, blockError}}, {{0, 1, blockError}}, {{0, 0, blockState(99)}},
-		{{0, 0, blockNeutral}, {0, 0, blockError}},
+		{{First: -1, Last: 0, State: blockError}}, {{First: 0, Last: 1, State: blockError}}, {{First: 0, Last: 0, State: blockState(99)}},
+		{{First: 0, Last: 0, State: blockNeutral}, {First: 0, Last: 0, State: blockError}},
 	} {
 		path := t.TempDir() + "/state.json"
 		data, err := json.Marshal(outputRecoveryState{Version: 1, Owner: "fixture", Rows: []string{"retained-public-text"}, Blocks: blocks})

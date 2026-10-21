@@ -79,7 +79,7 @@ func (f *terminalInputFilter) FilterEvents(input []byte, display *terminalCompos
 		if owner.shell {
 			sequence = stripShellReport(sequence)
 		}
-		if len(sequence) > 0 && sequence[0] != '\x1b' && owner.viewport && display.OutputSearchActive() {
+		if len(sequence) > 0 && sequence[0] != '\x1b' && owner.viewport && (display.OutputSearchActive() || bytes.Contains(sequence, []byte{3})) {
 			// Frame text and editing keys independently even when a single read
 			// contains both. Closing the modal preserves subsequent shell bytes.
 			var forwarded []byte

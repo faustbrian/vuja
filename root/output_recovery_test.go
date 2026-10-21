@@ -218,6 +218,19 @@ func TestOutputRecoveryStripsUnsafeControls(t *testing.T) {
 	}
 }
 
+func TestOutputRecoveryPreservesDividerLikeTextAndStylesWithoutReplayingEffects(t *testing.T) {
+	for _, terminator := range []string{"\x1b\\", "\a"} {
+		row := "\x1b]52;c;not-a-clipboard-request\a\x1b[2J\x1b[31m  \x1b]8;;vuja:block-divider" + terminator + "─\x1b]8;;" + terminator + "\x1b[0m"
+		want := "\x1b[31m  \x1b]8;;vuja:block-divider\x1b\\─\x1b]8;;\x1b\\\x1b[0m"
+		for _, restore := range []bool{false, true, false, true} {
+			row = recoveryRow(row, nil, restore)
+			if row != want {
+				t.Fatalf("restore=%t must preserve literal text/style and the non-action URI without replaying effects: %q", restore, row)
+			}
+		}
+	}
+}
+
 func TestOutputRecoveryRejectsNonregularCheckpointWithoutBlocking(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := recoveryCompositor(t, dir, "pane", "a", nil)

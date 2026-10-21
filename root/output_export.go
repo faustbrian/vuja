@@ -82,10 +82,26 @@ func (c *terminalCompositor) exportRetainedOutput() {
 	r := retainedExecution{newline: true}
 	if v.executions.selected != nil {
 		r = *v.executions.selected
+	} else if reading := v.cards.reading; reading != nil {
+		r.rows, r.truncated = withoutPaneDividers(reading.rows, reading.dividers), reading.truncated
 	} else {
 		c.freezeOutputViewport()
-		r.rows = v.frozen
+		r.rows = withoutPaneDividers(v.frozen, v.frozenDividers)
 		r.truncated = v.frozenTruncated
+	}
+	c.exportOutputSnapshot(r)
+}
+
+// Every entry point supplies an immutable semantic target, never a screen crop.
+func (c *terminalCompositor) exportOutputSnapshot(r retainedExecution) {
+	v := c.viewport
+	if c.outputExportDone != nil {
+		select {
+		case <-c.outputExportDone:
+		default:
+			v.executions.notice = "Output export already running"
+			return
+		}
 	}
 	r.rows = append([]string(nil), r.rows...)
 	target := "pane"

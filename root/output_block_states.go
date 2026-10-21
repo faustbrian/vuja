@@ -16,6 +16,7 @@ const (
 	blockNeutral blockState = iota
 	blockWarning
 	blockError
+	blockFocused // drawing-only; never stored as a completion outcome
 )
 
 // Only presentation ranges live here: no command text, executable identity or
@@ -23,14 +24,35 @@ const (
 type blockSpan struct {
 	first, last uint64
 	state       blockState
+	divider     bool
 }
 
 // Checkpoints carry row-relative presentation boundaries, never execution IDs.
 // Neutral boundaries matter: later prefix eviction must warn only that block.
 type checkpointBlockSpan struct {
-	First int        `json:"first"`
-	Last  int        `json:"last"`
-	State blockState `json:"state"`
+	First   int             `json:"first"`
+	Last    int             `json:"last"`
+	State   blockState      `json:"state"`
+	Divider bool            `json:"divider,omitempty"`
+	Card    *checkpointCard `json:"card,omitempty"`
+}
+
+// Optional numeric ranges describe text regions, not durable executions.
+type checkpointCard struct {
+	BodyFirst    int                   `json:"body_first"`
+	BodyEnd      int                   `json:"body_end"`
+	OutcomeFirst int                   `json:"outcome_first,omitempty"`
+	OutcomeEnd   int                   `json:"outcome_end,omitempty"`
+	Newline      bool                  `json:"newline,omitempty"`
+	Native       bool                  `json:"native,omitempty"`
+	Truncated    bool                  `json:"truncated,omitempty"`
+	PaneOnly     bool                  `json:"pane_only,omitempty"`
+	Notices      []checkpointTextRange `json:"notices,omitempty"`
+}
+
+type checkpointTextRange struct {
+	First int `json:"first"`
+	Last  int `json:"last"`
 }
 
 func (c *terminalCompositor) blockGutter() int {
@@ -56,6 +78,7 @@ func (c *terminalCompositor) startBlockRows() {
 	}
 	v.blockStart, v.blockEnd, v.blockActive = v.cursorLogicalRow(), 0, true
 	v.blockLossStart = v.text.losses
+	v.cards.pending = &outputCard{first: v.blockStart, divider: c.chatboxConfig.BlockDividers}
 }
 
 func checkpointBlockSuffix(blocks []checkpointBlockSpan, skipped, count int) []checkpointBlockSpan {
@@ -67,9 +90,54 @@ func checkpointBlockSuffix(blocks []checkpointBlockSpan, skipped, count int) []c
 		if b.First < skipped && b.State == blockNeutral {
 			b.State = blockWarning
 		}
+		if b.First < skipped {
+			b.Divider = false
+		}
 		b.First = max(b.First-skipped, 0)
 		b.Last = min(b.Last-skipped, count-1)
+		if b.Card != nil {
+			card := *b.Card
+			card.Truncated = card.Truncated || card.BodyFirst < skipped
+			card.BodyFirst = clamp(card.BodyFirst-skipped, b.First, b.Last+1)
+			card.BodyEnd = clamp(card.BodyEnd-skipped, card.BodyFirst, b.Last+1)
+			if card.OutcomeEnd > 0 {
+				card.OutcomeFirst = clamp(card.OutcomeFirst-skipped, b.First, b.Last+1)
+				card.OutcomeEnd = clamp(card.OutcomeEnd-skipped, card.OutcomeFirst, b.Last+1)
+			}
+			card.Notices = nil
+			for _, notice := range b.Card.Notices {
+				start, end := max(notice.First-skipped, card.BodyFirst), min(notice.Last-skipped, card.BodyEnd-1)
+				if start <= end {
+					card.Notices = append(card.Notices, checkpointTextRange{First: start, Last: end})
+				}
+			}
+			b.Card = &card
+		}
 		kept = append(kept, b)
+	}
+	return kept
+}
+
+// Both checkpoint sizing passes can retain a suffix within their first row.
+// Whole-row offsets cannot represent that loss; compare semantic text so
+// dropping only ANSI styling does not falsely truncate a complete card body.
+func checkpointBlocksForRows(blocks []checkpointBlockSpan, original, rows []string) []checkpointBlockSpan {
+	skipped := len(original) - len(rows)
+	kept := checkpointBlockSuffix(blocks, skipped, len(rows))
+	if len(rows) == 0 || ansi.Strip(original[skipped]) == ansi.Strip(rows[0]) {
+		return kept
+	}
+	for i := range kept {
+		b := &kept[i]
+		if b.First != 0 {
+			continue
+		}
+		if b.State == blockNeutral {
+			b.State = blockWarning
+		}
+		if b.Card != nil && b.Card.BodyFirst == 0 && b.Card.BodyEnd > 0 {
+			b.Card.Truncated = true
+		}
 	}
 	return kept
 }
@@ -83,10 +151,13 @@ func (c *terminalCompositor) endBlockRows() {
 	if v.model.CursorPosition().X == 0 && v.blockEnd > v.blockStart {
 		v.blockEnd--
 	}
+	if v.cards.pending != nil {
+		v.cards.pending.last = v.blockEnd
+	}
 }
 
 func (c *terminalCompositor) finishBlockState(exit *int, incomplete bool) {
-	if c.chatboxConfig.Scrollback != "blocks" || !c.chatboxConfig.BlockStates {
+	if c.chatboxConfig.Scrollback != "blocks" {
 		if c.viewport != nil {
 			c.viewport.blockActive = false
 		}
@@ -107,10 +178,17 @@ func (c *terminalCompositor) finishBlockState(exit *int, incomplete bool) {
 	if exit != nil && *exit != 0 {
 		state = blockError
 	}
+	if !c.chatboxConfig.BlockStates {
+		state = blockNeutral
+	}
 	if v := c.viewport; v != nil && v.blockActive {
 		v.blockActive = false
 		if v.blockEnd >= v.blockStart {
-			v.blocks = append(v.blocks, blockSpan{v.blockStart, v.blockEnd, state})
+			v.blocks = append(v.blocks, blockSpan{first: v.blockStart, last: v.blockEnd, state: state, divider: v.cards.pending != nil && v.cards.pending.divider})
+			if card := v.cards.pending; card != nil {
+				card.state = state
+				v.cards.completed = append(v.cards.completed, *card)
+			}
 			if v.frozenPane {
 				for i := range v.frozenStates {
 					row := v.frozenBase + uint64(i)
@@ -120,6 +198,7 @@ func (c *terminalCompositor) finishBlockState(exit *int, incomplete bool) {
 				}
 			}
 		}
+		v.cards.pending = nil
 		v.dirty = true
 		if !c.viewportPassthrough {
 			c.renderOutputViewport()
@@ -141,9 +220,13 @@ func (c *terminalCompositor) finishBlockState(exit *int, incomplete bool) {
 }
 
 func (v *outputViewport) stateAt(row uint64) blockState {
-	i := sort.Search(len(v.blocks), func(i int) bool { return v.blocks[i].last >= row })
-	if i < len(v.blocks) && v.blocks[i].first <= row {
-		return v.blocks[i].state
+	return blockStateAt(v.blocks, row)
+}
+
+func blockStateAt(blocks []blockSpan, row uint64) blockState {
+	i := sort.Search(len(blocks), func(i int) bool { return blocks[i].last >= row })
+	if i < len(blocks) && blocks[i].first <= row {
+		return blocks[i].state
 	}
 	return blockNeutral
 }
@@ -157,6 +240,24 @@ func (v *outputViewport) pruneBlockStates() {
 	if len(v.blocks) > 0 && v.blocks[0].first < first && v.blocks[0].state == blockNeutral {
 		v.blocks[0].state = blockWarning
 	}
+	i = sort.Search(len(v.cards.completed), func(i int) bool { return v.cards.completed[i].last >= first })
+	if i > 0 {
+		v.cards.completed = append([]outputCard(nil), v.cards.completed[i:]...)
+	}
+	pruneNotices := func(card *outputCard) {
+		i := sort.Search(len(card.notices), func(i int) bool { return card.notices[i].last >= first })
+		if i > 0 {
+			card.notices = append([]blockSpan(nil), card.notices[i:]...)
+		}
+	}
+	// Ordered card ranges do not overlap; only the first surviving card can
+	// straddle prefix eviction. Later notice ranges are still fully retained.
+	if len(v.cards.completed) > 0 {
+		pruneNotices(&v.cards.completed[0])
+	}
+	if card := v.cards.pending; card != nil {
+		pruneNotices(card)
+	}
 }
 
 func (v *outputViewport) checkpointBlocks(count int) []checkpointBlockSpan {
@@ -169,7 +270,27 @@ func (v *outputViewport) checkpointBlocks(count int) []checkpointBlockSpan {
 		if b.last < first || b.first >= first+uint64(count) {
 			continue
 		}
-		blocks = append(blocks, checkpointBlockSpan{int(max(b.first, first) - first), int(min(b.last-first, uint64(count-1))), b.state})
+		span := checkpointBlockSpan{First: int(max(b.first, first) - first), Last: int(min(b.last-first, uint64(count-1))), State: b.state, Divider: b.divider && b.first >= first}
+		i := sort.Search(len(v.cards.completed), func(i int) bool { return v.cards.completed[i].first >= b.first })
+		if i < len(v.cards.completed) && v.cards.completed[i].first == b.first {
+			span.Card = v.cards.completed[i].checkpoint(first, count)
+		}
+		blocks = append(blocks, span)
+	}
+	if card := v.cards.pending; card != nil && card.first >= first && card.first < first+uint64(count) {
+		copy := *card
+		copy.last, copy.bodyEnd = v.cursorLogicalRow(), v.cursorLogicalRow()
+		if v.model.CursorPosition().X > 0 {
+			copy.bodyEnd++
+		}
+		if a := v.executions.active; a != nil {
+			copy.native = a.applicationOwned
+			if !copy.native {
+				r := a.snapshot()
+				copy.newline, copy.truncated = r.newline, r.truncated
+			}
+		}
+		blocks = append(blocks, checkpointBlockSpan{First: int(copy.first - first), Last: min(int(copy.last-first), count-1), State: blockWarning, Divider: copy.divider, Card: copy.checkpoint(first, count)})
 	}
 	return blocks
 }
@@ -194,12 +315,18 @@ func (c *terminalCompositor) blockStateLine(line string, state blockState, width
 		name = "exit-failure"
 	}
 	color := c.chatboxConfig.Colors[name]
+	if state == blockFocused {
+		color = c.inputBoxTheme.Accent
+	}
 	if color == "" {
 		color = c.inputBoxTheme.Accent
 	}
 	// A 20% semantic tint keeps ordinary text readable while the solid rail
 	// carries the stronger cue. ANSI terminal palettes use their actual color.
 	tint := interpolateHexColor(c.inputBoxTheme.Background, color, 1, 5)
+	if state == blockFocused {
+		tint = interpolateHexColor(c.inputBoxTheme.Background, color, 1, 12)
+	}
 	bg := terminalTrueColor("48", tint)
 	background := ansi.XParseColor(tint)
 	if index, err := strconv.Atoi(tint); err == nil && index >= 0 && index <= 15 {

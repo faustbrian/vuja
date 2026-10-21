@@ -52,8 +52,8 @@ func TestDefaultConfigAndState(t *testing.T) {
 	if cfg.UI.Chatbox.PathColorMode != "hierarchy" || cfg.UI.Chatbox.PathMaxSegments != 6 {
 		t.Fatalf("unexpected default path rendering: %+v", cfg.UI.Chatbox)
 	}
-	if cfg.UI.Chatbox.HistorySpacing != 1 {
-		t.Fatalf("expected one row between completed executions, got %d", cfg.UI.Chatbox.HistorySpacing)
+	if cfg.UI.Chatbox.HistorySpacing != 0 {
+		t.Fatalf("expected no blank rows between completed executions, got %d", cfg.UI.Chatbox.HistorySpacing)
 	}
 	wantSegments := []string{
 		"directory", "package", "versions", "session", "git-branch", "git-status", "git-added", "git-deleted",
