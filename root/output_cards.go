@@ -33,7 +33,7 @@ type cardRow struct {
 	end                 int
 	copyX, saveX        int // one-based columns; zero means unavailable
 	state               blockState
-	border              bool
+	boundary            bool // pixel decoration at the top edge; never an extra text row
 	target              *retainedExecution
 	index               int
 }
@@ -323,6 +323,7 @@ func (c *terminalCompositor) layoutOutputCards(height int) ([]cardRow, bool) {
 			next++
 		}
 	}
+	previousCard := false
 	for _, card := range cards {
 		if card.last < base || card.first < s.clearAt && !s.browsing {
 			continue
@@ -383,9 +384,8 @@ func (c *terminalCompositor) layoutOutputCards(height int) ([]cardRow, bool) {
 			paintWidth = min(c.width, natural+2)
 		}
 		bodyWidth := max(paintWidth-2, 1)
-		start := len(all)
 		for i, header := range headers {
-			row := cardRow{line: header, key: card.first, kind: 1, logical: uint64(i), width: paintWidth, state: card.state, target: target}
+			row := cardRow{line: header, key: card.first, kind: 1, logical: uint64(i), width: paintWidth, state: card.state, target: target, boundary: i == 0 && previousCard}
 			actions, saveOffset := "⧉ Copy  ⇩ Save", 8
 			if bodyWidth < 32 {
 				actions, saveOffset = "⧉ ⇩", 2
@@ -443,19 +443,10 @@ func (c *terminalCompositor) layoutOutputCards(height int) ([]cardRow, bool) {
 			}
 			all = append(all, cardRow{line: outcome, key: card.first, kind: 3, logical: uint64(i), width: paintWidth, state: card.state, target: target})
 		}
-		if c.chatboxConfig.BlockDividers {
-			// Share an existing card edge instead of spending a whole text row
-			// on a centered rule. Notices are separate pane text, not card chrome.
-			for i := len(all) - 1; i >= start; i-- {
-				if all[i].key == card.first && all[i].kind >= 1 && all[i].kind <= 3 {
-					all[i].border = true
-					break
-				}
-			}
-		}
 		for i := 0; i < c.chatboxConfig.HistorySpacing; i++ {
 			all = append(all, cardRow{key: card.first, logical: uint64(i), width: c.width})
 		}
+		previousCard = true
 		next = max(next, card.last+1+uint64(max(c.chatboxConfig.HistorySpacing, 0)))
 	}
 	appendUnowned(end)
@@ -540,7 +531,7 @@ func (c *terminalCompositor) paintCardRow(row cardRow, y int) string {
 		first, last = orderedCardPoints(selection.first, selection.last)
 		selected = y >= first.y && y <= last.y
 	}
-	if !row.border && !selected {
+	if !selected {
 		return line
 	}
 	left, right := 0, c.width
@@ -554,13 +545,6 @@ func (c *terminalCompositor) paintCardRow(row cardRow, y int) string {
 	drawing.Method = ansi.GraphemeWidth
 	uv.NewStyledString(line).Draw(drawing, uv.Rect(0, 0, c.width, 1))
 	cells := drawing.Line(0)
-	if row.border {
-		color := ansi.XParseColor(interpolateHexColor(c.inputBoxTheme.Background, c.inputBoxTheme.Muted, 1, 2))
-		for x := 0; x < min(row.width, len(cells)); x++ {
-			cells[x].Style.Underline = uv.UnderlineSingle
-			cells[x].Style.UnderlineColor = color
-		}
-	}
 	for x := 0; x < len(cells); {
 		width := max(cells[x].Width, 1)
 		if selected && x+width > left && x < right {

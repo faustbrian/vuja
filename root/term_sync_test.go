@@ -34,6 +34,77 @@ func TestTerminalInputFilterPreservesKeyboardEscapeSequences(t *testing.T) {
 	}
 }
 
+func TestInputFramingPreservesMetaUnderscore(t *testing.T) {
+	for _, shell := range []bool{true, false} {
+		for _, graphics := range []string{"disabled", "enabled", "pending"} {
+			for _, input := range []string{"\x1b_typed\r", "\x1b_Gtyped\r"} {
+				for split := 0; split <= len(input); split++ {
+					c, _ := blocksFixture(t, "")
+					c.dividerPixels.enabled = graphics != "disabled"
+					if graphics == "pending" {
+						c.dividerPixels.probe = 555
+					}
+					var f terminalInputFilter
+					got := f.FilterEvents([]byte(input[:split]), c, false, shell)
+					got = append(got, f.FilterEvents([]byte(input[split:]), c, false, shell)...)
+					if string(flattenTerminalInput(got)) != input || len(f.pending) != 0 {
+						t.Fatalf("shell=%t graphics=%s split=%d: Meta-_ swallowed typing: got %q pending %q", shell, graphics, split, flattenTerminalInput(got), f.pending)
+					}
+					for _, event := range got {
+						if event.shell != shell {
+							t.Fatal("Meta-_ changed the original keyboard owner")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestInputFramingMetaUnderscoreTimeoutKeepsOwner(t *testing.T) {
+	for _, shell := range []bool{true, false} {
+		c, _ := blocksFixture(t, "")
+		c.dividerPixels = pixelDividers{enabled: true, probe: 555}
+		var f terminalInputFilter
+		first := f.FilterInput([]byte("\x1b_"), c, false, shell)
+		if len(first) == 0 {
+			if !f.EscapePending() || f.pendingOwner.shell != shell {
+				t.Fatal("ambiguous Meta-_ prefix has no bounded keyboard timeout")
+			}
+			first = f.FlushEscape(c, false)
+		}
+		if string(first) != "\x1b_" || len(f.pending) != 0 || len(f.FlushEscape(c, false)) != 0 {
+			t.Fatal("Meta-_ was not released exactly once")
+		}
+		if got := f.FilterInput([]byte("typed\r"), c, false, shell); string(got) != "typed\r" {
+			t.Fatal("typing after Meta-_ timeout was changed")
+		}
+	}
+}
+
+func TestInputFramingMetaUnderscorePrefixKeepsHandoffOwners(t *testing.T) {
+	for _, shell := range []bool{true, false} {
+		c, _ := blocksFixture(t, "")
+		c.dividerPixels = pixelDividers{enabled: true, probe: 555}
+		var f terminalInputFilter
+		if got := f.FilterEvents([]byte("\x1b_G"), c, false, shell); len(got) != 0 {
+			t.Fatal("fixture did not retain the ambiguous graphics/keyboard prefix")
+		}
+		got := f.FilterEvents([]byte("typed\r"), c, false, !shell)
+		var original, next []byte
+		for _, event := range got {
+			if event.shell == shell {
+				original = append(original, event.data...)
+			} else {
+				next = append(next, event.data...)
+			}
+		}
+		if string(original) != "\x1b_G" || string(next) != "typed\r" || len(f.pending) != 0 {
+			t.Fatalf("keyboard fallback crossed owners: original %q next %q pending %q", original, next, f.pending)
+		}
+	}
+}
+
 func TestInputFramingPreservesPasteAtEveryReadBoundary(t *testing.T) {
 	payload := "one\ntwo" + strings.Join(viewportKeys, "") + "\x1b]0;literal\a\x1b[12;40R"
 	sequence := bracketedPasteSequence(payload)

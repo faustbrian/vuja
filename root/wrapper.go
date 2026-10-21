@@ -399,6 +399,7 @@ func runWrapper() {
 		Muted:                      inputBoxPalette.Muted,
 	})
 	display.SetChatboxConfig(terminalChatboxConfigFromConfig(config.Get()))
+	display.EnablePixelDividers()
 	if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 		display.SetInputBoxPath(cwd)
 	}

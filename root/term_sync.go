@@ -27,6 +27,7 @@ type terminalInputFilter struct {
 	pasteOwner    terminalInputOwner
 	searchPaste   bool
 	pendingSearch bool
+	graphicsReply bool
 }
 
 type terminalInputOwner struct {
@@ -65,9 +66,16 @@ func (f *terminalInputFilter) FilterInput(input []byte, display *terminalComposi
 
 func (f *terminalInputFilter) FilterEvents(input []byte, display *terminalCompositor, suggestions, shellOwned bool) []ownedTerminalInput {
 	owner := terminalInputOwner{shell: shellOwned, viewport: display.ViewportNavigationActive(), suggestions: suggestions}
+	f.graphicsReply = display.dividerReportPending()
 	pendingSearch := f.pendingSearch
 	f.pendingSearch = false
 	events := f.frame(input, owner, func(sequence []byte, owner terminalInputOwner) []byte {
+		if display.ConsumeDividerReport(sequence) {
+			// The retained prefix was a terminal reply, not a search key.
+			// Its old modal ownership must not consume following typing/paste.
+			pendingSearch = false
+			return nil
+		}
 		if pendingSearch {
 			// An incomplete modal control keeps its original owner even if
 			// resize or native handoff has since closed the search surface.
@@ -128,13 +136,15 @@ func (f *terminalInputFilter) FilterEvents(input []byte, display *terminalCompos
 }
 
 func (f *terminalInputFilter) EscapePending() bool {
-	return !f.paste && bytes.Equal(f.pending, []byte("\x1b"))
+	return !f.paste && (bytes.Equal(f.pending, []byte("\x1b")) ||
+		len(f.pending) < len("\x1b_Gi=") && dividerReportPrefix(f.pending))
 }
 
 func (f *terminalInputFilter) FlushEscape(display *terminalCompositor, _ bool) []byte {
 	if !f.EscapePending() {
 		return nil
 	}
+	sequence := f.pending
 	f.pending = nil
 	pendingSearch := f.pendingSearch
 	f.pendingSearch = false
@@ -142,9 +152,9 @@ func (f *terminalInputFilter) FlushEscape(display *terminalCompositor, _ bool) [
 		return nil
 	}
 	if !f.pendingOwner.viewport {
-		return []byte("\x1b")
+		return sequence
 	}
-	return display.FilterViewportInput([]byte("\x1b"), f.pendingOwner.suggestions)
+	return display.FilterViewportInput(sequence, f.pendingOwner.suggestions)
 }
 
 // One stream boundary recognizes paste regions before report suppression or
@@ -200,7 +210,13 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 		}
 		if data[i] != '\x1b' {
 			end := i + 1
-			for end < len(data) && data[end] != '\x1b' {
+			limit := len(data)
+			if i < pendingLen {
+				// A rejected control prefix may leave ordinary bytes from the
+				// previous read. Do not give newly arrived typing its old owner.
+				limit = pendingLen
+			}
+			for end < limit && data[end] != '\x1b' {
 				end++
 			}
 			emit(normal(data[i:end], owner), owner)
@@ -216,6 +232,15 @@ func (f *terminalInputFilter) frame(input []byte, currentOwner terminalInputOwne
 		switch data[i+1] {
 		case ']':
 			end = oscSequenceEnd(data, i+2)
+		case '_':
+			// ESC _ is also Meta-underscore (shell/editor undo). Only an
+			// outstanding graphics reply can own its recognizable APC prefix;
+			// ambiguous short prefixes retain the ordinary Escape timeout.
+			if !f.graphicsReply || !dividerReportPrefix(data[i:]) {
+				end = i + 2
+			} else if stop := bytes.Index(data[i+2:], []byte("\x1b\\")); stop >= 0 {
+				end = i + 2 + stop + 2
+			}
 		case '[':
 			if final := csiSequenceEnd(data, i+2); final >= 0 {
 				end = final + 1

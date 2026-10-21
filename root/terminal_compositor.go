@@ -66,6 +66,7 @@ type terminalCompositor struct {
 	width                  int
 	height                 int
 	closed                 bool
+	dividerPixels          pixelDividers
 
 	emulator            *vt.Emulator
 	emulatorDone        <-chan struct{}
@@ -805,6 +806,12 @@ func (c *terminalCompositor) ComposeUI(render func() []byte) {
 	}
 	oldTop, oldRows := c.currentTransientUIRegion()
 	data := render()
+	visible := c.transientUIVisible != nil && c.transientUIVisible()
+	if c.dividerPixels.enabled && c.viewport != nil && c.dividerPixels.overlay != visible {
+		// Overlay visibility can change without any output-model revision.
+		c.viewport.dirty = true
+		c.dividerPixels.overlay = visible
+	}
 	c.setViewportMouse(c.outputViewportEnabled() && (c.transientUIVisible == nil || !c.transientUIVisible()))
 	if len(data) == 0 {
 		c.renderOutputViewport()
@@ -1140,6 +1147,7 @@ func (c *terminalCompositor) Resize(width, height int) {
 	if c.closed || !c.enabled {
 		return
 	}
+	c.invalidatePixelDividers()
 	if c.viewport != nil {
 		c.viewport.cards.releasePointer()
 	}

@@ -240,6 +240,8 @@ func (c *terminalCompositor) setViewportScreen(enabled bool) bool {
 	if c.viewportAlternate == enabled {
 		return false
 	}
+	c.invalidatePixelDividers()
+	c.dividerPixels.screen++
 	if !enabled {
 		c.setViewportMouse(false)
 	}
@@ -607,6 +609,7 @@ func (c *terminalCompositor) renderOutputViewport() {
 		}
 		_, _ = c.out.Write(c.renderTransientUI())
 	}
+	c.renderPixelDividers(cardRows, usingCards)
 }
 
 // HandleViewportInput consumes only complete dedicated navigation events.

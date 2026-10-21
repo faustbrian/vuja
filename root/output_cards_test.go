@@ -869,6 +869,11 @@ func TestInteractiveBlocksManagedSelectionPreservesBlankGapRows(t *testing.T) {
 	if y < 1 || y+2 >= len(c.viewport.cards.frame) {
 		t.Fatalf("missing three gap rows: %q", lines)
 	}
+	for row := y; row <= y+2; row++ {
+		if strings.TrimSpace(lines[row]) != "" {
+			t.Fatalf("expected a real blank spacing row, got %q", lines[row])
+		}
+	}
 	cardMouse(t, c, 0, 2, y, true)
 	cardMouse(t, c, 32, 2, y+2, true)
 	cardMouse(t, c, 0, 2, y+2, false)
@@ -1635,23 +1640,23 @@ func TestInteractiveBlocksCompactBoundaryGeometry(t *testing.T) {
 				previous := terminalLineIndex(lines, "exit 1", 0)
 				next := terminalLineIndex(lines, "second-card", 0)
 				if previous < 0 || next != previous+wantGap+1 {
-					t.Fatalf("want only %d explicit blank rows, no separator row, got %q", wantGap, lines)
+					t.Fatalf("want only %d explicit blank rows without divider text rows, got %q", wantGap, lines)
 				}
 				for x := 0; x < width; x++ {
 					cell := screen.CellAt(x, previous)
-					if cell == nil || cell.Style.Underline != uv.UnderlineSingle || blockTestRGB(cell.Style.UnderlineColor) != [3]uint8{36, 40, 50} {
-						t.Fatalf("thin muted border must share the block edge across all drawable columns; column %d: %#v", x, cell)
+					if cell == nil || cell.Style.Underline != uv.UnderlineNone {
+						t.Fatalf("pixel boundaries must not underline the preceding footer; column %d: %#v", x, cell)
 					}
 				}
-				if strings.Contains(strings.Join(lines, "\n"), "────────") || strings.Contains(out.String(), "\x1b[48;2;15;17;22m") {
-					t.Fatal("card projection must not add a rule-only row or shaded separator band")
+				if strings.Contains(out.String(), "\x1b[48;2;15;17;22m") {
+					t.Fatal("card projection must not add a shaded separator band")
 				}
 			})
 		}
 	}
 }
 
-func TestInteractiveBlocksSeparatorUsesMutedEdgeWithoutChangingSurface(t *testing.T) {
+func TestInteractiveBlocksBoundaryDoesNotInsertAShadedTextBand(t *testing.T) {
 	c, out := blocksFixture(t, "")
 	blocksExecution(c, "bad-command", "bad-output\r\n", "1")
 	blocksExecution(c, "next-command", "next-output\r\n", "0")
@@ -1662,14 +1667,13 @@ func TestInteractiveBlocksSeparatorUsesMutedEdgeWithoutChangingSurface(t *testin
 	if y < 0 {
 		t.Fatal("missing block boundary")
 	}
+	if next := terminalLineIndex(lines, "next-command", 0); next != y+1 {
+		t.Fatalf("boundary inserted a text/background band: %q", lines)
+	}
 	for x := 0; x < 60; x++ {
-		cell := screen.CellAt(x, y)
-		command := terminalLineIndex(lines, "bad-command", 0)
-		if cell == nil || cell.Style.Bg == nil || blockTestRGB(cell.Style.Bg) != blockTestRGB(screen.CellAt(x, command).Style.Bg) {
-			t.Fatalf("edge must not introduce a new background at column %d: %#v", x, cell)
-		}
-		if cell.Style.Underline != uv.UnderlineSingle || blockTestRGB(cell.Style.UnderlineColor) != [3]uint8{36, 40, 50} {
-			t.Fatalf("edge lost its independently muted color at column %d", x)
+		cell := screen.CellAt(x, y+1)
+		if cell == nil || cell.Style.Bg != nil || cell.Style.Underline != uv.UnderlineNone {
+			t.Fatalf("normal next header inherited a separator band/underline at column %d: %#v", x, cell)
 		}
 	}
 	command := terminalLineIndex(lines, "bad-command", 0)
@@ -1679,7 +1683,7 @@ func TestInteractiveBlocksSeparatorUsesMutedEdgeWithoutChangingSurface(t *testin
 	}
 }
 
-func TestInteractiveBlocksSelectionOnBorderCopiesOnlyVisibleText(t *testing.T) {
+func TestInteractiveBlocksSelectionBesideDividerCopiesOnlyVisibleText(t *testing.T) {
 	for _, last := range []int{3, 14} {
 		t.Run(fmt.Sprint(last+1), func(t *testing.T) {
 			c, out := blocksFixture(t, "[ui.chatbox]\ncompleted-command='command'\n")
@@ -1697,8 +1701,8 @@ func TestInteractiveBlocksSelectionOnBorderCopiesOnlyVisibleText(t *testing.T) {
 			if screen.CellAt(2, y).Style.Attrs&uv.AttrReverse == 0 || screen.CellAt(last, y).Style.Attrs&uv.AttrReverse == 0 {
 				t.Error("selected border-bearing text is not visibly selected")
 			}
-			if screen.CellAt(59, y).Style.Underline != uv.UnderlineSingle {
-				t.Error("selecting text removed the edge border")
+			if screen.CellAt(59, y).Style.Underline != uv.UnderlineNone || screenLine(screen, y+1) == strings.Repeat("─", 60) {
+				t.Error("selection must not acquire a text-row divider or underline")
 			}
 			if last < 59 && screen.CellAt(last+1, y).Style.Attrs&uv.AttrReverse != 0 {
 				t.Error("rule highlight extends beyond the selected columns")
@@ -1713,7 +1717,7 @@ func TestInteractiveBlocksSelectionOnBorderCopiesOnlyVisibleText(t *testing.T) {
 	}
 }
 
-func TestInteractiveBlocksEdgeFollowsLastVisibleCardRow(t *testing.T) {
+func TestInteractiveBlocksDividerFollowsLastVisibleCardRow(t *testing.T) {
 	for _, mode := range []string{"command", "snapshot"} {
 		for _, kind := range []string{"silent", "body", "native"} {
 			for _, dividers := range []bool{true, false} {
@@ -1739,16 +1743,12 @@ func TestInteractiveBlocksEdgeFollowsLastVisibleCardRow(t *testing.T) {
 					if y < 0 {
 						t.Fatalf("missing last card row %q: %q", last, lines)
 					}
-					want := 0
-					if dividers {
-						want = 1
-					}
-					if blockEdgeCount(screen) != want {
-						t.Fatalf("want %d card edges, got %d: %q", want, blockEdgeCount(screen), lines)
+					if blockEdgeCount(screen) != 0 {
+						t.Fatalf("pixel edges must not be glyph rows: %q", lines)
 					}
 					for x := 0; x < 60; x++ {
-						if (screen.CellAt(x, y).Style.Underline == uv.UnderlineSingle) != dividers {
-							t.Fatalf("wrong border presence at the last card row, column %d", x)
+						if screen.CellAt(x, y).Style.Underline != uv.UnderlineNone {
+							t.Fatalf("card text is underlined at column %d", x)
 						}
 					}
 				})

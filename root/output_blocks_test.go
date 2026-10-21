@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/faustbrian/vuja/internal/config"
 	"github.com/faustbrian/vuja/internal/vt"
@@ -56,8 +55,7 @@ func blocksExecution(c *terminalCompositor, command, output, exit string) {
 func blockEdgeCount(screen *vt.Emulator) int {
 	count := 0
 	for y := 0; y < screen.Height(); y++ {
-		cell := screen.CellAt(0, y)
-		if cell != nil && cell.Style.Underline == uv.UnderlineSingle && blockTestRGB(cell.Style.UnderlineColor) == [3]uint8{36, 40, 50} {
+		if screenLine(screen, y) == strings.Repeat("─", screen.Width()) {
 			count++
 		}
 	}
@@ -81,8 +79,8 @@ func TestOutputBlocksDefaultGroupsCommandsIncludingSilentExecutions(t *testing.T
 		last = found
 	}
 	dividers := blockEdgeCount(screen)
-	if dividers != 3 {
-		t.Fatalf("want one divider per execution, got %d: %q", dividers, lines)
+	if dividers != 0 {
+		t.Fatalf("pixel boundaries must not consume text rows, got %d: %q", dividers, lines)
 	}
 	if !strings.Contains(out.String(), "\x1b[?1002h") || strings.Contains(out.String(), "\x1b[?1003h") {
 		t.Fatal("interactive blocks require button-motion selection without all-motion capture")
@@ -105,7 +103,7 @@ func TestOutputBlocksConfigurationReachesRendering(t *testing.T) {
 		name, document   string
 		command, divider bool
 	}{
-		{"omitted", "", true, true},
+		{"omitted", "", true, false},
 		{"disabled dividers", "[ui.chatbox]\nblock-dividers=false\n", true, false},
 		{"explicit output", "[ui.chatbox]\nscrollback='output'\n", false, false},
 		{"explicit snapshot", "[ui.chatbox]\nscrollback='snapshot'\n", true, false},
@@ -265,7 +263,7 @@ func TestOutputBlocksRestoreAndClearKeepFlatPrivateCheckpoints(t *testing.T) {
 	}
 	blocksPrompt(b, "restored-input")
 	physical := applyTerminalOutput(t, out.Bytes(), 60, 24)
-	if !terminalContainsLine(physical, "stored-command") || !terminalContainsLine(physical, "stored-result") || blockEdgeCount(physical) != 1 {
+	if !terminalContainsLine(physical, "stored-command") || !terminalContainsLine(physical, "stored-result") || blockEdgeCount(physical) != 0 {
 		t.Fatalf("restored block lost display rows: %q", terminalScreenLines(physical))
 	}
 	if len(b.viewport.executions.retained) != 0 {
@@ -311,7 +309,7 @@ func TestOutputBlocksMultilineAndSplitMarkersDoNotDuplicateBoundaries(t *testing
 		lines := terminalScreenLines(screen)
 		all := strings.Join(lines, "\n")
 		dividers := blockEdgeCount(screen)
-		if !strings.Contains(all, "printf first") || !strings.Contains(all, "second-line") || !strings.Contains(all, "result-tail") || dividers != 1 {
+		if !strings.Contains(all, "printf first") || !strings.Contains(all, "second-line") || !strings.Contains(all, "result-tail") || dividers != 0 {
 			t.Fatalf("multiline command or block boundary corrupted: %q", lines)
 		}
 		screens = append(screens, all)

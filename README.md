@@ -889,11 +889,16 @@ Set `block-dividers = false` under `[ui.chatbox]` to hide the rules without
 hiding commands. Blocks have no blank gap by default; `history-spacing` adds
 0–3 blank rows between executions. Spacing and divider visibility
 are independent, including in the minimal preset.
-In the pinned card pane, the boundary shares the last card row: it adds no
-separator-only row, padding or background band. Full-width borders cover every
-drawable column. Terminal-owned side margins remain outside that grid; unlike
-background erasure, text-cell decoration cannot promise physical window-edge
-coverage. Plain search and native-scrollback views retain their text rules.
+In the pinned block pane, dividers are one-pixel neutral-grey graphics at the
+shared block boundary, not text rows or footer underlines. Full-width mode
+reaches every drawable column; content-width mode follows the next block's
+width. They add no text row or surrounding padding. The grey brightness follows
+the theme's muted color. This requires terminal support for Kitty graphics and
+cell-pixel reports (including current iTerm2 and Ghostty); when the capability
+probe fails, blocks stay flush without a divider rather than adding a glyph row.
+Native terminal scrollback retains its text-rule behavior.
+Terminal-owned side margins remain outside the drawable grid. Plain search
+and native-scrollback views use the same rule styling.
 Dividers resize to the current pane width without wrapping. They do not appear
 in output search or plain-text exports; whole-pane exports include command
 labels, while F10/F11/F12 execution captures remain output-only. Display rows,
