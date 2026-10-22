@@ -463,7 +463,10 @@ if set -q VUJA_PID; and set -q VUJA_FD
             case '*'
                 return 1
         end
-        read --nchars 1 --local _vuja_reply <&$VUJA_HISTORY_ACK_FD 2>/dev/null; or return 1
+        # Fish ignores inherited fd >= 3 duplicates for builtin stdin.
+        # Open the descriptor path instead (fish 4.9.3 src/exec.rs,
+        # local_builtin_stdin / ignore_redirect) so read cannot consume input.
+        read --nchars 1 --local _vuja_reply < /dev/fd/$VUJA_HISTORY_ACK_FD 2>/dev/null; or return 1
         contains -- "$_vuja_reply" 0 1; or return 1
         set -g _vuja_history_paused "$_vuja_reply"
     end
@@ -652,7 +655,10 @@ if set -q VUJA_PID; and set -q VUJA_FD
 	        end
 	        printf '%%s\0' "$_vuja_history_marker" >&$VUJA_FD 2>/dev/null
 	        if set -q VUJA_HISTORY_ACK_FD
-	            read --nchars 1 --local _vuja_history_ack <&$VUJA_HISTORY_ACK_FD 2>/dev/null
+	            # --local would shadow the acknowledgement until this if ends.
+	            # https://fishshell.com/docs/current/cmds/read.html (variable scope)
+	            # Open the inherited pipe as above; <&FD reads shell input in Fish.
+	            read --nchars 1 --function _vuja_history_ack < /dev/fd/$VUJA_HISTORY_ACK_FD 2>/dev/null
 	        end
 	        set -g _vuja_history_recordable $_vuja_history_ack
         if set -q VUJA_MARKER; and test -n "$VUJA_MARKER"
