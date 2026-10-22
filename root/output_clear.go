@@ -61,7 +61,7 @@ func (c *terminalCompositor) clearOutputViewport(mode int) {
 	if v == nil {
 		return
 	}
-	c.deleteDividerImage(true)
+	c.deleteDividerImages(true)
 	controls := "\x1b[H\x1b[2J"
 	if mode == 3 {
 		controls += "\x1b[3J"

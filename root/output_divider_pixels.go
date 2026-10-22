@@ -18,7 +18,12 @@ import (
 
 type pixelBoundary struct{ row, width int }
 
-// A single transient image supplies all visible boundaries. Kitty's I allocation
+type pixelDividerImage struct {
+	id    uint32
+	color [3]byte
+}
+
+// Equal-width boundaries share a transient image. Kitty's I allocation
 // returns a terminal-owned ID: guessing an i would overwrite another program's
 // image. See https://sw.kovidgoyal.net/kitty/graphics-protocol/ (image IDs/layout).
 // Graphics never pass through the transcript, shadow terminal or checkpoint.
@@ -30,10 +35,11 @@ type pixelDividers struct {
 	probeOK                   bool
 	itermGeometry             bool
 	cellWidth, cellHeight     int
-	image, upload             uint32
+	upload                    uint32
 	uploadEpoch               uint64
-	width, uploadWidth        int
-	color, uploadColor        [3]byte
+	uploadWidth               int
+	uploadColor               [3]byte
+	images                    map[int]pixelDividerImage
 	placements                []pixelBoundary
 	overlay                   bool
 }
@@ -56,28 +62,28 @@ func dividerNonce() uint32 {
 	return binary.BigEndian.Uint32(data[:])
 }
 
-func (c *terminalCompositor) deleteDividerImage(free bool) {
+func (c *terminalCompositor) deleteDividerImages(free bool) {
 	d := &c.dividerPixels
-	if d.image != 0 {
-		if free {
-			fmt.Fprintf(c.out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", d.image)
-		} else {
-			deleteDividerPlacements(c.out, d.image, len(d.placements))
+	if free {
+		for _, image := range d.images {
+			fmt.Fprintf(c.out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", image.id)
+		}
+		clear(d.images)
+	} else {
+		for i, p := range d.placements {
+			if image, ok := d.images[p.width]; ok {
+				deleteDividerPlacement(c.out, image.id, i+1)
+			}
 		}
 	}
 	d.placements = nil
-	if free {
-		d.image = 0
-	}
 }
 
-func deleteDividerPlacements(out io.Writer, image uint32, count int) {
+func deleteDividerPlacement(out io.Writer, image uint32, placement int) {
 	// iTerm 3.7.3's image-wide d=i frees the pixels too; only p-scoped
 	// deletion retains the upload for redraw. KittyImageController.swift,
 	// executeDeleteImage, https://github.com/gnachman/iTerm2 (also probed live).
-	for i := range count {
-		fmt.Fprintf(out, "\x1b_Ga=d,d=i,i=%d,p=%d,q=2\x1b\\", image, i+1)
-	}
+	fmt.Fprintf(out, "\x1b_Ga=d,d=i,i=%d,p=%d,q=2\x1b\\", image, placement)
 }
 
 func (c *terminalCompositor) invalidatePixelDividers() {
@@ -85,7 +91,7 @@ func (c *terminalCompositor) invalidatePixelDividers() {
 	if !d.enabled {
 		return
 	}
-	c.deleteDividerImage(true)
+	c.deleteDividerImages(true)
 	d.epoch++
 	d.cellWidth, d.cellHeight = 0, 0
 	d.itermGeometry = false
@@ -124,11 +130,11 @@ func dividerGray(value, background string, light bool) [3]byte {
 func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 	d := &c.dividerPixels
 	if !c.dividerEligible() {
-		c.deleteDividerImage(true)
+		c.deleteDividerImages(true)
 		return
 	}
 	if !cards || c.transientUIVisible != nil && c.transientUIVisible() {
-		c.deleteDividerImage(false)
+		c.deleteDividerImages(false)
 		return
 	}
 	if d.probed != d.epoch+1 {
@@ -154,58 +160,83 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 		c.width > terminalWriterMaxPending/3/d.cellWidth {
 		// Geometry replies are untrusted. Limit the one-row RGB allocation to
 		// the existing terminal writer's byte budget; don't silently crop it.
-		c.deleteDividerImage(true)
+		c.deleteDividerImages(true)
 		return
 	}
-	width, color := c.width*d.cellWidth, dividerGray(c.inputBoxTheme.Muted, c.inputBoxTheme.Background, c.inputBoxTheme.LightBackground)
-	if d.image != 0 && (d.width != width || d.color != color) {
-		c.deleteDividerImage(true)
-	}
+	color := dividerGray(c.inputBoxTheme.Muted, c.inputBoxTheme.Background, c.inputBoxTheme.LightBackground)
 	var placements []pixelBoundary
+	widths := make(map[int]bool)
+	pixels := 0
 	for y, row := range rows {
-		if row.boundary && y < c.viewportContentRows() {
-			pixels := min(row.width, c.width) * d.cellWidth
-			placements = append(placements, pixelBoundary{y, pixels})
+		if row.boundary && row.width > 0 && y < c.viewportContentRows() {
+			width := min(row.width, c.width) * d.cellWidth
+			if !widths[width] {
+				// All visible-width sources share the former single image's
+				// RGB allocation budget. Width diversity must not multiply it.
+				if width > terminalWriterMaxPending/3-pixels {
+					c.deleteDividerImages(true)
+					return
+				}
+				widths[width], pixels = true, pixels+width
+			}
+			placements = append(placements, pixelBoundary{y, width})
 		}
 	}
 	if len(placements) == 0 {
-		c.deleteDividerImage(true)
+		c.deleteDividerImages(true)
 		return
 	}
-	if d.image == 0 {
-		if d.upload == 0 {
+	for width, image := range d.images {
+		if !widths[width] || image.color != color {
+			c.deleteDividerImages(false)
+			fmt.Fprintf(c.out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", image.id)
+			delete(d.images, width)
+		}
+	}
+	for _, p := range placements {
+		if _, ok := d.images[p.width]; !ok && d.upload == 0 {
 			d.upload = dividerNonce()
 			if d.upload == 0 {
-				return
+				break
 			}
-			d.uploadEpoch, d.uploadWidth, d.uploadColor = d.epoch, width, color
+			d.uploadEpoch, d.uploadWidth, d.uploadColor = d.epoch, p.width, color
 			d.uploadScreen = d.screen
 			var encoded bytes.Buffer
 			compressor := zlib.NewWriter(&encoded)
-			_, _ = compressor.Write(bytes.Repeat(color[:], width))
+			_, _ = compressor.Write(bytes.Repeat(color[:], p.width))
 			_ = compressor.Close()
 			payload := base64.StdEncoding.EncodeToString(encoded.Bytes())
-			// Direct upload only: no files, shared memory, or persistent images.
-			fmt.Fprintf(c.out, "\x1b_Ga=t,I=%d,f=24,s=%d,v=1,o=z;%s\x1b\\", d.upload, width, payload)
+			// iTerm 3.7.3 prefers uploaded metadata over source-crop dimensions
+			// (KittyImageController.swift:173-195). A native source per width
+			// avoids stretching the crop, without c/r scaling its pixel height.
+			// https://github.com/gnachman/iTerm2/blob/v3.7.3/sources/InlineImages/KittyImageController.swift
+			fmt.Fprintf(c.out, "\x1b_Ga=t,I=%d,f=24,s=%d,v=1,o=z;%s\x1b\\", d.upload, p.width, payload)
 		}
-		return
 	}
-	if slices.Equal(placements, d.placements) {
+	ready := placements[:0]
+	for _, p := range placements {
+		if _, ok := d.images[p.width]; ok {
+			ready = append(ready, p)
+		}
+	}
+	if slices.Equal(ready, d.placements) {
 		return
 	}
 	var frame strings.Builder
 	frame.WriteString(terminalSyncStart + "\x1b7")
 	// Erasing text does not erase Kitty images. Remove only our placements,
 	// never all graphics at a position/z-index or images owned by applications.
-	deleteDividerPlacements(&frame, d.image, len(d.placements))
-	for i, p := range placements {
+	for i, p := range d.placements {
+		deleteDividerPlacement(&frame, d.images[p.width].id, i+1)
+	}
+	for i, p := range ready {
 		// No c/r scaling: native one-pixel height, at the next header's very
 		// top pixel, not the underline baseline or center of a spare cell row.
-		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b_Ga=p,i=%d,p=%d,w=%d,h=1,C=1,z=-1,q=2\x1b\\", p.row+1, d.image, i+1, p.width)
+		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b_Ga=p,i=%d,p=%d,w=%d,h=1,C=1,z=-1,q=2\x1b\\", p.row+1, d.images[p.width].id, i+1, p.width)
 	}
 	frame.WriteString("\x1b8" + terminalSyncEnd)
 	_, _ = io.WriteString(c.out, frame.String())
-	d.placements = placements
+	d.placements = ready
 }
 
 func dividerReplyNumber(fields, key string) uint32 {
@@ -276,12 +307,17 @@ func (c *terminalCompositor) ConsumeDividerReport(sequence []byte) bool {
 			d.probeOK, consumed = ok, true
 		case d.upload != 0 && dividerReplyNumber(fields, "I") == d.upload:
 			image := dividerReplyNumber(fields, "i")
+			adopted := false
 			if ok && image != 0 && d.uploadEpoch == d.epoch && c.dividerEligible() {
-				d.image, d.width, d.color = image, d.uploadWidth, d.uploadColor
+				if d.images == nil {
+					d.images = make(map[int]pixelDividerImage)
+				}
+				d.images[d.uploadWidth] = pixelDividerImage{image, d.uploadColor}
+				adopted = true
 			}
 			// Leaving our alternate screen already deletes its graphics. Never
 			// delete a late ID on the application's screen, where it may be reused.
-			if image != 0 && d.uploadScreen == d.screen && d.image == 0 {
+			if image != 0 && d.uploadScreen == d.screen && !adopted {
 				fmt.Fprintf(c.out, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", image)
 			}
 			d.upload, consumed = 0, true

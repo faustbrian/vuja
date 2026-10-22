@@ -112,7 +112,15 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 				if number("w") > image.w || number("h") != 1 || image.h != 1 {
 					t.Fatalf("placement crops outside its one-pixel image: %q", control)
 				}
-				w.placements[[2]int{id, placement}] = dividerWirePlacement{(w.x - 1) * w.cw, (w.y - 1) * w.ch, number("w"), number("h")}
+				width, height := number("w"), number("h")
+				if w.iterm {
+					// iTerm 3.7.3's pixelSize uses uploaded metadata before the
+					// source crop (KittyImageController.swift:173-195). The
+					// native probe confirmed a 1050px source with w=200 still
+					// draws 1050px; a native 200px source draws 200px.
+					width, height = image.w, image.h
+				}
+				w.placements[[2]int{id, placement}] = dividerWirePlacement{(w.x - 1) * w.cw, (w.y - 1) * w.ch, width, height}
 			case "d":
 				id := number("i")
 				if id == 0 || fields["I"] != "" || fields["d"] != "i" && fields["d"] != "I" || fields["q"] != "2" {
@@ -224,19 +232,19 @@ func TestInteractiveBlocksPixelDividerWireGeometry(t *testing.T) {
 					if len(wire.images) != 1 || len(wire.placements) != 1 || y < 1 {
 						t.Fatalf("want one shared image and one inter-block boundary, got %d/%d: %q", len(wire.images), len(wire.placements), lines)
 					}
+					wantWidth := width * wire.cw
+					if surface == "content-width" {
+						wantWidth = 32 * wire.cw
+					}
 					for _, image := range wire.images {
-						if image.w != width*wire.cw || image.h != 1 {
-							t.Fatalf("stale/incorrect physical width: %+v", image)
+						if image.w != wantWidth || image.h != 1 {
+							t.Fatalf("stale/incorrect physical dimensions: got %dx%d want %dx1", image.w, image.h, wantWidth)
 						}
 						for i := 0; i < len(image.data); i += 3 {
 							if !bytes.Equal(image.data[i:i+3], []byte{42, 42, 42}) {
 								t.Fatalf("strip must be neutral muted grey, not severity tint: %v", image.data[i:i+3])
 							}
 						}
-					}
-					wantWidth := width * wire.cw
-					if surface == "content-width" {
-						wantWidth = 32 * wire.cw
 					}
 					for _, p := range wire.placements {
 						if p != (dividerWirePlacement{0, y * wire.ch, wantWidth, 1}) {
@@ -253,6 +261,136 @@ func TestInteractiveBlocksPixelDividerWireGeometry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestInteractiveBlocksPixelDividerSourcesMatchMixedCardWidths(t *testing.T) {
+	for _, iterm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("iterm-%t", iterm), func(t *testing.T) {
+			c, out := blocksFixture(t, "[ui.chatbox]\nsurface-width='content-width'\ncompleted-command='command'\n")
+			theme := testInputBoxTheme()
+			theme.Background, theme.Muted = "#000000", "#808080"
+			c.SetInputBoxTheme(theme)
+			c.EnablePixelDividers()
+			blocksExecution(c, "first", "out\r\n", "0")
+			blocksExecution(c, "short", "out\r\n", "0")
+			blocksExecution(c, "long", strings.Repeat("x", 40)+"\r\n", "0")
+			blocksExecution(c, "short-again", "out\r\n", "0")
+			blocksPrompt(c, "input")
+			wire := newDividerWire(10, 33)
+			wire.iterm = iterm
+			wire.settle(t, c, out)
+			if len(wire.images) != 2 || len(wire.placements) != 3 {
+				t.Fatalf("three boundaries need two native source widths, got images=%d placements=%d", len(wire.images), len(wire.placements))
+			}
+			widths := map[int]int{}
+			for key, p := range wire.placements {
+				image := wire.images[key[0]]
+				if image.w != p.w || image.h != 1 || p.h != 1 {
+					t.Fatalf("native source must match destination without cropping/scaling: image=%+v placement=%+v", image, p)
+				}
+				widths[p.w]++
+			}
+			if widths[320] != 2 || widths[420] != 1 {
+				t.Fatalf("native boundaries did not follow independent short/long card edges: %v", widths)
+			}
+			uploads := wire.uploads
+			for range 5 {
+				c.mu.Lock()
+				c.viewport.dirty = true
+				c.renderOutputViewport()
+				c.mu.Unlock()
+				wire.settle(t, c, out)
+			}
+			if wire.uploads != uploads {
+				t.Fatal("unchanged card widths reuploaded their native sources")
+			}
+			visible := true
+			c.SetTransientUIReflow(nil, nil, nil, nil, nil, func() bool { return visible })
+			c.ComposeUI(func() []byte { return nil })
+			wire.settle(t, c, out)
+			if len(wire.placements) != 0 || len(wire.images) != 2 {
+				t.Fatal("overlay must hide every mixed-width placement without leaking its sources")
+			}
+			visible = false
+			c.ComposeUI(func() []byte { return nil })
+			wire.settle(t, c, out)
+			if wire.uploads != uploads || len(wire.placements) != 3 {
+				t.Fatal("closing overlay must reuse all mixed-width sources")
+			}
+			theme.Background = "#ffffff"
+			c.SetInputBoxTheme(theme)
+			wire.settle(t, c, out)
+			if wire.uploads != uploads+2 || len(wire.images) != 2 || len(wire.placements) != 3 {
+				t.Fatal("palette refresh must replace each distinct-width source once")
+			}
+			for _, image := range wire.images {
+				if !bytes.Equal(image.data[:3], []byte{191, 191, 191}) {
+					t.Fatalf("mixed-width source retained stale palette: %v", image.data[:3])
+				}
+			}
+			c.Close()
+			wire.settle(t, c, out)
+			if len(wire.images) != 0 || len(wire.placements) != 0 {
+				t.Fatal("close leaked a mixed-width source or placement")
+			}
+		})
+	}
+}
+
+func TestInteractiveBlocksPixelDividerWidthChangeDuringAllocation(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nsurface-width='content-width'\n")
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "out\r\n", "0")
+	blocksExecution(c, "second", "out\r\n", "0")
+	blocksPrompt(c, "input")
+	wire := newDividerWire(10, 33)
+	wire.iterm = true
+	var filter terminalInputFilter
+	filter.FilterInput([]byte(wire.readOutput(t, out)), c, false, true)
+	reply := wire.readOutput(t, out)
+	if reply == "" || wire.uploads != 1 {
+		t.Fatal("fixture must leave a genuine content-width allocation pending")
+	}
+	cfg := c.chatboxConfig
+	cfg.SurfaceWidth = "full-width"
+	c.SetChatboxConfig(cfg)
+	filter.FilterInput([]byte(reply), c, false, true)
+	wire.settle(t, c, out)
+	if wire.uploads != 2 || len(wire.images) != 1 || len(wire.placements) != 1 {
+		t.Fatal("obsolete width allocation must be freed, not leaked or displayed")
+	}
+	for _, p := range wire.placements {
+		if p.w != 600 || p.h != 1 {
+			t.Fatalf("late allocation retained stale content width: %+v", p)
+		}
+	}
+}
+
+func TestInteractiveBlocksPixelDividerVisibleSourcesShareByteBudget(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nsurface-width='content-width'\ncompleted-command='command'\n")
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "out\r\n", "0")
+	blocksExecution(c, "short", "out\r\n", "0")
+	blocksPrompt(c, "input")
+	wire := newDividerWire(5000, 33)
+	wire.settle(t, c, out)
+	if len(wire.images) != 1 || len(wire.placements) != 1 {
+		t.Fatal("single native source below the byte budget must remain usable")
+	}
+	uploads := wire.uploads
+	blocksExecution(c, "long", strings.Repeat("x", 40)+"\r\n", "0")
+	blocksPrompt(c, "input")
+	wire.settle(t, c, out)
+	if wire.uploads != uploads || len(wire.images) != 0 || len(wire.placements) != 0 {
+		t.Fatal("visible source diversity exceeded the former single-image RGB budget")
+	}
+	cfg := c.chatboxConfig
+	cfg.SurfaceWidth = "full-width"
+	c.SetChatboxConfig(cfg)
+	wire.settle(t, c, out)
+	if len(wire.images) != 1 || len(wire.placements) != 2 {
+		t.Fatal("a later safe width set must recover without permanent disablement")
 	}
 }
 
