@@ -1263,6 +1263,13 @@ func (f *FrecencyStore) PruneHistoryEventsWithRetention(ctx context.Context, max
 		return 0, err
 	}
 	defer finish()
+	// Retention decides what to remove from a stable writer-owned snapshot.
+	// A local gate cannot prevent another pane's write from invalidating a
+	// deferred read transaction before the projection preflight's first write.
+	// https://www.sqlite.org/lang_transaction.html#deferred_immediate_and_exclusive_transactions
+	if _, err := tx.ExecContext(ctx, `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
+		return 0, err
+	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT event_key, occurrences, imported, CAST(started_at AS TEXT)
 FROM history_events

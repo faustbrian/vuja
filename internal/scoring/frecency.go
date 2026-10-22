@@ -517,17 +517,16 @@ func (f *FrecencyStore) ensureHistoryEventLifecycleColumns(ctx context.Context) 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if migrationRequired {
-		// Acquire SQLite's cross-process writer lock before inspecting the
-		// lifecycle schema. Without this, two new terminal windows can both
-		// open deferred read transactions and then race while upgrading them.
-		if _, err := tx.ExecContext(ctx, `
+	// Every opening performs additive upgrades, including lifecycle-v2 stores.
+	// Take writer ownership before schema reads: SQLite cannot wait/retry a
+	// stale read transaction's promotion when concurrent pane starts write.
+	// https://www.sqlite.org/lang_transaction.html#deferred_immediate_and_exclusive_transactions
+	if _, err := tx.ExecContext(ctx, `
 INSERT INTO metadata (key, value)
 VALUES ('history_lifecycle_migration_lock', '1')
 ON CONFLICT(key) DO UPDATE SET value = excluded.value
 `); err != nil {
-			return err
-		}
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(history_events)`)
 	if err != nil {
