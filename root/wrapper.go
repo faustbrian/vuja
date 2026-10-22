@@ -463,9 +463,17 @@ func runWrapper() {
 		uiPresenter.Present(func() []byte { return []byte(render()) })
 	}
 
+	reconcileTerminalGeometry := func() {
+		resizeManagedTerminal(uiPresenter, display, overlay,
+			func() (int, int, error) { return term.GetSize(int(os.Stdout.Fd())) },
+			func() error { return pty.InheritSize(os.Stdin, ptmx) },
+		)
+	}
 	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigCh)
+	subscribeTerminalGeometry(func() {
+		signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	}, reconcileTerminalGeometry)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -481,10 +489,7 @@ func runWrapper() {
 			switch s {
 			case syscall.SIGWINCH:
 				logger.Debugf("Received SIGWINCH terminal resize signal")
-				if width, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-					resizeManagedTerminal(uiPresenter, display, overlay, width, height)
-				}
-				_ = pty.InheritSize(os.Stdin, ptmx) // handle terminal window resize
+				reconcileTerminalGeometry()
 			// this is the core feature of reloading
 			// it helps VUJA reload itself that you dont need to restart the shell manually
 			// SIGUSR1 is the signal to active reload when you type "just reload"
@@ -2129,21 +2134,33 @@ func terminalPTYClosed(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO)
 }
 
-// resizeManagedTerminal keeps overlay geometry and compositor redraws behind
-// the same presenter lock used by keystroke-driven UI updates. Concurrent
-// iTerm resize signals therefore cannot race an in-flight suggestion render.
+func subscribeTerminalGeometry(subscribe, reconcile func()) {
+	subscribe()
+	// A resize during shell setup may predate signal subscription. Observe
+	// current geometry after subscribing: earlier changes are sampled here,
+	// while later changes are queued for the normal signal handler.
+	reconcile()
+}
+
+// resizeManagedTerminal samples and applies geometry under the presenter lock
+// used by keystroke-driven UI updates, so an old observation cannot repaint
+// after a newer resize. PTY size retains its independent stdin authority.
 func resizeManagedTerminal(
 	presenter *terminalUIPresenter,
 	display *terminalCompositor,
 	overlay *integration.Overlay,
-	width, height int,
+	readSize func() (int, int, error),
+	inheritPTYSize func() error,
 ) {
 	if presenter == nil || display == nil || overlay == nil {
 		return
 	}
 	presenter.Update(func(_ func(func() []byte)) {
-		display.Resize(width, height)
-		overlay.SetTerminalSize(width, height)
+		if width, height, err := readSize(); err == nil {
+			display.Resize(width, height)
+			overlay.SetTerminalSize(width, height)
+		}
+		_ = inheritPTYSize()
 	})
 }
 

@@ -2319,7 +2319,8 @@ func TestManagedTerminalResizeSerializesOverlayAndCompositorState(t *testing.T) 
 				width = 120
 				height = 40
 			}
-			resizeManagedTerminal(presenter, compositor, overlay, width, height)
+			resizeManagedTerminal(presenter, compositor, overlay,
+				func() (int, int, error) { return width, height, nil }, func() error { return nil })
 		}
 	}()
 	workers.Wait()
