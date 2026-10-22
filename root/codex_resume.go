@@ -41,6 +41,8 @@ var codexResumeIDPattern = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a
 // Keep them in retained rows for rebinding, but never advertise them as links.
 var bareCodexResumeLink = regexp.MustCompile(`\x1b]8;[^;\x07\x1b]*;vuja://codex-resume/[0-9a-fA-F-]{36}(?:\x07|\x1b\\)`)
 
+var bareClaudeResumeLink = regexp.MustCompile(`\x1b]8;[^;\x07\x1b]*;vuja://claude-resume/[0-9a-fA-F-]{36}\?command=[^&\x07\x1b]*(?:\x07|\x1b\\)`)
+
 func (c *terminalCompositor) SetCodexResumeLinker(linkFor func(string) string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -58,6 +60,12 @@ type codexResumeLinkifier struct {
 	capturing            bool
 	awaitingResumeLine   bool
 	line                 []byte
+	claudePrefixMatch    int
+	claudeEligible       bool
+	claudeHeader         bool
+	awaitingClaudeLine   bool
+	claudeEnabled        bool
+	utf8Remaining        int
 }
 
 type codexResumeEscapeState uint8
@@ -68,10 +76,12 @@ const (
 	codexResumeEscapeCSI
 	codexResumeEscapeOSC
 	codexResumeEscapeOSCEscape
+	codexResumeEscapeString
+	codexResumeEscapeStringEnd
 )
 
 func newCodexResumeLinkifier(linkFor func(string) string) *codexResumeLinkifier {
-	return &codexResumeLinkifier{linkFor: linkFor}
+	return &codexResumeLinkifier{linkFor: linkFor, claudeEligible: true, claudeEnabled: true}
 }
 
 func (l *codexResumeLinkifier) Transform(data []byte) []byte {
@@ -85,17 +95,41 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 	for _, char := range data {
 		if l.capturing {
 			l.line = append(l.line, char)
-			if handled, boundary := l.consumeCapturedEscape(char); handled {
+			handled, boundary := l.consumeCapturedEscape(char)
+			if len(l.line) > codexResumeLineLimit || boundary {
+				var control []byte
 				if boundary {
-					output.Write(l.linkLine(l.line[:l.captureEscapeStart]))
-					output.Write(l.line[l.captureEscapeStart:])
-					l.resetCapture()
+					control = l.line[l.captureEscapeStart:]
 				}
+				if len(l.line) > codexResumeLineLimit {
+					output.Write(l.line)
+				} else {
+					output.Write(l.linkLine(l.line[:l.captureEscapeStart]))
+					output.Write(control)
+				}
+				state := l.captureEscapeState
+				l.resetCapture()
+				l.escapeState = state
+				// Releasing a bounded candidate must not expose the remainder
+				// of an OSC/DCS payload to instruction recognition. Preserve
+				// its parser state even after the buffered bytes are forwarded.
+				for _, b := range control {
+					l.consumeEscape(b)
+				}
+				l.claudeEligible = false
+				continue
+			}
+			if handled {
 				continue
 			}
 			if char == '\n' {
 				output.Write(l.linkLine(l.line))
-				if !l.awaitingResumeLine && isCodexResumeContinuation(l.line) {
+				if l.claudeHeader && strings.TrimSpace(ansi.Strip(string(l.line))) == "" {
+					l.line = l.line[:0]
+					l.captureEscapeState = codexResumeEscapeNone
+					l.captureEscapeStart = -1
+					l.claudeHeader, l.awaitingClaudeLine = false, true
+				} else if !l.claudeHeader && !l.awaitingClaudeLine && !l.awaitingResumeLine && isCodexResumeContinuation(l.line) {
 					l.line = l.line[:0]
 					l.captureEscapeState = codexResumeEscapeNone
 					l.captureEscapeStart = -1
@@ -103,9 +137,6 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 				} else {
 					l.resetCapture()
 				}
-			} else if len(l.line) > codexResumeLineLimit {
-				output.Write(l.line)
-				l.resetCapture()
 			}
 			continue
 		}
@@ -120,12 +151,28 @@ func (l *codexResumeLinkifier) Transform(data []byte) []byte {
 		l.reconnectPrefixMatch, reconnectMatched = advanceCodexLinePrefix(char, reconnectPrefix, l.reconnectPrefixMatch)
 		var sessionMatched bool
 		l.sessionPrefixMatch, sessionMatched = advanceCodexLinePrefix(char, sessionPrefix, l.sessionPrefixMatch)
-		if matched || reconnectMatched || sessionMatched {
+		claudeMatched := false
+		if char == '\n' {
+			l.claudeEligible, l.claudePrefixMatch = true, 0
+		} else if l.claudeEnabled && l.claudeEligible {
+			if l.claudePrefixMatch == 0 && (char == ' ' || char == '\r' || char == '\t') {
+				continue
+			}
+			if char == claudeResumeHeader[l.claudePrefixMatch] {
+				l.claudePrefixMatch++
+				claudeMatched = l.claudePrefixMatch == len(claudeResumeHeader)
+			} else {
+				l.claudeEligible, l.claudePrefixMatch = false, 0
+			}
+		}
+		if matched || reconnectMatched || sessionMatched || claudeMatched {
 			l.prefixMatch = 0
 			l.reconnectPrefixMatch = 0
 			l.sessionPrefixMatch = 0
 			l.capturing = true
 			l.captureEscapeStart = -1
+			l.claudeHeader = claudeMatched
+			l.claudePrefixMatch = 0
 		}
 	}
 	return output.Bytes()
@@ -173,7 +220,7 @@ func (l *codexResumeLinkifier) consumeCapturedEscape(char byte) (bool, bool) {
 		return true, !inline
 	case codexResumeEscapeOSC:
 		switch char {
-		case '\a':
+		case '\a', '\x9c':
 			return true, !l.finishCapturedOSC(1)
 		case '\x1b':
 			l.captureEscapeState = codexResumeEscapeOSCEscape
@@ -186,6 +233,18 @@ func (l *codexResumeLinkifier) consumeCapturedEscape(char byte) (bool, bool) {
 		l.captureEscapeState = codexResumeEscapeOSC
 		return true, false
 	case codexResumeEscapeNone:
+		if l.consumeUTF8(char) {
+			return false, false
+		}
+		switch char {
+		case '\x9b':
+			l.captureEscapeStart = len(l.line) - 1
+			l.captureEscapeState = codexResumeEscapeCSI
+			return true, false
+		case '\x90', '\x98', '\x9d', '\x9e', '\x9f':
+			l.captureEscapeStart = len(l.line) - 1
+			return true, true
+		}
 		if char == '\x1b' {
 			l.captureEscapeStart = len(l.line) - 1
 			l.captureEscapeState = codexResumeEscapeStart
@@ -215,6 +274,7 @@ func (l *codexResumeLinkifier) resetCapture() {
 	l.prefixMatch = 0
 	l.reconnectPrefixMatch = 0
 	l.sessionPrefixMatch = 0
+	l.claudePrefixMatch, l.claudeHeader, l.awaitingClaudeLine, l.claudeEligible = 0, false, false, true
 }
 
 func isCodexResumeContinuation(line []byte) bool {
@@ -229,6 +289,10 @@ func (l *codexResumeLinkifier) consumeEscape(char byte) bool {
 			l.escapeState = codexResumeEscapeCSI
 		case ']':
 			l.escapeState = codexResumeEscapeOSC
+			l.claudePrefixMatch, l.claudeEligible = 0, false
+		case 'P', '_', '^', 'X':
+			l.escapeState = codexResumeEscapeString
+			l.claudePrefixMatch, l.claudeEligible = 0, false
 		default:
 			l.escapeState = codexResumeEscapeNone
 		}
@@ -236,11 +300,14 @@ func (l *codexResumeLinkifier) consumeEscape(char byte) bool {
 	case codexResumeEscapeCSI:
 		if char >= 0x40 && char <= 0x7e {
 			l.escapeState = codexResumeEscapeNone
+			if char != 'm' {
+				l.claudePrefixMatch, l.claudeEligible = 0, true
+			}
 		}
 		return true
 	case codexResumeEscapeOSC:
 		switch char {
-		case '\a':
+		case '\a', '\x9c':
 			l.escapeState = codexResumeEscapeNone
 		case '\x1b':
 			l.escapeState = codexResumeEscapeOSCEscape
@@ -254,12 +321,62 @@ func (l *codexResumeLinkifier) consumeEscape(char byte) bool {
 		}
 		return true
 	case codexResumeEscapeNone:
+		if l.consumeUTF8(char) {
+			return false
+		}
+		switch char {
+		case '\x9b':
+			l.escapeState = codexResumeEscapeCSI
+			return true
+		case '\x9d':
+			l.escapeState = codexResumeEscapeOSC
+			l.claudePrefixMatch, l.claudeEligible = 0, false
+			return true
+		case '\x90', '\x98', '\x9e', '\x9f':
+			l.escapeState = codexResumeEscapeString
+			l.claudePrefixMatch, l.claudeEligible = 0, false
+			return true
+		}
 		if char == '\x1b' {
 			l.escapeState = codexResumeEscapeStart
 			return true
 		}
+	case codexResumeEscapeString:
+		if char == '\x9c' {
+			l.escapeState = codexResumeEscapeNone
+		} else if char == '\x1b' {
+			l.escapeState = codexResumeEscapeStringEnd
+		}
+		return true
+	case codexResumeEscapeStringEnd:
+		if char == '\\' {
+			l.escapeState = codexResumeEscapeNone
+		} else {
+			l.escapeState = codexResumeEscapeString
+		}
+		return true
 	}
 	return false
+}
+
+func (l *codexResumeLinkifier) consumeUTF8(char byte) bool {
+	// Match x/ansi v0.11.7's UTF-8 byte collection before interpreting raw C1
+	// controls: continuation bytes in ordinary Unicode are not introducers.
+	if l.utf8Remaining > 0 {
+		l.utf8Remaining--
+		return true
+	}
+	switch {
+	case char >= 0xc2 && char <= 0xdf:
+		l.utf8Remaining = 1
+	case char >= 0xe0 && char <= 0xef:
+		l.utf8Remaining = 2
+	case char >= 0xf0 && char <= 0xf4:
+		l.utf8Remaining = 3
+	default:
+		return false
+	}
+	return true
 }
 
 func (l *codexResumeLinkifier) Flush() []byte {
@@ -267,11 +384,21 @@ func (l *codexResumeLinkifier) Flush() []byte {
 		return nil
 	}
 	pending := append([]byte(nil), l.line...)
+	claude := l.awaitingClaudeLine
 	l.resetCapture()
+	if claude {
+		return linkClaudeResumeLine(pending, l.linkFor)
+	}
 	return pending
 }
 
 func (l *codexResumeLinkifier) linkLine(line []byte) []byte {
+	if l.claudeHeader {
+		return line
+	}
+	if l.awaitingClaudeLine {
+		return linkClaudeResumeLine(line, l.linkFor)
+	}
 	matches := codexResumeIDPattern.FindAllIndex(line, -1)
 	if len(matches) == 0 {
 		return line
@@ -317,6 +444,7 @@ type codexResumeResult struct {
 // Once a terminal write starts, a timeout is ambiguous and must not re-arm it.
 type codexResumeAction struct {
 	id       string
+	command  string
 	deadline time.Time
 	mu       sync.Mutex
 	done     bool
@@ -373,9 +501,13 @@ func submitCodexResumeAction(a *codexResumeAction, shellBusy bool, writer io.Wri
 		a.reject(err)
 		return codexResumeResult{err: err}
 	}
-	payload := codexResumeInput(a.id, false, "", 0)
+	command := a.commandText()
+	var payload []byte
+	if command != "" {
+		payload = []byte(command + "\r")
+	}
 	if len(payload) == 0 {
-		err := errors.New("invalid Codex resume session ID")
+		err := errors.New("invalid resume target")
 		a.reject(err)
 		return codexResumeResult{err: err}
 	}
@@ -385,7 +517,11 @@ func submitCodexResumeAction(a *codexResumeAction, shellBusy bool, writer io.Wri
 		a.reject(err)
 		return codexResumeResult{err: err}
 	}
-	if err := editor.Prepare(a.id, a.deadline); err != nil {
+	prepare := a.id
+	if a.command != "" {
+		prepare = command
+	}
+	if err := editor.Prepare(prepare, a.deadline); err != nil {
 		a.reject(err)
 		return codexResumeResult{err: err}
 	}
@@ -421,14 +557,14 @@ func newCodexResumeActionServer() (*codexResumeActionServer, error) {
 	}
 	token := newTerminalMarkerID()
 	if token == "" {
-		return nil, errors.New("generate Codex resume action token")
+		return nil, errors.New("generate resume action token")
 	}
 	return newCodexResumeActionServerIn(directory, token)
 }
 
 func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionServer, error) {
 	if !isCodexResumeToken(token) {
-		return nil, errors.New("invalid Codex resume action token")
+		return nil, errors.New("invalid resume action token")
 	}
 	if err := config.EnsurePrivateDir(directory); err != nil {
 		return nil, err
@@ -441,12 +577,12 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
 	listener, err := net.ListenUnix("unix", address)
 	if err != nil {
-		return nil, fmt.Errorf("listen for Codex resume actions: %w", err)
+		return nil, fmt.Errorf("listen for resume actions: %w", err)
 	}
 	if err := os.Chmod(socketPath, config.PrivateFileMode); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(socketPath)
-		return nil, fmt.Errorf("restrict Codex resume action socket: %w", err)
+		return nil, fmt.Errorf("restrict resume action socket: %w", err)
 	}
 	server := &codexResumeActionServer{
 		listener: listener, socketPath: socketPath, token: token,
@@ -489,8 +625,9 @@ func codexResumeRuntimeActionsDir(actionsDir string) (string, error) {
 	return filepath.Join(base, "vja", hex.EncodeToString(sum[:4])), nil
 }
 
-func (s *codexResumeActionServer) Observe(id string) string {
-	if s == nil || !isCodexResumeID(id) {
+func (s *codexResumeActionServer) Observe(value string) string {
+	target, valid := parseResumeTarget(value)
+	if s == nil || !valid {
 		return ""
 	}
 	now := time.Now()
@@ -506,17 +643,14 @@ func (s *codexResumeActionServer) Observe(id string) string {
 			break
 		}
 	}
-	s.observed[strings.ToLower(id)] = now.Add(codexResumeTTL)
+	s.observed[target.key()] = now.Add(codexResumeTTL)
 	s.mu.Unlock()
-	return (&url.URL{
-		Scheme: "vuja",
-		Host:   "codex-resume",
-		Path:   "/" + id,
-		RawQuery: url.Values{
-			"socket": []string{s.socketPath},
-			"token":  []string{s.token},
-		}.Encode(),
-	}).String()
+	u := target.uri()
+	query := u.Query()
+	query.Set("socket", s.socketPath)
+	query.Set("token", s.token)
+	u.RawQuery = query.Encode()
+	return u.String()
 }
 
 func (s *codexResumeActionServer) Actions() <-chan *codexResumeAction {
@@ -561,11 +695,21 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		return
 	}
 	parts := strings.Split(strings.TrimSpace(line), "\t")
-	if len(parts) != 3 || parts[0] != s.token || !isCodexResumeID(parts[1]) {
+	if (len(parts) != 3 && len(parts) != 4) || parts[0] != s.token || !isCodexResumeID(parts[1]) {
 		reply(codexResumeResult{err: errors.New("invalid resume activation credentials")})
 		return
 	}
 	id := strings.ToLower(parts[1])
+	target, _ := parseResumeTarget(id)
+	if len(parts) == 4 {
+		var valid bool
+		target, valid = parseResumeTarget(parts[3])
+		if !valid || !target.claude || target.id != id {
+			reply(codexResumeResult{err: errors.New("invalid Claude resume command")})
+			return
+		}
+	}
+	key := target.key()
 	now := time.Now()
 	deadlineNS, err := strconv.ParseInt(parts[2], 10, 64)
 	deadline := time.Unix(0, deadlineNS)
@@ -576,9 +720,9 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		return
 	}
 	s.mu.Lock()
-	expires, observed := s.observed[id]
+	expires, observed := s.observed[key]
 	if !expires.After(now) {
-		delete(s.observed, id)
+		delete(s.observed, key)
 		observed = false
 	}
 	s.mu.Unlock()
@@ -587,6 +731,9 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		return
 	}
 	action := &codexResumeAction{id: id, deadline: deadline, result: make(chan codexResumeResult, 1)}
+	if target.claude {
+		action.command = target.command
+	}
 	select {
 	case s.actions <- action:
 	default:
@@ -605,8 +752,8 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 	}
 	if result.consumed {
 		s.mu.Lock()
-		if s.observed[id].Equal(expires) {
-			delete(s.observed, id)
+		if s.observed[key].Equal(expires) {
+			delete(s.observed, key)
 		}
 		s.mu.Unlock()
 	}
@@ -628,12 +775,11 @@ func (s *codexResumeActionServer) Close() {
 func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("parse Codex resume URL: %w", err)
+		return fmt.Errorf("parse resume URL: %w", err)
 	}
-	id := strings.TrimPrefix(parsed.EscapedPath(), "/")
-	decodedID, err := url.PathUnescape(id)
-	if err != nil || parsed.Scheme != "vuja" || parsed.Host != "codex-resume" || !isCodexResumeID(decodedID) {
-		return errors.New("invalid Codex resume URL")
+	target, valid := resumeTargetFromURL(parsed)
+	if !valid {
+		return errors.New("invalid resume URL")
 	}
 	socketPath := filepath.Clean(parsed.Query().Get("socket"))
 	allowed := pathWithinDirectory(socketPath, actionsDir)
@@ -645,7 +791,7 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	}
 	token := parsed.Query().Get("token")
 	if !isCodexResumeToken(token) {
-		return errors.New("invalid Codex resume action token")
+		return errors.New("invalid resume action token")
 	}
 	dialer := net.Dialer{Timeout: time.Second}
 	connection, err := dialer.DialContext(context.Background(), "unix", socketPath)
@@ -655,8 +801,12 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	defer func() { _ = connection.Close() }()
 	_ = connection.SetWriteDeadline(time.Now().Add(time.Second))
 	deadline := time.Now().Add(codexResumeActionTimeout).UnixNano()
-	if _, err := fmt.Fprintf(connection, "%s\t%s\t%d\n", token, strings.ToLower(decodedID), deadline); err != nil {
-		return fmt.Errorf("send Codex resume action: %w", err)
+	request := fmt.Sprintf("%s\t%s\t%d", token, target.id, deadline)
+	if target.claude {
+		request += "\t" + target.command
+	}
+	if _, err := fmt.Fprintln(connection, request); err != nil {
+		return fmt.Errorf("send resume action: %w", err)
 	}
 	// A successful socket write is not acceptance by the owning shell. Older
 	// fire-and-forget servers close without a reply and must not look successful.
@@ -669,7 +819,7 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 		return nil
 	}
 	if message, ok := strings.CutPrefix(strings.TrimSpace(reply), "error\t"); ok {
-		return fmt.Errorf("Codex resume: %s", message)
+		return fmt.Errorf("resume: %s", message)
 	}
 	return errors.New("invalid Vuja resume activation response")
 }

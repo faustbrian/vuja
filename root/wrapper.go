@@ -607,7 +607,7 @@ func runWrapper() {
 			codexResumeLinks = newCodexResumeLinkifier(server.Observe)
 			defer server.Close()
 		} else {
-			logger.Debugf("Clickable Codex resume actions unavailable: %v", serverErr)
+			logger.Debugf("Clickable resume actions unavailable: %v", serverErr)
 		}
 	}
 	display.SetCodexResumeLinker(resumeLinkFor)
@@ -1378,7 +1378,7 @@ inputLoop:
 					isCommandActive.Store(true)
 					status.SetCommandActive(true)
 					bufferMu.Lock()
-					lastSubmittedCommand = codexResumeCommand(action.id)
+					lastSubmittedCommand = action.commandText()
 					lastHistoryAdmission = historyRecording.capture()
 					lastCommandHistoryIgnored = false
 					pendingFeedback = suggestionFeedbackSubmission{}

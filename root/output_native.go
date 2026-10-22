@@ -27,10 +27,13 @@ type nativeOutputTail struct {
 	clearMode                    int
 	claudeLine                   []byte
 	claudeHeader, claudeOverflow bool
+	linkFor                      func(string) string
+	parserByte                   byte
+	claudeInlineST               bool
 }
 
 func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
-	s := &nativeOutputTail{accepting: true, clearOnly: true}
+	s := &nativeOutputTail{accepting: true, clearOnly: true, linkFor: linkFor}
 	p := ansi.NewParser()
 	p.SetDataSize(4096)
 	p.SetHandler(ansi.Handler{
@@ -61,6 +64,12 @@ func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 		},
 		HandleEsc: func(cmd ansi.Cmd) {
 			s.clearOnly = false
+			// x/ansi dispatches OSC on ESC, then its ST backslash separately.
+			// Preserve only that paired terminator after an inline hyperlink.
+			if cmd.Final() == '\\' && s.claudeInlineST {
+				s.claudeInlineST = false
+				return
+			}
 			s.resetClaudeLine()
 			if cmd.Final() != '\\' { // ST ends an OSC, not text ownership.
 				s.accepting = false
@@ -68,7 +77,12 @@ func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 		},
 		HandleOsc: func(cmd int, data []byte) {
 			s.clearOnly = false
-			s.resetClaudeLine()
+			s.claudeInlineST = cmd == 8 && s.parserByte == '\x1b'
+			// Inline hyperlinks added by the shared resume linkifier do not
+			// change the finite command text; other OSC controls break it.
+			if cmd != 8 {
+				s.resetClaudeLine()
+			}
 			if s.accepting && cmd == 8 {
 				s.output.WriteString("\x1b]")
 				s.output.Write(data)
@@ -99,6 +113,9 @@ func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 		}
 		return "" // Observation only: no terminal action or execution.
 	})
+	// Claude admission belongs to the parsed native observer above. Feeding it
+	// through the UUID-only Codex callback could reinterpret an EOF flush.
+	s.resume.claudeEnabled = false
 	return s
 }
 
@@ -153,6 +170,7 @@ func (s *nativeOutputTail) csi(cmd ansi.Cmd, params ansi.Params) {
 
 func (s *nativeOutputTail) write(data []byte) []byte {
 	for _, b := range data {
+		s.parserByte = b
 		s.parser.Advance(b)
 	}
 	_ = s.resume.Transform(data)

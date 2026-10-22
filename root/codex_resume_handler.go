@@ -104,7 +104,7 @@ func removeIfPresent(path string) error {
 
 func codexResumeAppleScript(binaryPath string) string {
 	command := shellSingleQuote(binaryPath) + " open-url "
-	return "on open location actionURL\n\ttry\n\t\tdo shell script " + appleScriptString(command) + " & quoted form of actionURL\n\ton error messageText\n\t\tdisplay alert \"Vuja could not resume Codex\" message messageText\n\tend try\nend open location\n"
+	return "on open location actionURL\n\ttry\n\t\tdo shell script " + appleScriptString(command) + " & quoted form of actionURL\n\ton error messageText\n\t\tdisplay alert \"Vuja could not resume the session\" message messageText\n\tend try\nend open location\n"
 }
 
 func codexResumeDesktopEntry(binaryPath string) string {

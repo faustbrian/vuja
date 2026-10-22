@@ -709,12 +709,17 @@ func recoveryRow(row string, linkFor func(string) string, restore bool) string {
 						// too. Preserve its text/style through normal conversion;
 						// only the separate row provenance can establish chrome.
 						fmt.Fprintf(&out, "\x1b]8;;%s\x1b\\", target)
-					} else if id := recoveryResumeID(target); id != "" {
-						target = "vuja://codex-resume/" + id
+					} else if parsed, err := url.Parse(target); err == nil {
+						resume, valid := resumeTargetFromURL(parsed)
+						if !valid {
+							i = end + n
+							continue
+						}
+						target = resume.uri().String()
 						if restore {
 							target = ""
 							if linkFor != nil {
-								target = linkFor(id)
+								target = linkFor(resume.value())
 							}
 						}
 						if target != "" {

@@ -21,11 +21,11 @@ if [[ -n ${VUJA_PID-} && -n ${VUJA_FD-} && -n ${VUJA_RESUME_FD-} ]] && zmodload 
     if [[ -n ${_vuja_resume_key-} ]]; then
       bindkey -M "$_vuja_resume_map" -r "$_vuja_resume_key" 2>/dev/null
     fi
-    unset _vuja_resume_nonce _vuja_resume_deadline _vuja_resume_id _vuja_resume_key _vuja_resume_map
+    unset _vuja_resume_nonce _vuja_resume_deadline _vuja_resume_command _vuja_resume_key _vuja_resume_map
   }
   _vuja_resume_accept() {
     emulate -L zsh
-    local _nonce=${_vuja_resume_nonce-} _deadline=${_vuja_resume_deadline-} _id=${_vuja_resume_id-}
+    local _nonce=${_vuja_resume_nonce-} _deadline=${_vuja_resume_deadline-} _command=${_vuja_resume_command-}
     [[ -n $_nonce && $KEYS == ${_vuja_resume_key-} ]] || return
     _vuja_resume_disarm
     if (( EPOCHREALTIME >= _deadline )); then
@@ -36,7 +36,7 @@ if [[ -n ${VUJA_PID-} && -n ${VUJA_FD-} && -n ${VUJA_RESUME_FD-} ]] && zmodload 
       print -u "$VUJA_FD" -N -r -- "VUJA_RESUME_RESULT:${_nonce}:nonempty" 2>/dev/null
       return
     fi
-    BUFFER="codex resume ${_id:l}"
+    BUFFER=$_command
     CURSOR=${#BUFFER}
     if zle .accept-line; then
       print -u "$VUJA_FD" -N -r -- "VUJA_RESUME_RESULT:${_nonce}:submitted" 2>/dev/null
@@ -46,7 +46,8 @@ if [[ -n ${VUJA_PID-} && -n ${VUJA_FD-} && -n ${VUJA_RESUME_FD-} ]] && zmodload 
   }
   _vuja_resume_editor() {
     emulate -L zsh
-    local _kind _nonce _deadline _id _grant
+    local _kind _nonce _deadline _id _grant _command
+    local _uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
     local IFS=$'\t'
     if ! read -r -t 1 -u "$1" _kind _nonce _deadline _id; then
       _vuja_resume_disarm
@@ -58,7 +59,15 @@ if [[ -n ${VUJA_PID-} && -n ${VUJA_FD-} && -n ${VUJA_RESUME_FD-} ]] && zmodload 
       return
     fi
     [[ $_kind == probe ]] || return
-    [[ $_nonce =~ '^[0-9a-f]{32}$' && $_deadline =~ '^[0-9]+\.[0-9]{9}$' && $_id =~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' ]] || return
+    [[ $_nonce =~ '^[0-9a-f]{32}$' && $_deadline =~ '^[0-9]+\.[0-9]{9}$' ]] || return
+    if [[ $_id =~ "^${_uuid}$" ]]; then
+      _command="codex resume ${_id:l}"
+    else
+      _command=$_id
+    fi
+    # This private pipe carries Go-validated finite targets, never arbitrary
+    # command input. Recheck executable/argument syntax before arming ZLE.
+    [[ $_command =~ "^(codex resume ${_uuid}|claude (--resume|-r) ${_uuid}|claude (--worktree|-w) \"[a-zA-Z0-9._/-]{1,64}\" (--resume|-r) ${_uuid})$" ]] || return
     if (( EPOCHREALTIME >= _deadline )); then
       print -u "$VUJA_FD" -N -r -- "VUJA_RESUME_RESULT:${_nonce}:expired" 2>/dev/null
       return
@@ -80,7 +89,7 @@ if [[ -n ${VUJA_PID-} && -n ${VUJA_FD-} && -n ${VUJA_RESUME_FD-} ]] && zmodload 
       print -u "$VUJA_FD" -N -r -- "VUJA_RESUME_RESULT:${_nonce}:nonempty" 2>/dev/null
       return
     fi
-    typeset -g _vuja_resume_nonce=$_nonce _vuja_resume_deadline=$_deadline _vuja_resume_id=$_id
+    typeset -g _vuja_resume_nonce=$_nonce _vuja_resume_deadline=$_deadline _vuja_resume_command=$_command
     typeset -g _vuja_resume_key=$'\e[777;'${_nonce}'~' _vuja_resume_map=$KEYMAP
     bindkey -M "$_vuja_resume_map" "$_vuja_resume_key" _vuja_resume_accept || { _vuja_resume_disarm; return; }
     print -u "$VUJA_FD" -N -r -- "VUJA_RESUME_RESULT:${_nonce}:armed" 2>/dev/null
@@ -100,7 +109,7 @@ type codexResumeEditor interface {
 
 type shellResumeRequest struct {
 	nonce     string
-	id        string
+	command   string
 	deadline  time.Time
 	responses chan string
 }
@@ -135,23 +144,24 @@ func (e *shellResumeEditor) Handle(message string) bool {
 	return true
 }
 
-func (e *shellResumeEditor) Prepare(id string, deadline time.Time) error {
+func (e *shellResumeEditor) Prepare(value string, deadline time.Time) error {
 	if e.shell != "zsh" || e.requests == nil {
 		return errors.New("automatic resume requires the Zsh editor integration; run the displayed command manually")
 	}
-	if !isCodexResumeID(id) || !deadline.After(time.Now()) {
+	target, valid := parseResumeTarget(value)
+	if !valid || !deadline.After(time.Now()) {
 		return errors.New("resume activation request expired or is invalid")
 	}
 	nonce := newTerminalMarkerID()
 	if !isCodexResumeToken(nonce) {
 		return errors.New("resume request identity unavailable")
 	}
-	request := &shellResumeRequest{nonce: nonce, id: id, deadline: deadline, responses: make(chan string, 2)}
+	request := &shellResumeRequest{nonce: nonce, command: target.command, deadline: deadline, responses: make(chan string, 2)}
 	e.mu.Lock()
 	e.pending = request
 	e.mu.Unlock()
 	_ = e.requests.SetWriteDeadline(deadline)
-	if _, err := fmt.Fprintf(e.requests, "probe\t%s\t%d.%09d\t%s\n", nonce, deadline.Unix(), deadline.Nanosecond(), id); err != nil {
+	if _, err := fmt.Fprintf(e.requests, "probe\t%s\t%d.%09d\t%s\n", nonce, deadline.Unix(), deadline.Nanosecond(), target.command); err != nil {
 		e.Cancel()
 		return errors.New("shell editor request could not be delivered")
 	}
@@ -181,7 +191,7 @@ func (e *shellResumeEditor) Write(payload []byte) (int, error) {
 	e.mu.Lock()
 	request := e.pending
 	e.mu.Unlock()
-	if request == nil || string(payload) != codexResumeCommand(request.id)+"\r" || !request.deadline.After(time.Now()) {
+	if request == nil || string(payload) != request.command+"\r" || !request.deadline.After(time.Now()) {
 		return 0, errors.New("shell editor activation is no longer prepared")
 	}
 	_ = e.requests.SetWriteDeadline(request.deadline)

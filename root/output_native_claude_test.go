@@ -163,6 +163,8 @@ func TestNativeClaudeResumeWorktreeGrammar(t *testing.T) {
 func TestClaudeResumePaneConsumers(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	c, out := blocksFixture(t, "")
+	server, _ := resumeFixtureServer(t)
+	c.SetCodexResumeLinker(server.Observe)
 	blocksExecution(c, "claude", "owned-prefix\r\n\x1b[2;2Hprivate-canvas\r\nResume this session with:\r\n"+testClaudeResumeCommand+"\r\n", "0")
 	blocksPrompt(c, "keep-input")
 	y := terminalLineIndex(terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24)), testClaudeResumeCommand, 0)

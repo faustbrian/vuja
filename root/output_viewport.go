@@ -546,6 +546,9 @@ func (c *terminalCompositor) renderOutputViewport() {
 		if strings.Contains(line, "vuja://codex-resume/") {
 			line = bareCodexResumeLink.ReplaceAllString(line, "")
 		}
+		if strings.Contains(line, "vuja://claude-resume/") {
+			line = bareClaudeResumeLink.ReplaceAllString(line, "")
+		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row+1, line)
 	}
 	frame.WriteString("\x1b8\x1b[?7h\x1b[?25h" + terminalSyncEnd)

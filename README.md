@@ -783,9 +783,12 @@ as checkpoints. Text after an observed alternate-screen exit is retained until
 another native control takes ownership. For primary-screen applications, only
 recognised Codex continuation/session-ID metadata and Claude's
 `Resume this session with:` UUID-form instruction are retained as bounded,
-credential-free text. Claude's quoted worktree variants are preserved, but no
-Claude action is executed or added as a clickable link. Arbitrary application
-text is not captured.
+credential-free text. Claude UUIDs are clickable like Codex UUIDs, preserving
+their quoted worktree arguments. Clicking requires the originating Zsh editor
+to be idle and empty; output and checkpoint restoration never run a command.
+Checkpoints strip action credentials and bind links to a fresh owner on restore.
+Without an owner, the command stays readable but is not advertised as a link.
+Arbitrary application text is not captured.
 
 Zsh identifies a standalone external `clear` before execution, so its temporary
 partial-line marker and prompt hooks cannot prevent clearing. Other commands

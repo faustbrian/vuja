@@ -39,6 +39,7 @@ func (s *nativeOutputTail) observeClaudeControl(b byte) {
 
 func (s *nativeOutputTail) resetClaudeLine() {
 	s.claudeLine, s.claudeHeader, s.claudeOverflow = nil, false, false
+	s.claudeInlineST = false
 }
 
 func (s *nativeOutputTail) finishClaudeLine() {
@@ -65,7 +66,9 @@ func (s *nativeOutputTail) finishClaudeLine() {
 		s.resumeIDs = make(map[string]bool)
 	}
 	s.resumeIDs[key] = true
-	s.output.WriteString("\r\n" + claudeResumeHeader + "\r\n" + line + "\r\n")
+	s.output.WriteString("\r\n" + claudeResumeHeader + "\r\n")
+	s.output.Write(linkClaudeResumeLine([]byte(line), s.linkFor))
+	s.output.WriteString("\r\n")
 }
 
 func isClaudeResumeCommand(line string) bool {
