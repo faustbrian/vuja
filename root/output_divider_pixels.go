@@ -232,7 +232,10 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 	for i, p := range ready {
 		// No c/r scaling: native one-pixel height, at the next header's very
 		// top pixel, not the underline baseline or center of a spare cell row.
-		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b_Ga=p,i=%d,p=%d,w=%d,h=1,C=1,z=-1,q=2\x1b\\", p.row+1, d.images[p.width].id, i+1, p.width)
+		// Rails are foreground glyphs. Kitty draws negative z beneath text,
+		// which lets rails interrupt the shared edge; only its top pixel must
+		// overlay text. https://sw.kovidgoyal.net/kitty/graphics-protocol/
+		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b_Ga=p,i=%d,p=%d,w=%d,h=1,C=1,z=1,q=2\x1b\\", p.row+1, d.images[p.width].id, i+1, p.width)
 	}
 	frame.WriteString("\x1b8" + terminalSyncEnd)
 	_, _ = io.WriteString(c.out, frame.String())

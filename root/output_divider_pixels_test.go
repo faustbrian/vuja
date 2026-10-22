@@ -39,10 +39,11 @@ type dividerWire struct {
 	frameWidth                          int
 	images                              map[int]dividerWireImage
 	placements                          map[[2]int]dividerWirePlacement
+	layers                              map[[2]int]int
 }
 
 func newDividerWire(cw, ch int) *dividerWire {
-	return &dividerWire{cw: cw, ch: ch, serial: 100, images: map[int]dividerWireImage{}, placements: map[[2]int]dividerWirePlacement{}}
+	return &dividerWire{cw: cw, ch: ch, serial: 100, images: map[int]dividerWireImage{}, placements: map[[2]int]dividerWirePlacement{}, layers: map[[2]int]int{}}
 }
 
 func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
@@ -71,6 +72,7 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 		case strings.HasPrefix(token[0], "\x1b[?1049"):
 			clear(w.images)
 			clear(w.placements)
+			clear(w.layers)
 		case token[1] != "":
 			control, payload, _ := strings.Cut(token[1], ";")
 			fields := map[string]string{}
@@ -121,6 +123,7 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 					width, height = image.w, image.h
 				}
 				w.placements[[2]int{id, placement}] = dividerWirePlacement{(w.x - 1) * w.cw, (w.y - 1) * w.ch, width, height}
+				w.layers[[2]int{id, placement}] = number("z")
 			case "d":
 				id := number("i")
 				if id == 0 || fields["I"] != "" || fields["d"] != "i" && fields["d"] != "I" || fields["q"] != "2" {
@@ -132,6 +135,7 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 				for key := range w.placements {
 					if key[0] == id && (number("p") == 0 || key[1] == number("p")) {
 						delete(w.placements, key)
+						delete(w.layers, key)
 					}
 				}
 				if fields["d"] == "I" || w.iterm && number("p") == 0 {
@@ -145,6 +149,32 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 		}
 	}
 	return replies.String()
+}
+
+func TestInteractiveBlocksPixelDividerDrawsAboveFocusedRail(t *testing.T) {
+	c, out := blocksFixture(t, "")
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "first-output\r\n", "1")
+	blocksExecution(c, "second", "second-output\r\n", "0")
+	blocksPrompt(c, "pending-input")
+	wire := newDividerWire(10, 33)
+	wire.settle(t, c, out)
+	lines := terminalScreenLines(applyTerminalOutput(t, dividerTextProjection(out.Bytes()), 60, 24))
+	y := terminalLineIndex(lines, "second-output", 0)
+	if y < 0 {
+		t.Fatal("fixture must contain the second card")
+	}
+	cardMouse(t, c, 0, 2, y, true)
+	cardMouse(t, c, 0, 2, y, false)
+	wire.settle(t, c, out)
+	if len(wire.placements) != 1 || c.viewport.cards.focus == nil {
+		t.Fatal("fixture must focus a card with one boundary")
+	}
+	for key, placement := range wire.placements {
+		if placement.h != 1 || wire.layers[key] <= 0 {
+			t.Fatalf("shared edge must be one pixel above foreground rails, got height=%d layer=%d", placement.h, wire.layers[key])
+		}
+	}
 }
 
 func TestInteractiveBlocksPixelDividerITermGridBounds(t *testing.T) {
