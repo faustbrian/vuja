@@ -781,8 +781,11 @@ running process or a full-screen application's private canvas.
 Cursor-driven application canvases are excluded from the retained pane as well
 as checkpoints. Text after an observed alternate-screen exit is retained until
 another native control takes ownership. For primary-screen applications, only
-recognised Codex continuation/session-ID metadata is retained, as a bounded,
-credential-free resume instruction; arbitrary application text is not captured.
+recognised Codex continuation/session-ID metadata and Claude's
+`Resume this session with:` UUID-form instruction are retained as bounded,
+credential-free text. Claude's quoted worktree variants are preserved, but no
+Claude action is executed or added as a clickable link. Arbitrary application
+text is not captured.
 
 Zsh identifies a standalone external `clear` before execution, so its temporary
 partial-line marker and prompt hooks cannot prevent clearing. Other commands

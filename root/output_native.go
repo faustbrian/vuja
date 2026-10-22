@@ -13,18 +13,20 @@ import (
 // serializing the application's primary or alternate screen at completion.
 // The SDK parser owns fragmented controls; only an observed alternate-screen
 // exit admits subsequent line-oriented text again. Primary-screen applications
-// have no equivalent text boundary, except the existing finite Codex resume
-// recognizer, whose result is a session ID, never arbitrary screen contents.
+// have no equivalent text boundary, except finite Codex/Claude continuation
+// metadata, never arbitrary screen contents.
 type nativeOutputTail struct {
-	parser    *ansi.Parser
-	accepting bool
-	alternate bool
-	resumed   bool
-	output    strings.Builder
-	resume    *codexResumeLinkifier
-	resumeIDs map[string]bool
-	clearOnly bool
-	clearMode int
+	parser                       *ansi.Parser
+	accepting                    bool
+	alternate                    bool
+	resumed                      bool
+	output                       strings.Builder
+	resume                       *codexResumeLinkifier
+	resumeIDs                    map[string]bool
+	clearOnly                    bool
+	clearMode                    int
+	claudeLine                   []byte
+	claudeHeader, claudeOverflow bool
 }
 
 func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
@@ -34,17 +36,22 @@ func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 	p.SetHandler(ansi.Handler{
 		Print: func(r rune) {
 			s.clearOnly = false
+			s.observeClaudeRune(r)
 			if s.accepting {
 				s.output.WriteRune(r)
 			}
 		},
 		Execute: func(b byte) {
 			s.clearOnly = false
+			s.observeClaudeControl(b)
 			if s.accepting && (b == '\r' || b == '\n' || b == '\t' || b == '\b') {
 				s.output.WriteByte(b)
 			}
 		},
 		HandleCsi: func(cmd ansi.Cmd, params ansi.Params) {
+			if cmd.Prefix() != 0 || cmd.Intermediate() != 0 || cmd.Final() != 'm' {
+				s.resetClaudeLine()
+			}
 			if mode, allowed := viewportClearControl(cmd, params); allowed {
 				s.clearMode = max(s.clearMode, mode)
 			} else {
@@ -54,22 +61,24 @@ func newNativeOutputTail(linkFor func(string) string) *nativeOutputTail {
 		},
 		HandleEsc: func(cmd ansi.Cmd) {
 			s.clearOnly = false
+			s.resetClaudeLine()
 			if cmd.Final() != '\\' { // ST ends an OSC, not text ownership.
 				s.accepting = false
 			}
 		},
 		HandleOsc: func(cmd int, data []byte) {
 			s.clearOnly = false
+			s.resetClaudeLine()
 			if s.accepting && cmd == 8 {
 				s.output.WriteString("\x1b]")
 				s.output.Write(data)
 				s.output.WriteString("\x1b\\")
 			}
 		},
-		HandleDcs: func(ansi.Cmd, ansi.Params, []byte) { s.accepting, s.clearOnly = false, false },
-		HandlePm:  func([]byte) { s.accepting, s.clearOnly = false, false },
-		HandleApc: func([]byte) { s.accepting, s.clearOnly = false, false },
-		HandleSos: func([]byte) { s.accepting, s.clearOnly = false, false },
+		HandleDcs: func(ansi.Cmd, ansi.Params, []byte) { s.resetClaudeLine(); s.accepting, s.clearOnly = false, false },
+		HandlePm:  func([]byte) { s.resetClaudeLine(); s.accepting, s.clearOnly = false, false },
+		HandleApc: func([]byte) { s.resetClaudeLine(); s.accepting, s.clearOnly = false, false },
+		HandleSos: func([]byte) { s.resetClaudeLine(); s.accepting, s.clearOnly = false, false },
 	})
 	s.parser = p
 	s.resume = newCodexResumeLinkifier(func(id string) string {
@@ -151,6 +160,7 @@ func (s *nativeOutputTail) write(data []byte) []byte {
 }
 
 func (s *nativeOutputTail) finish() []byte {
+	s.finishClaudeLine()
 	// A recognised final instruction may be unterminated. Flush only its
 	// bounded recognizer; arbitrary native bytes never enter retained output.
 	_ = s.resume.linkLine(s.resume.Flush())
