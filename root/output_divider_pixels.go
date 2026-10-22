@@ -30,8 +30,6 @@ type pixelDividers struct {
 	probeOK                   bool
 	itermGeometry             bool
 	cellWidth, cellHeight     int
-	windowWidth               int
-	backingScale              float64
 	image, upload             uint32
 	uploadEpoch               uint64
 	width, uploadWidth        int
@@ -90,7 +88,6 @@ func (c *terminalCompositor) invalidatePixelDividers() {
 	c.deleteDividerImage(true)
 	d.epoch++
 	d.cellWidth, d.cellHeight = 0, 0
-	d.windowWidth, d.backingScale = 0, 0
 	d.itermGeometry = false
 	// At most one outstanding probe and upload, even on unsupported terminals.
 	// Their tagged replies remain ours across resize or native handoff.
@@ -101,12 +98,26 @@ func (c *terminalCompositor) dividerEligible() bool {
 		c.outputViewportEnabled() && c.cardLayoutEnabled() && c.chatboxConfig.BlockDividers
 }
 
-func dividerGray(value string) [3]byte {
+func dividerGray(value, background string, light bool) [3]byte {
 	gray := byte(70)
 	if color := ansi.XParseColor(value); color != nil {
 		r, g, b, _ := color.RGBA()
 		gray = byte((r + g + b) / (3 * 257))
 	}
+	// Terminal-palette colors are user-defined ANSI indices, not RGB
+	// (config.ApplyVisualPolicy). Use the existing light/dark classification
+	// for a neutral fallback rather than inventing RGB values for indices.
+	base := uint32(0)
+	if light {
+		base = 255
+	}
+	if color := ansi.XParseColor(background); color != nil {
+		r, g, b, _ := color.RGBA()
+		base = (r + g + b) / (3 * 257)
+	}
+	// Keep opaque neutral pixels so severity tints cannot color the rule,
+	// unlike lowering alpha over the next card's background.
+	gray = byte((uint32(gray) + base) / 2)
 	return [3]byte{gray, gray, gray}
 }
 
@@ -131,10 +142,11 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 			// Non-storing capability query, cell pixels, then an ordered DA1
 			// fence. Missing replies mean no graphic, never a padded glyph row.
 			// iTerm 3.7.3 ignores CSI 16 t but supports ReportCellSize, whose
-			// points and backing scale give native image pixels. CSI 14 t is
-			// not a substitute: iTerm reports a window frame including margins.
+			// points and backing scale give native image pixels. Never query the
+			// whole window: it includes padding, chrome and sibling panes, not
+			// the safe text grid shared by the supported terminals.
 			// https://iterm2.com/documentation-escape-codes.html (Report Cell Size)
-			fmt.Fprintf(c.out, "\x1b_Ga=q,i=%d,f=24,s=1,v=1;AAAA\x1b\\\x1b[16t\x1b]1337;ReportCellSize\x1b\\\x1b[14t\x1b[c", d.probe)
+			fmt.Fprintf(c.out, "\x1b_Ga=q,i=%d,f=24,s=1,v=1;AAAA\x1b\\\x1b[16t\x1b]1337;ReportCellSize\x1b\\\x1b[c", d.probe)
 		}
 		return
 	}
@@ -145,22 +157,7 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 		c.deleteDividerImage(true)
 		return
 	}
-	width, color := c.width*d.cellWidth, dividerGray(c.inputBoxTheme.Muted)
-	fullBleed := d.itermGeometry && c.chatboxConfig.SurfaceWidth != "content-width" && d.windowWidth > 0
-	if fullBleed {
-		// iTerm's image origin omits the side margins that EL-painted block
-		// backgrounds cover. Its CSI 14 t frame width is in points. Overscan
-		// to that width and let the terminal clip to its own pane surface.
-		// Verified in iTerm 3.7.3 with differently positioned strips in split
-		// panes: neither strip paints the neighboring pane. Content-width
-		// cards deliberately do not use this full-surface bleed.
-		pixels := math.Ceil(float64(d.windowWidth) * d.backingScale)
-		if pixels > float64(terminalWriterMaxPending/3) {
-			c.deleteDividerImage(true)
-			return
-		}
-		width = max(width, int(pixels))
-	}
+	width, color := c.width*d.cellWidth, dividerGray(c.inputBoxTheme.Muted, c.inputBoxTheme.Background, c.inputBoxTheme.LightBackground)
 	if d.image != 0 && (d.width != width || d.color != color) {
 		c.deleteDividerImage(true)
 	}
@@ -168,9 +165,6 @@ func (c *terminalCompositor) renderPixelDividers(rows []cardRow, cards bool) {
 	for y, row := range rows {
 		if row.boundary && y < c.viewportContentRows() {
 			pixels := min(row.width, c.width) * d.cellWidth
-			if fullBleed {
-				pixels = width
-			}
 			placements = append(placements, pixelBoundary{y, pixels})
 		}
 	}
@@ -311,17 +305,6 @@ func (c *terminalCompositor) ConsumeDividerReport(sequence []byte) bool {
 					height > 0 && height <= 65535 && width > 0 && width <= 65535 && d.probeEpoch == d.epoch {
 					d.cellWidth, d.cellHeight = int(width), int(height)
 					d.itermGeometry = true
-					d.backingScale = scale
-				}
-			}
-			consumed = true
-		} else if strings.HasPrefix(text, "\x1b[4;") && strings.HasSuffix(text, "t") {
-			parts := strings.Split(text[4:len(text)-1], ";")
-			if len(parts) == 2 {
-				_, e1 := strconv.ParseUint(parts[0], 10, 16)
-				width, e2 := strconv.ParseUint(parts[1], 10, 16)
-				if e1 == nil && e2 == nil && d.probeEpoch == d.epoch {
-					d.windowWidth = int(width)
 				}
 			}
 			consumed = true

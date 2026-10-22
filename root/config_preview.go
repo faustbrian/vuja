@@ -67,7 +67,8 @@ func renderConfigScenario(cfg *config.Config, label string, width, height int, m
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	c.now = func() time.Time { return now }
 	c.SetInputBoxTheme(terminalInputBoxTheme{
-		Background: palette.Background, SurfaceBackground: palette.SurfaceBackground,
+		LightBackground: mode == "day",
+		Background:      palette.Background, SurfaceBackground: palette.SurfaceBackground,
 		CompletedSurfaceBackground: palette.CompletedSurfaceBackground, StatusBackground: palette.StatusBackground,
 		StatusText: palette.StatusText, Border: palette.Border, Accent: palette.Accent, Muted: palette.Muted,
 	})

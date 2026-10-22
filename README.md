@@ -891,9 +891,11 @@ hiding commands. Blocks have no blank gap by default; `history-spacing` adds
 are independent, including in the minimal preset.
 In the pinned block pane, dividers are one-pixel neutral-grey graphics at the
 shared block boundary, not text rows or footer underlines. Full-width mode
-reaches every drawable column; content-width mode follows the next block's
-width. They add no text row or surrounding padding. The grey brightness follows
-the theme's muted color. This requires terminal support for Kitty graphics and
+reaches every text-grid column; content-width mode follows the next block's
+width. Neither mode overscans into terminal padding or scrollbars. They add no
+text row or surrounding padding. The neutral grey is dimmed halfway toward the
+palette background from its muted color. Indexed palettes use a neutral
+light/dark fallback because their custom RGB colors are not known. This requires Kitty graphics and
 cell-pixel reports (xterm CSI 16 t, or iTerm2's ReportCellSize with backing scale).
 When the capability probe fails, blocks stay flush without a divider rather than
 adding a glyph row.

@@ -389,6 +389,7 @@ func runWrapper() {
 		inputBoxPalette = config.Get().UI.Colors.Night
 	}
 	display.SetInputBoxTheme(terminalInputBoxTheme{
+		LightBackground:            !isDarkBackground,
 		Background:                 inputBoxPalette.Background,
 		SurfaceBackground:          inputBoxPalette.SurfaceBackground,
 		CompletedSurfaceBackground: inputBoxPalette.CompletedSurfaceBackground,

@@ -222,6 +222,7 @@ func (w *asyncTerminalWriter) Close() {
 }
 
 type terminalInputBoxTheme struct {
+	LightBackground            bool
 	Background                 string
 	SurfaceBackground          string
 	CompletedSurfaceBackground string
@@ -874,6 +875,9 @@ func (c *terminalCompositor) SetInputBoxTheme(theme terminalInputBoxTheme) {
 	c.statusLinesCache = nil
 	c.transientGeometryDirty = true
 	c.renderedLines = nil
+	if c.viewport != nil {
+		c.viewport.dirty = true
+	}
 	if c.layout && c.phase == terminalInput {
 		c.renderPinned()
 	}

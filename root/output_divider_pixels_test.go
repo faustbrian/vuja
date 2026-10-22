@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/faustbrian/vuja/internal/config"
 )
 
 // Independent wire oracle: decode the actual transmitted image and placements,
@@ -137,7 +139,7 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 	return replies.String()
 }
 
-func TestInteractiveBlocksPixelDividerITermFullBleed(t *testing.T) {
+func TestInteractiveBlocksPixelDividerITermGridBounds(t *testing.T) {
 	for _, surface := range []string{"full-width", "content-width"} {
 		c, out := blocksFixture(t, "[ui.chatbox]\nsurface-width='"+surface+"'\n")
 		c.EnablePixelDividers()
@@ -148,15 +150,12 @@ func TestInteractiveBlocksPixelDividerITermFullBleed(t *testing.T) {
 		wire.iterm, wire.frameWidth = true, 641
 		wire.settle(t, c, out)
 		want := 60 * 20
-		if surface == "full-width" {
-			want = 641 * 2
-		}
 		if len(wire.placements) != 1 {
 			t.Fatalf("missing boundary in %s", surface)
 		}
 		for _, p := range wire.placements {
 			if p.w != want {
-				t.Fatalf("%s line must cover its painted surface, got %d want %d", surface, p.w, want)
+				t.Fatalf("%s line must stop at the text grid, not the window frame: got %d want %d", surface, p.w, want)
 			}
 		}
 	}
@@ -230,7 +229,7 @@ func TestInteractiveBlocksPixelDividerWireGeometry(t *testing.T) {
 							t.Fatalf("stale/incorrect physical width: %+v", image)
 						}
 						for i := 0; i < len(image.data); i += 3 {
-							if !bytes.Equal(image.data[i:i+3], []byte{74, 74, 74}) {
+							if !bytes.Equal(image.data[i:i+3], []byte{42, 42, 42}) {
 								t.Fatalf("strip must be neutral muted grey, not severity tint: %v", image.data[i:i+3])
 							}
 						}
@@ -257,8 +256,142 @@ func TestInteractiveBlocksPixelDividerWireGeometry(t *testing.T) {
 	}
 }
 
+func TestInteractiveBlocksPixelDividerDimAcrossPalettes(t *testing.T) {
+	for _, fixture := range []struct {
+		name, background string
+		defaultRGB       [3]uint8
+	}{
+		{"night", "#000000", [3]uint8{0, 0, 0}},
+		{"day", "#ffffff", [3]uint8{255, 255, 255}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			c, out := blocksFixture(t, "")
+			theme := testInputBoxTheme()
+			theme.Background, theme.Muted = fixture.background, "#808080"
+			c.SetInputBoxTheme(theme)
+			c.EnablePixelDividers()
+			blocksExecution(c, "failed", "failed-output\r\n", "1")
+			blocksExecution(c, "next", "next-output\r\n", "0")
+			blocksPrompt(c, "input")
+			wire := newDividerWire(9, 19)
+			wire.settle(t, c, out)
+			if len(wire.images) != 1 {
+				t.Fatal("missing neutral divider image")
+			}
+			for _, image := range wire.images {
+				pixel := image.data[:3]
+				if pixel[0] != pixel[1] || pixel[1] != pixel[2] {
+					t.Fatalf("divider must stay opaque neutral grey, not inherit state tint: %v", pixel)
+				}
+				for _, state := range []blockState{blockNeutral, blockError, blockWarning, blockFocused} {
+					// Decode the actual state renderer independently of the
+					// divider color calculation, rather than guessing tint RGB.
+					painted := applyTerminalOutput(t, []byte(c.blockStateLine("surface", state, 60)), 60, 1)
+					surface := fixture.defaultRGB
+					if color := painted.CellAt(2, 0).Style.Bg; color != nil {
+						surface = blockTestRGB(color)
+					}
+					oldDistance, newDistance := 0, 0
+					for channel, background := range surface {
+						oldDelta := 128 - int(background)
+						newDelta := int(pixel[channel]) - int(background)
+						oldDistance += oldDelta * oldDelta
+						newDistance += newDelta * newDelta
+					}
+					if newDistance == 0 || newDistance >= oldDistance {
+						t.Fatalf("divider must remain visible but quieter against %v: pixel=%v old/new distance=%d/%d", surface, pixel, oldDistance, newDistance)
+					}
+				}
+			}
+			// Only image bytes change: the failed text surface/rail remains.
+			screen := applyTerminalOutput(t, dividerTextProjection(out.Bytes()), 60, 24)
+			y := terminalLineIndex(terminalScreenLines(screen), "failed-output", 0)
+			if y < 0 || screen.CellAt(0, y).Content != "▌" || screen.CellAt(59, y).Style.Bg == nil {
+				t.Fatal("dimming the rule removed the failed block's full surface or rail")
+			}
+		})
+	}
+}
+
+func TestInteractiveBlocksPixelDividerTerminalPalette(t *testing.T) {
+	for _, fixture := range []struct {
+		name, contrast string
+		light          bool
+		gray           byte
+	}{
+		{"night", "normal", false, 35},
+		{"night-high", "high", false, 35},
+		{"day", "normal", true, 162},
+		{"day-high", "high", true, 162},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.UI.Palette, cfg.UI.Contrast = "terminal", fixture.contrast
+			config.ApplyVisualPolicy(cfg)
+			palette := cfg.UI.Colors.Night
+			c, out := blocksFixture(t, "")
+			theme := testInputBoxTheme()
+			theme.LightBackground = fixture.light
+			theme.Background, theme.Muted = palette.Background, palette.Muted
+			c.SetInputBoxTheme(theme)
+			c.EnablePixelDividers()
+			blocksExecution(c, "first", "out\r\n", "1")
+			blocksExecution(c, "second", "out\r\n", "0")
+			blocksPrompt(c, "input")
+			wire := newDividerWire(9, 19)
+			wire.settle(t, c, out)
+			if len(wire.images) != 1 {
+				t.Fatal("missing indexed-palette divider")
+			}
+			for _, image := range wire.images {
+				if !bytes.Equal(image.data[:3], []byte{fixture.gray, fixture.gray, fixture.gray}) {
+					t.Fatalf("indexed palette must soften the previous RGB70 fallback using its background class: %v", image.data[:3])
+				}
+			}
+		})
+	}
+}
+
+func TestInteractiveBlocksPixelDividerThemeBackgroundRefresh(t *testing.T) {
+	c, out := blocksFixture(t, "")
+	theme := testInputBoxTheme()
+	theme.Background, theme.Muted = "#000000", "#808080"
+	c.SetInputBoxTheme(theme)
+	c.EnablePixelDividers()
+	blocksExecution(c, "first", "out\r\n", "1")
+	blocksExecution(c, "second", "out\r\n", "0")
+	blocksPrompt(c, "input")
+	wire := newDividerWire(9, 19)
+	wire.settle(t, c, out)
+	uploads := wire.uploads
+	var before dividerWirePlacement
+	for _, placement := range wire.placements {
+		before = placement
+	}
+	theme.Background = "#ffffff"
+	c.SetInputBoxTheme(theme)
+	c.ComposeUI(func() []byte { return nil })
+	wire.settle(t, c, out)
+	if wire.uploads != uploads+1 || len(wire.images) != 1 {
+		t.Fatal("background-only palette switch must replace, not retain or leak, the old divider image")
+	}
+	for _, image := range wire.images {
+		if !bytes.Equal(image.data[:3], []byte{191, 191, 191}) {
+			t.Fatalf("replacement image retained the old background color: %v", image.data[:3])
+		}
+	}
+	if len(wire.placements) != 1 {
+		t.Fatal("theme refresh did not restore exactly one boundary")
+	}
+	for _, placement := range wire.placements {
+		if placement != before {
+			t.Fatalf("theme refresh moved the boundary: before=%+v after=%+v", before, placement)
+		}
+	}
+}
+
 func TestDividerReportsFramingAndOwnership(t *testing.T) {
-	for _, report := range []string{"\x1b_Gi=555;OK\x1b\\", "\x1b_Gi=777,I=666;OK\x1b\\", "\x1b[6;19;9t", "\x1b[4;927;881t", "\x1b]1337;ReportCellSize=33.0;10.0;1.0\x1b\\", "\x1b]1337;ReportCellSize=33.0;10.0\x07", "\x1b[?62;4c"} {
+	for _, report := range []string{"\x1b_Gi=555;OK\x1b\\", "\x1b_Gi=777,I=666;OK\x1b\\", "\x1b[6;19;9t", "\x1b]1337;ReportCellSize=33.0;10.0;1.0\x1b\\", "\x1b]1337;ReportCellSize=33.0;10.0\x07", "\x1b[?62;4c"} {
 		for split := 0; split <= len(report); split++ {
 			c, _ := blocksFixture(t, "")
 			c.dividerPixels = pixelDividers{enabled: true, probe: 555, upload: 666}
@@ -276,6 +409,10 @@ func TestDividerReportsFramingAndOwnership(t *testing.T) {
 	unowned := "\x1b_Gi=999,I=888;OK\x1b\\"
 	if got := f.FilterInput([]byte(unowned), c, false, false); string(got) != unowned {
 		t.Fatalf("application's graphics response was stolen: %q", got)
+	}
+	frame := "\x1b[4;927;881t"
+	if got := f.FilterInput([]byte(frame), c, false, false); string(got) != frame {
+		t.Fatalf("unrequested application frame report was stolen: %q", got)
 	}
 	paste := "\x1b[200~\x1b_Gi=555;OK\x1b\\\x1b[6;19;9t\x1b]1337;ReportCellSize=33;10;2\x07\x1b[201~"
 	for split := 0; split <= len(paste); split++ {
@@ -390,19 +527,19 @@ func TestDividerITermGeometryPrecedenceAndOwnership(t *testing.T) {
 	}
 }
 
-func TestInteractiveBlocksPixelDividerITermFrameAllocationBound(t *testing.T) {
+func TestInteractiveBlocksPixelDividerScaleCannotExpandGrid(t *testing.T) {
 	c, out := blocksFixture(t, "")
 	c.EnablePixelDividers()
 	blocksExecution(c, "first", "out\r\n", "0")
 	blocksExecution(c, "second", "out\r\n", "0")
 	blocksPrompt(c, "input")
 	var filter terminalInputFilter
-	// Individually finite cell dimensions can coexist with an absurd scale.
-	// Applying that scale to window geometry must not cause a huge image.
-	reports := fmt.Sprintf("\x1b_Gi=%d;OK\x1b\\\x1b]1337;ReportCellSize=0.000000033;0.00000001;1000000000\x07\x1b[4;927;881t\x1b[?64c", c.dividerPixels.probe)
+	// Only converted cell pixels matter, not the frame size or backing scale
+	// independently. These finite cell dimensions are safe even at this scale.
+	reports := fmt.Sprintf("\x1b_Gi=%d;OK\x1b\\\x1b]1337;ReportCellSize=0.000000033;0.00000001;1000000000\x07\x1b[?64c", c.dividerPixels.probe)
 	filter.FilterInput([]byte(reports), c, false, true)
-	if strings.Contains(out.String(), "\x1b_Ga=t,") {
-		t.Fatal("untrusted window scale exceeded the image allocation budget")
+	if !strings.Contains(out.String(), ",f=24,s=600,v=1,") {
+		t.Fatal("safe cell geometry must allocate exactly the 60-column grid")
 	}
 }
 
