@@ -19,13 +19,13 @@ func TestFrecencyStoreConcurrentMigratedStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = seed.db.Exec(`WITH RECURSIVE n(x) AS (
+	_, err = seed.db.ExecContext(t.Context(), `WITH RECURSIVE n(x) AS (
 		VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500
 	) INSERT INTO history_events
 	(event_key, command, normalized_command, started_at, submitted_at, source, state)
 	SELECT 'fixture:'||x, 'fixture', 'fixture', '2026-10-21', '2026-10-21', 'vuja', 'submitted' FROM n`)
 	if err != nil {
-		seed.Close()
+		_ = seed.Close()
 		t.Fatal(err)
 	}
 	if err := seed.Close(); err != nil {
@@ -61,7 +61,7 @@ func TestFrecencyStoreConcurrentMigratedStartup(t *testing.T) {
 	}
 	defer store.Close()
 	var rows, changed int
-	if err := store.db.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (
+	if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*), COUNT(*) FILTER (
 		WHERE command <> 'fixture' OR normalized_command <> 'fixture'
 		OR source <> 'vuja' OR state <> 'submitted') FROM history_events`).Scan(&rows, &changed); err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestFrecencyStoreConcurrentMigratedStartup(t *testing.T) {
 		t.Fatalf("private database permissions not preserved: %v %v", info, err)
 	}
 	var synchronous int
-	if err := store.db.QueryRow(`PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 2 {
+	if err := store.db.QueryRowContext(t.Context(), `PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 2 {
 		t.Fatalf("startup must retain FULL durability: synchronous=%d err=%v", synchronous, err)
 	}
 }
@@ -112,7 +112,7 @@ func TestFrecencyStoreConcurrentStartupProcesses(t *testing.T) {
 		output := &bytes.Buffer{}
 		cmd.Stdout, cmd.Stderr = output, output
 		if err := cmd.Start(); err != nil {
-			input.Close()
+			_ = input.Close()
 			t.Errorf("start fixture process: %v", err)
 			continue
 		}
@@ -184,7 +184,7 @@ func TestFrecencyStoreConcurrentStartupRetention(t *testing.T) {
 				t.Cleanup(func() { _ = store.Close() })
 				stores = append(stores, store)
 			}
-			if _, err := stores[0].db.Exec(`WITH RECURSIVE n(x) AS (
+			if _, err := stores[0].db.ExecContext(t.Context(), `WITH RECURSIVE n(x) AS (
 				VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<256
 			) INSERT INTO history_events
 			(event_key, command, normalized_command, submitted_at, started_at, completed_at, exit_code, source, state)
@@ -244,13 +244,13 @@ func TestFrecencyStoreInitializationHonorsHeldWriterBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer holder.Rollback()
-	if _, err := holder.Exec(`UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
+	if _, err := holder.ExecContext(t.Context(), `UPDATE metadata SET value = value WHERE key = 'history_schema_version'`); err != nil {
 		t.Fatal(err)
 	}
 	// Constrain the fixture's connection policy, rather than waiting five
 	// seconds per regression. The constructor's normal policy is unchanged.
 	store.db.SetMaxOpenConns(1)
-	if _, err := store.db.Exec(`PRAGMA busy_timeout=50`); err != nil {
+	if _, err := store.db.ExecContext(t.Context(), `PRAGMA busy_timeout=50`); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
