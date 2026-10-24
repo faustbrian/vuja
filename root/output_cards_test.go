@@ -854,9 +854,6 @@ func TestInteractiveBlocksManagedSelectionPreservesHardFooterRows(t *testing.T) 
 	cardMouse(t, c, 0, x, y, true)
 	cardMouse(t, c, 32, 25, y2, true)
 	cardMouse(t, c, 0, 25, y2, false)
-	out.Reset()
-	filter := &terminalInputFilter{}
-	filter.FilterInput([]byte{3}, c, false, true)
 	assertExecutionClipboard(t, out.String(), "1ms\n"+strings.Repeat(" ", 6)+"exit 127 not found")
 }
 
@@ -877,9 +874,6 @@ func TestInteractiveBlocksManagedSelectionPreservesBlankGapRows(t *testing.T) {
 	cardMouse(t, c, 0, 2, y, true)
 	cardMouse(t, c, 32, 2, y+2, true)
 	cardMouse(t, c, 0, 2, y+2, false)
-	out.Reset()
-	filter := &terminalInputFilter{}
-	filter.FilterInput([]byte{3}, c, false, true)
 	assertExecutionClipboard(t, out.String(), "\n\n")
 }
 
@@ -1340,9 +1334,6 @@ func TestInteractiveBlocksSelectionUsesWholeWideGraphemes(t *testing.T) {
 	cardMouse(t, c, 0, x+1, y, true)
 	cardMouse(t, c, 32, x+2, y, true)
 	cardMouse(t, c, 0, x+2, y, false)
-	out.Reset()
-	filter := &terminalInputFilter{}
-	filter.FilterInput([]byte{3}, c, false, true)
 	assertExecutionClipboard(t, out.String(), "日本")
 }
 
@@ -1405,9 +1396,6 @@ func TestInteractiveBlocksInputSurfaceCanStillBeDragSelected(t *testing.T) {
 	cardMouse(t, c, 0, x, y, true)
 	cardMouse(t, c, 32, x+14, y, true)
 	cardMouse(t, c, 0, x+14, y, false)
-	out.Reset()
-	filter := &terminalInputFilter{}
-	filter.FilterInput([]byte{3}, c, false, true)
 	assertExecutionClipboard(t, out.String(), "input-to-select")
 }
 
@@ -1532,7 +1520,7 @@ func TestInteractiveBlocksEvictedHeaderKeepsCappedOutputAndWarning(t *testing.T)
 }
 
 func TestInteractiveBlocksMixedCtrlCCopiesThenForwardsFollowingInput(t *testing.T) {
-	c, out := blocksFixture(t, "")
+	c, out := blocksFixture(t, "[ui.chatbox]\ncopy-on-select=false\n")
 	blocksExecution(c, "mixed-command", "copy-this\r\n", "0")
 	blocksPrompt(c, "pending-input")
 	lines := terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24))
@@ -1596,9 +1584,6 @@ func TestInteractiveBlocksMultilineInputSelectionKeepsLineBreaks(t *testing.T) {
 	cardMouse(t, c, 0, x, y, true)
 	cardMouse(t, c, 32, x2, y2, true)
 	cardMouse(t, c, 0, x2, y2, false)
-	out.Reset()
-	filter := &terminalInputFilter{}
-	filter.FilterInput([]byte{3}, c, false, true)
 	assertExecutionClipboard(t, out.String(), "first-input"+strings.Repeat(" ", 45)+"\n  second-input")
 }
 
@@ -1707,11 +1692,6 @@ func TestInteractiveBlocksSelectionBesideDividerCopiesOnlyVisibleText(t *testing
 			if last < 59 && screen.CellAt(last+1, y).Style.Attrs&uv.AttrReverse != 0 {
 				t.Error("rule highlight extends beyond the selected columns")
 			}
-			out.Reset()
-			filter := &terminalInputFilter{}
-			if got := filter.FilterInput([]byte{3}, c, false, true); len(got) != 0 {
-				t.Error("copying selected rule text interrupted the shell")
-			}
 			assertExecutionClipboard(t, out.String(), "border-output"[:last-1])
 		})
 	}
@@ -1819,11 +1799,11 @@ func TestInteractiveBlocksPlainDragCopiesWithoutInterruptingTheShell(t *testing.
 	} {
 		filter.FilterInput([]byte(event), c, false, true)
 	}
-	out.Reset()
-	if got := filter.FilterInput([]byte{3}, c, false, true); len(got) > 0 {
-		t.Fatalf("copying drag selection interrupted shell: %q", got)
-	}
 	assertExecutionClipboard(t, out.String(), "select-me")
+	out.Reset()
+	if got := filter.FilterInput([]byte{3}, c, false, true); string(got) != "\x03" || strings.Contains(out.String(), "\x1b]52;") {
+		t.Fatalf("automatic selection copy consumed a later interrupt: %q", got)
+	}
 	if strings.Contains(ansi.Strip(out.String()), "[private command]") {
 		t.Fatal("selection replaced the shell's input")
 	}

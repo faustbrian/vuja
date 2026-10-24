@@ -69,6 +69,7 @@ type ChatboxConfig struct {
 	SurfaceWidth             string              `toml:"surface-width"`
 	OutputViewport           string              `toml:"output-viewport"`
 	OutputMouse              string              `toml:"output-mouse"`
+	CopyOnSelect             bool                `toml:"copy-on-select"`
 	OutputLines              int                 `toml:"output-lines"`
 	OutputCheckpoints        string              `toml:"output-checkpoints"`
 	OutputCheckpointInterval Duration            `toml:"output-checkpoint-interval"`

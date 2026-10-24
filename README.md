@@ -700,8 +700,11 @@ input background extend into the terminal's existing side margins. Blocks defaul
 to `output-mouse = "interact"`: click to activate a block, then use the wheel or
 Page Up/Page Down to scroll its output. Click outside a block, press Escape, or
 start typing to return focus to the shell; unfocused wheel input browses history.
-Plain dragging selects text without a modifier. Ctrl+C copies a nonempty managed
-selection; otherwise it remains the normal interrupt. This selection belongs to
+Plain dragging selects text without a modifier and copies it when the mouse is
+released. Ctrl+C remains the normal interrupt. Set `copy-on-select = false` in
+`[ui.chatbox]` to copy a nonempty managed selection only when pressing Ctrl+C;
+without a selection it still interrupts. Automatic copying is the default
+(`copy-on-select = true`). This selection belongs to
 Vuja, not the terminal's native selection menus or platform shortcuts. Search and
 legacy text-only views return pointer selection to the terminal.
 Set `output-mouse = "select"` to leave ordinary drag selection to the terminal;

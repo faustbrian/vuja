@@ -243,6 +243,7 @@ type terminalChatboxConfig struct {
 	SurfaceWidth             string
 	OutputViewport           string
 	OutputMouse              string
+	CopyOnSelect             bool
 	OutputLines              int
 	OutputCheckpoints        string
 	OutputCheckpointInterval time.Duration
@@ -920,6 +921,7 @@ func (c *terminalCompositor) SetChatboxConfig(chatbox terminalChatboxConfig) {
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,
+		CopyOnSelect:             chatbox.CopyOnSelect,
 		OutputLines:              chatbox.OutputLines,
 		OutputCheckpoints:        chatbox.OutputCheckpoints,
 		OutputCheckpointInterval: chatbox.OutputCheckpointInterval,

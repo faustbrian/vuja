@@ -774,7 +774,7 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 		return false
 	}
 	s := &c.viewport.cards
-	if string(data) == "\x03" && s.selection != nil && s.selection.dragged {
+	if !c.chatboxConfig.CopyOnSelect && string(data) == "\x03" && s.selection != nil && s.selection.dragged {
 		if text := s.selection.text(); text != "" {
 			c.copyCardText(text)
 			c.viewport.dirty = true
@@ -890,10 +890,16 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 				s.selection.last = point
 				s.selection.dragged = s.selection.dragged || point != s.selection.first
 			}
-			if p := s.press; p != nil && p.point == point && s.selection != nil && !s.selection.dragged && p.target != nil {
-				if p.action == 1 {
+			if p := s.press; p != nil && s.selection != nil {
+				if s.selection.dragged {
+					if c.chatboxConfig.CopyOnSelect {
+						if text := s.selection.text(); text != "" {
+							c.copyCardText(text)
+						}
+					}
+				} else if p.point == point && p.target != nil && p.action == 1 {
 					c.copyCardOutput(p.target)
-				} else if p.action == 2 {
+				} else if p.point == point && p.target != nil && p.action == 2 {
 					c.exportOutputSnapshot(*p.target)
 				}
 			}

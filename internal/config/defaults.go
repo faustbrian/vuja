@@ -35,6 +35,7 @@ func DefaultConfig() *Config {
 				SurfaceWidth:             "full-width",
 				OutputViewport:           "pinned",
 				OutputMouse:              "interact",
+				CopyOnSelect:             true,
 				OutputLines:              2000,
 				OutputCheckpoints:        "completed",
 				OutputCheckpointInterval: Duration(5 * time.Second),

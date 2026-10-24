@@ -2195,6 +2195,7 @@ func terminalChatboxConfigFromConfig(cfg *config.Config) terminalChatboxConfig {
 		SurfaceWidth:             chatbox.SurfaceWidth,
 		OutputViewport:           chatbox.OutputViewport,
 		OutputMouse:              chatbox.OutputMouse,
+		CopyOnSelect:             chatbox.CopyOnSelect,
 		OutputLines:              chatbox.OutputLines,
 		OutputCheckpoints:        chatbox.OutputCheckpoints,
 		OutputCheckpointInterval: time.Duration(chatbox.OutputCheckpointInterval),
