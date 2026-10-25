@@ -113,7 +113,7 @@ jobs:
           mapfile -t NIGHTLIES < <(
             gh api --paginate \
               "repos/${{ github.repository }}/releases?per_page=100" \
-              --jq '.[] | select(.prerelease == true and (.tag_name | test("-nightly\\.[0-9a-f]+$"))) | .tag_name'
+              --jq '.[] | select(.prerelease == true and (.tag_name | test("-nightly\\.([0-9a-f]+|g0[0-9]+)$"))) | .tag_name'
           )
 
           if (( ${#NIGHTLIES[@]} <= NIGHTLY_RETENTION )); then

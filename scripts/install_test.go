@@ -31,6 +31,28 @@ type installerReleaseAsset struct {
 	URL  string `json:"browser_download_url"`
 }
 
+func TestInstallerAcceptsGeneratedNumericSHANightly(t *testing.T) {
+	generated, err := exec.CommandContext(t.Context(), "bash", "nightly-version.sh", "", "0123456").CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate nightly: %v: %s", err, generated)
+	}
+	tag := strings.TrimSpace(string(generated))
+	archiveName := fmt.Sprintf("vuja_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := newInstallerReleaseServer(t, archiveName, []installerRelease{{TagName: tag, Prerelease: true}})
+	installDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "install.sh")
+	cmd.Env = append(installerTestEnvironment(), "BIN_DIR="+installDir, "HOME="+t.TempDir(), "VUJA_API_URL="+server.URL, "VUJA_CHANNEL=nightly")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install generated nightly: %v: %s", err, output)
+	}
+	installed, err := os.ReadFile(filepath.Join(installDir, "vuja"))
+	if err != nil || !strings.Contains(string(installed), tag) {
+		t.Fatalf("installed fixture does not match generated version %q: %v", tag, err)
+	}
+}
+
 func TestInstallerSelectsExplicitReleaseChannel(t *testing.T) {
 	t.Parallel()
 

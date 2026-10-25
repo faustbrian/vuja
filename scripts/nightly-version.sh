@@ -34,4 +34,10 @@ if [[ -n "$base" ]]; then
   next="v2.$minor.$patch"
 fi
 
-printf '%s-nightly.%s\n' "$next" "$2"
+short=$2
+# SemVer 2.0.0 section 9 forbids leading zeroes in numeric prerelease IDs.
+# Keep ordinary hashes unchanged; make this rare numeric partition nonnumeric.
+if [[ "$short" =~ ^0[0-9]+$ ]]; then
+  short="g$short"
+fi
+printf '%s-nightly.%s\n' "$next" "$short"

@@ -44,6 +44,7 @@ func TestSetupPreventsDuplicateZshInitialization(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	isolateZshStartup(t, homeDir)
 
 	counterFile := filepath.Join(tempDir, "zsh-starts")
 	rcContent := "print started >> " + shellQuote(counterFile) + "\n" +
@@ -147,6 +148,7 @@ func testWrapperSession(t *testing.T, shell string) {
 	rcFile := ".bashrc"
 	rcContent := "PS1='vuja-e2e> '\nPROMPT_COMMAND=\n"
 	if shell == "zsh" {
+		isolateZshStartup(t, homeDir)
 		rcFile = ".zshrc"
 		rcContent = "PROMPT='vuja-e2e> '\nRPROMPT=\n"
 	}
@@ -362,4 +364,15 @@ func cleanEnvironment() []string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func isolateZshStartup(t *testing.T, homeDir string) {
+	t.Helper()
+	// ZDOTDIR alone still reads global interactive rc files before .zshrc.
+	// Keep the fixture's rc and hooks, not runner-global compinit prompts;
+	// do not bypass compaudit or change permissions outside the fixture.
+	// See zsh.sourceforge.io/Doc/Release/Files.html (RCS and GLOBAL_RCS).
+	if err := os.WriteFile(filepath.Join(homeDir, ".zshenv"), []byte("unsetopt GLOBAL_RCS\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 }

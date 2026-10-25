@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,6 +19,25 @@ import (
 
 	"github.com/faustbrian/vuja/v2/internal/config"
 )
+
+func TestGeneratedNightlyAcceptedByUpdater(t *testing.T) {
+	for _, sha := range []string{"abc123", "1234567", "0123456", "0", "0abc12"} {
+		t.Run(sha, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "bash", "../scripts/nightly-version.sh", "", sha)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generate nightly: %v: %s", err, output)
+			}
+			release := releaseInfo{TagName: strings.TrimSpace(string(output)), Prerelease: true}
+			if !releaseMatchesChannel(release, "nightly") || releaseMatchesChannel(release, "stable") || releaseMatchesChannel(release, "rc") {
+				t.Fatalf("generated nightly has incorrect channel eligibility: %q", release.TagName)
+			}
+			if !isNewerForChannel("v1.0.0", release.TagName, "nightly") {
+				t.Fatalf("generated v2 nightly cannot update v1: %q", release.TagName)
+			}
+		})
+	}
+}
 
 func TestIsNewer(t *testing.T) {
 	tests := []struct {
