@@ -155,6 +155,99 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  benchmark-evidence:
+    name: Release benchmark evidence
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Prepare isolated evidence workspace
+        shell: bash
+        run: |
+          umask 077
+          evidence="$RUNNER_TEMP/vuja-release-evidence"
+          mkdir -p "$evidence/reports"
+          printf 'EVIDENCE_ROOT=%s\n' "$evidence" >> "$GITHUB_ENV"
+          for assignment in GOCACHE=go-cache GOMODCACHE=go-mod GOTMPDIR=go-tmp \
+            HOME=home ZDOTDIR=home XDG_CONFIG_HOME=config XDG_DATA_HOME=data \
+            XDG_CACHE_HOME=cache XDG_RUNTIME_DIR=runtime; do
+            name=${assignment%%=*}
+            directory=${assignment#*=}
+            mkdir -p "$evidence/$directory"
+            printf '%s=%s/%s\n' "$name" "$evidence" "$directory" >> "$GITHUB_ENV"
+          done
+
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Record benchmark environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            go version
+            uname -a
+            lscpu
+            free -h
+            uptime
+          } | tee "$EVIDENCE_ROOT/reports/environment.txt"
+
+      - name: Measure release workloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in "${!VUJA_@}"; do unset "$variable"; done
+          measure() {
+            local report=$1
+            shift
+            printf '%q ' "$@" | tee "$EVIDENCE_ROOT/reports/$report.txt"
+            printf '\n' | tee -a "$EVIDENCE_ROOT/reports/$report.txt"
+            "$@" 2>&1 | tee -a "$EVIDENCE_ROOT/reports/$report.txt"
+          }
+          measure canonical go test -run '^$' \
+            -bench '^BenchmarkCanonicalHistory(ColdPublish100K|ColdStoreLoad100K|WarmSSHPrefix100K|IncrementalSSHPrefix100K)$' \
+            -count=3 -benchmem ./integration ./root
+          # The fixture reuses IDs after 1,024 operations; stay on new-event
+          # publication, not the separate recency-correction rebuild path.
+          measure submission go test -run '^$' \
+            -bench '^BenchmarkCanonicalHistoryPublishSubmission100K$' \
+            -benchtime=100x -count=5 -benchmem ./integration
+          measure suggestions go test -run '^$' \
+            -bench 'Benchmark(ScoreCandidates|FileGeneratorPrefix|Search.*RichHistory.*10K)$' \
+            -count=5 -benchmem ./internal/scoring ./spec ./integration
+          measure terminal go test -run '^$' \
+            -bench 'Benchmark(Chatbox|MergeResults|Prompt|Repository|Status|SuggestionPipeline|System)' \
+            -count=5 -benchmem ./root
+          measure retained go test ./internal/vt -run '^$' \
+            -bench '^BenchmarkRetainedSession(Footprint|Resize)$' \
+            -benchtime=1x -count=3 -benchmem
+
+      - name: Preserve benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/vuja-release-evidence/reports
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove isolated evidence workspace
+        if: always()
+        shell: bash
+        run: |
+          test -n "$RUNNER_TEMP" && test -d "$RUNNER_TEMP"
+          evidence="$RUNNER_TEMP/vuja-release-evidence"
+          rm -rf -- "$evidence"
+
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -162,6 +255,7 @@ jobs:
       - quality
       - compatibility
       - distribution
+      - benchmark-evidence
     runs-on: ubuntu-latest
     environment:
       name: release

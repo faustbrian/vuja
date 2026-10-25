@@ -27,11 +27,22 @@ verification.
 Run and retain the output for the release commit:
 
 ```bash
-go test -run '^$' -bench 'BenchmarkCanonicalHistory' -benchmem ./integration ./root
+go test -run '^$' -bench '^BenchmarkCanonicalHistory(ColdPublish100K|ColdStoreLoad100K|WarmSSHPrefix100K|IncrementalSSHPrefix100K)$' -count=3 -benchmem ./integration ./root
+go test -run '^$' -bench '^BenchmarkCanonicalHistoryPublishSubmission100K$' -benchtime=100x -count=5 -benchmem ./integration
 go test -run '^$' -bench 'Benchmark(ScoreCandidates|FileGeneratorPrefix|Search.*RichHistory.*10K)$' -benchmem -count=5 ./internal/scoring ./spec ./integration
 go test -run '^$' -bench 'Benchmark(Chatbox|MergeResults|Prompt|Repository|Status|SuggestionPipeline|System)' -benchmem -count=5 ./root
 go test ./internal/vt -run '^$' -bench '^BenchmarkRetainedSession(Footprint|Resize)$' -benchtime=1x -count=3 -benchmem
 ```
+
+The Release workflow records these workloads on tag pushes or manual dispatch,
+with the exact commit, Go version and runner environment in a seven-day
+`release-evidence-<commit>` artifact. Tag publication depends on that evidence
+job succeeding. Measurements are not automatic wall-clock qualification:
+inspect the recorded machine/load and keep native-terminal acceptance separate.
+The submission fixture cycles execution IDs after 1,024 operations, so its
+explicit 100-operation run measures new-event publication rather than repeated
+recency corrections. The store-load fixture reuses an open database; it does
+not measure cold-machine disk startup or migration time.
 
 - [ ] Histories with at least 100,000 events and 10,000 distinct commands stay
       within the documented lookup and publication budgets.
