@@ -396,7 +396,7 @@ func (s *Screen) resizeRetained(width, height int, pending bool, tracked *uv.Pos
 	start = max(start, cur.Y-height+1)
 	start = max(start, min(clearFloor, cur.Y))
 	if sb := s.scrollback; sb != nil {
-		sb.replaceRetained(physical[:start])
+		sb.replaceOwnedRetained(physical[:start])
 	}
 	s.buf = uv.NewRenderBuffer(width, height)
 	s.wrap, s.used = make([]int, height), make([]int, height)

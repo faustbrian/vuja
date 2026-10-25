@@ -203,7 +203,7 @@ func (s *Scrollback) Clear() {
 	s.truncated = false
 }
 
-func (s *Scrollback) replaceRetained(rows []retainedRow) {
+func (s *Scrollback) replaceOwnedRetained(rows []retainedRow) {
 	s.lines, s.wrap, s.used = nil, nil, nil
 	s.rowCosts = s.rowCosts[:0]
 	s.cost, s.logicalLines = 0, 0
@@ -220,7 +220,16 @@ func (s *Scrollback) replaceRetained(rows []retainedRow) {
 		// Resize already knows all fragments of this logical line. Allocate
 		// its final storage once, not a clone and growing append per column
 		// when the temporary drawing width happens to be one.
-		line := make(uv.Line, size)
+		// resizeRetained is the sole caller: layout fragments borrow its new
+		// defensive logical projection, never the old authoritative cells.
+		// Transfer a complete single-fragment line instead of cloning it again.
+		// Wrapped, partial and padded fragments still need reconstruction.
+		line := rows[first].cells
+		if end != first+1 || rows[first].wrap != 0 || len(line) != size {
+			line = make(uv.Line, size)
+		} else {
+			line = line[:size:size]
+		}
 		base, used, wrap := 0, 0, 0
 		for _, row := range rows[first:end] {
 			last := min(len(row.cells), max(contentWidth(row.cells), row.used, row.wrap))

@@ -88,6 +88,46 @@ its cost grows with retained content. These results prove neither a
 zero-allocation hot path nor smooth live resizing at the largest setting.
 There is no noisy wall-clock assertion pretending to enforce such a guarantee.
 
+## v2 stabilization measurement
+
+On 2026-10-25, Go 1.26.10, darwin/arm64, Apple M4 Max (16 logical CPUs,
+128 GiB RAM), the same footprint and four-size resize workloads were run with
+three one-operation samples. The baseline was `b54ed23c`; the candidate uses
+the owned-whole-row transfer in `replaceOwnedRetained`. The SDK files owning
+resize were unchanged between that baseline and the subsequent module-path
+migration. Both measurements used `GOMAXPROCS=16`. Host load was uncontrolled
+(roughly 90 at baseline and 194 at candidate), so timings are descriptive and
+must not be interpreted as a reliable latency comparison.
+
+| Seeded logical rows | Baseline allocation / cycle | Candidate allocation / cycle | Baseline objects / cycle | Candidate objects / cycle |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 9,382,056 B | 8,071,336 B | 2,297 | 2,137 |
+| 1,000 | 88,363,304–88,363,416 B | 72,306,984 B | 20,387–20,388 | 18,427 |
+| 10,000 | 885,951,016–885,951,352 B | 722,438,712–722,438,808 B | 200,567–200,570 | 180,608 |
+
+At 10,000 rows this removes about 18% of cumulative resize allocation. The
+candidate's four-size cycle took 144–164 ms versus 169–188 ms at baseline,
+but the different host loads prevent a latency guarantee. Profiles include
+setup and final semantic comparisons as well as resize; their total bytes
+must not be substituted for the timed benchmark's `B/op`.
+
+The owning resize operation already creates a defensive logical projection.
+A complete single-fragment historical line can take ownership of that new
+storage rather than clone every styled cell a second time. Wrapped, partial
+and padded fragments still reconstruct their storage, and the new slice's
+capacity cannot reach neighboring cells. The live canvas and externally
+returned projections remain independent. A focused allocation regression
+distinguishes per-row cell cloning from metadata-array growth; it is not a
+universal memory ceiling.
+
+The footprint workload still plateaus at approximately 132.41–132.45 MB of
+live Go heap for both 10,000 and 100,000 input lines, with 8,594 retained rows
+and 1,048,466 bytes of accounted text/link/placeholder content. This change
+reduces transient resize work, **not** steady-state retained heap or measured
+process RSS. Full SDK tests, targeted race tests and semantic-text assertions
+accompany the measurements; compositor consumers and live-terminal acceptance
+remain separate checks.
+
 ## Correctness and remaining boundaries
 
 Separate regressions exercise narrow/wide and height changes, pending and saved
