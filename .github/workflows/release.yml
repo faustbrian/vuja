@@ -89,7 +89,7 @@ jobs:
         run: brew install fish
 
       - name: Exercise shell and terminal contracts
-        run: go test ./integration/shell ./internal/vt ./root
+        run: go test ./integration/shell ./internal/vt ./root ./scripts
 
   distribution:
     name: Distribution (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -413,10 +413,10 @@ jobs:
           QUALIFY_MODULE: ${{ matrix.module }}
         run: |
           set -euo pipefail
-          module_args=()
-          if [[ "$QUALIFY_MODULE" == true ]]; then module_args+=(--go-install); fi
-          bash scripts/qualify-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT" \
-            "$RELEASE_PLATFORM" "${module_args[@]}" 2>&1 | tee "$RUNNER_TEMP/vuja-native-qualification.txt"
+          # macOS Bash treats empty arrays as unset under nounset.
+          set -- "$RELEASE_TAG" "$RELEASE_COMMIT" "$RELEASE_PLATFORM"
+          if [[ "$QUALIFY_MODULE" == true ]]; then set -- "$@" --go-install; fi
+          bash scripts/qualify-release.sh "$@" 2>&1 | tee "$RUNNER_TEMP/vuja-native-qualification.txt"
 
       - name: Preserve native qualification evidence
         if: always()
