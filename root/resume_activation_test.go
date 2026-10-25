@@ -157,18 +157,21 @@ func TestCodexResumeUnsafeClickCanRetry(t *testing.T) {
 			server, dir := resumeFixtureServer(t)
 			target := server.Observe(testCodexResumeID)
 			var input bytes.Buffer
-			if err := dispatchResumeFixture(t, server, target, dir, state.busy, state.buffer, state.offset, &input); err == nil {
+			err := dispatchResumeFixture(t, server, target, dir, state.busy, state.buffer, state.offset, &input)
+			if err == nil {
 				t.Fatal("unsafe click falsely reports success")
 			}
 			if input.Len() != 0 {
 				t.Fatal("unsafe click wrote terminal input")
 			}
+			// handle writes the socket reply before publishing the separate
+			// notice; dispatch completion does not order notice delivery.
 			select {
-			case notice := <-server.Notices():
-				if notice == "" {
-					t.Fatal("rejection notice is empty")
+			case notice, open := <-server.Notices():
+				if !open || notice == "" || !strings.Contains(err.Error(), notice) {
+					t.Fatalf("rejection notice does not identify the failure: %q, %v", notice, err)
 				}
-			default:
+			case <-time.After(4 * time.Second):
 				t.Fatal("rejection has no terminal notice")
 			}
 			if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, &input); err != nil {
@@ -176,6 +179,12 @@ func TestCodexResumeUnsafeClickCanRetry(t *testing.T) {
 			}
 			if input.String() != "codex resume "+testCodexResumeID+"\r" {
 				t.Fatal("retry did not submit exactly one command")
+			}
+			if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, &input); err == nil {
+				t.Fatal("successful retry left the target executable")
+			}
+			if input.String() != "codex resume "+testCodexResumeID+"\r" {
+				t.Fatal("consumed retry submitted duplicate input")
 			}
 		})
 	}
