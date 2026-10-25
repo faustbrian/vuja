@@ -247,24 +247,29 @@ func TestCodexResumeShellOwnsWholeEditorAdmission(t *testing.T) {
 }
 
 func TestCodexResumeShellRejectsContinuationAndExpiredRequests(t *testing.T) {
-	f := newResumeShellFixture(t)
-	if _, err := f.terminal.Write([]byte("printf 'unfinished\n")); err != nil {
-		t.Fatal(err)
-	}
-	f.wait(t, "FIXTURE_EDITOR_READY")
-	f.snapshot(t, "")
-	f.wait(t, "FIXTURE_PREBUFFER:printf 'unfinished\n")
-	nonce := strings.Repeat("b", 32)
-	f.probe(t, nonce, time.Now().Add(3*time.Second))
-	f.wait(t, "VUJA_RESUME_RESULT:"+nonce+":nonempty")
-	if _, err := f.terminal.Write([]byte("\x03")); err != nil {
-		t.Fatal(err)
-	}
-	f.wait(t, "FIXTURE_EDITOR_READY")
-	f.snapshot(t, "")
-	f.probe(t, nonce, time.Now().Add(-time.Second))
-	f.wait(t, "VUJA_RESUME_RESULT:"+nonce+":expired")
-	f.snapshot(t, "")
+	// Admission rejection and expiry are independent states. A reply emitted
+	// inside the ZLE FD callback is not a completion barrier for Ctrl+C.
+	t.Run("continuation", func(t *testing.T) {
+		f := newResumeShellFixture(t)
+		if _, err := f.terminal.Write([]byte("printf 'unfinished\n")); err != nil {
+			t.Fatal(err)
+		}
+		f.wait(t, "FIXTURE_EDITOR_READY")
+		f.snapshot(t, "")
+		f.wait(t, "FIXTURE_PREBUFFER:printf 'unfinished\n")
+		nonce := strings.Repeat("b", 32)
+		f.probe(t, nonce, time.Now().Add(3*time.Second))
+		f.wait(t, "VUJA_RESUME_RESULT:"+nonce+":nonempty")
+		f.snapshot(t, "")
+		f.wait(t, "FIXTURE_PREBUFFER:printf 'unfinished\n")
+	})
+	t.Run("expired", func(t *testing.T) {
+		f := newResumeShellFixture(t)
+		nonce := strings.Repeat("b", 32)
+		f.probe(t, nonce, time.Now().Add(-time.Second))
+		f.wait(t, "VUJA_RESUME_RESULT:"+nonce+":expired")
+		f.snapshot(t, "")
+	})
 }
 
 func TestCodexResumeShellSocketChecksActualEditorNotParentPrefix(t *testing.T) {
