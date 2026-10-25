@@ -246,6 +246,11 @@ jobs:
         run: |
           test -n "$RUNNER_TEMP" && test -d "$RUNNER_TEMP"
           evidence="$RUNNER_TEMP/vuja-release-evidence"
+          # Go module-cache directories are read-only (go.dev/ref/mod#module-cache).
+          # Restore owner write only for this disposable workspace before removal.
+          if test -d "$evidence/go-mod"; then
+            chmod -R u+w "$evidence/go-mod"
+          fi
           rm -rf -- "$evidence"
 
   release:
