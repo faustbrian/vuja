@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,8 +71,8 @@ func TestReleaseQualificationWorkflowForwardsOptionalModuleArgument(t *testing.T
 				t.Fatalf("workflow wrapper: %v\n%s", err, output)
 			}
 			if tc.exit != 0 {
-				exit, ok := err.(*exec.ExitError)
-				if !ok || exit.ExitCode() != tc.exit {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != tc.exit {
 					t.Fatalf("helper failure not propagated: %v\n%s", err, output)
 				}
 			}
