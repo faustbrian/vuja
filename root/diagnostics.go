@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"

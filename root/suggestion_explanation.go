@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 // These are the scorer's actual normalized signals, not execution counts,

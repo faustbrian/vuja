@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 // Exercise the actual generated shell sender and shared durable admission,

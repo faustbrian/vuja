@@ -3,7 +3,7 @@ package scoring
 import (
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/workspace"
+	"github.com/faustbrian/vuja/v2/internal/workspace"
 )
 
 func TestApplyContextRules_MultiEcosystem(t *testing.T) {

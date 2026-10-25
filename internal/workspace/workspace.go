@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/health"
 )
 
 type WorkspaceInfo struct {

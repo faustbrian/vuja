@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/v2/integration"
 )
 
 func TestNativeHistoryRecordContainsOnlyTheAcceptedCommand(t *testing.T) {

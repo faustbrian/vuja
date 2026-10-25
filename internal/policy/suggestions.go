@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 )
 
 // HistoryCommand is the single privacy gate for command-history data. It

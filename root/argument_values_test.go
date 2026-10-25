@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 func TestLearnedArgumentSuggestionsCompleteCurrentSlot(t *testing.T) {

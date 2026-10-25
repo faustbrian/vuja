@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/commands/fs"
+	"github.com/faustbrian/vuja/v2/commands/fs"
 )
 
 func TestZoxideGenerator(t *testing.T) {

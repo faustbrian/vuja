@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 )
 
 // Measure model ingestion separately from physical rendering, input, setup,

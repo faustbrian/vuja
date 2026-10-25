@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/health"
 )
 
 func TestFileGeneratorHealthDistinguishesEmptyMissingFailedAndCancelled(t *testing.T) {

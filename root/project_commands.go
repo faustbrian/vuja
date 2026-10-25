@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/cachemetrics"
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/internal/workspace"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/cachemetrics"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/workspace"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 type projectCommandCacheEntry struct {

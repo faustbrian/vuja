@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // QA scenario 5: an asynchronous refresh must not transfer execution authority

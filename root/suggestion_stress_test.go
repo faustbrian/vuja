@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/scoring"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // QA scenario 8: provider enumeration is not ranking evidence. Keep meaningful

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/health"
 )
 
 func Environment(t *testing.T) string {

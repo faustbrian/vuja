@@ -3,8 +3,8 @@ package git
 import (
 	"testing"
 
-	"github.com/faustbrian/vuja/spec"
-	"github.com/faustbrian/vuja/tests/providerfixture"
+	"github.com/faustbrian/vuja/v2/spec"
+	"github.com/faustbrian/vuja/v2/tests/providerfixture"
 )
 
 func TestGitHealthKeepsActualInventoriesSeparate(t *testing.T) {

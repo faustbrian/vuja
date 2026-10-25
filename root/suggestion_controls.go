@@ -12,9 +12,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/faustbrian/vuja/integration"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/policy"
+	"github.com/faustbrian/vuja/v2/integration"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/policy"
 	"golang.org/x/sys/unix"
 )
 

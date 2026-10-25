@@ -65,11 +65,14 @@ Prerelease channels are intended for validation and may contain regressions.
 ### Go install
 
 ```bash
-go install github.com/faustbrian/vuja/cmd/vuja@latest
+go install github.com/faustbrian/vuja/v2/cmd/vuja@latest
 vuja setup
 ```
 
 Ensure the Go binary directory is on `PATH` before running `vuja setup`.
+The `/v2` module path selects the v2 series once published. The unsuffixed
+path remains the v1 series; existing binaries, configuration, history paths,
+release archive names and repository URLs do not change with the module path.
 
 ### Build from source
 
@@ -1429,7 +1432,7 @@ coordination files, but diagnostics do not change canonical events or journals.
 Build a versioned release binary:
 
 ```bash
-just build-release v1.2.0
+just build-release v2.0.0
 ```
 
 `just reload` rebuilds the executable, updates an existing
@@ -1572,7 +1575,7 @@ Builds inject the release version with Go linker flags:
 
 ```bash
 go build \
-  -ldflags="-X github.com/faustbrian/vuja/root.Version=v1.2.0" \
+  -ldflags="-X github.com/faustbrian/vuja/v2/root.Version=v2.0.0" \
   -o vuja ./cmd/vuja
 ```
 

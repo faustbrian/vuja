@@ -17,7 +17,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	ansiparser "github.com/charmbracelet/x/ansi/parser"
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 	"golang.org/x/text/unicode/norm"
 )
 

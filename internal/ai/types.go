@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 type SourceType string

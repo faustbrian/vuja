@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 const DirectoryRecentWindow = 14 * 24 * time.Hour

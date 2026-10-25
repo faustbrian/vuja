@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/faustbrian/vuja/commands/ops"
-	"github.com/faustbrian/vuja/spec"
+	_ "github.com/faustbrian/vuja/v2/commands/ops"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestSshHostGenerator(t *testing.T) {

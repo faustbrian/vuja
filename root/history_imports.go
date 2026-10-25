@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/logger"
-	"github.com/faustbrian/vuja/internal/policy"
-	"github.com/faustbrian/vuja/internal/scoring"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/integration"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/logger"
+	"github.com/faustbrian/vuja/v2/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func configuredHistoryIntegrationsEnabled() bool {

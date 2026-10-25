@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/cachemetrics"
+	"github.com/faustbrian/vuja/v2/internal/cachemetrics"
 )
 
 type gitStatusSnapshot struct {

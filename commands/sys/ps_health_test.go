@@ -3,7 +3,7 @@ package sys
 import (
 	"testing"
 
-	"github.com/faustbrian/vuja/tests/providerfixture"
+	"github.com/faustbrian/vuja/v2/tests/providerfixture"
 )
 
 func TestProcessHealthReportsInventoryWithoutSendingSignals(t *testing.T) {

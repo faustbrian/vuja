@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/vt"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/vt"
+	"github.com/faustbrian/vuja/v2/spec"
 	"github.com/muesli/termenv"
 )
 

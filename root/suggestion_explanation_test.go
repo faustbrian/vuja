@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/scoring"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestVisibleSuggestionsCarryActualRankingContributions(t *testing.T) {

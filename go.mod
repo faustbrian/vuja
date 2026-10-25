@@ -1,4 +1,4 @@
-module github.com/faustbrian/vuja
+module github.com/faustbrian/vuja/v2
 
 go 1.26.10
 

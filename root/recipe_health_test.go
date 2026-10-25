@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/commands/js"
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/commands/js"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestSessionHealthManifestFailureSurvivesUnrelatedRecipeSuccess(t *testing.T) {

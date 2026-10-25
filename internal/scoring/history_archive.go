@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/faustbrian/vuja/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/policy"
 )
 
 const (

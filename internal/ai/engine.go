@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/internal/logger"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/logger"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 type suggestionCacheItem struct {

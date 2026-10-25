@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/integration"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 // QA 1/3/8: a committed exclusion remains readable even when canonical writes

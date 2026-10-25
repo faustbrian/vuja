@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/faustbrian/vuja/commands"
-	"github.com/faustbrian/vuja/spec"
+	_ "github.com/faustbrian/vuja/v2/commands"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestIntegration_ZoxideMultiWord(t *testing.T) {

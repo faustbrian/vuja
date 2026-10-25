@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func envVarGenerator(ctx context.Context, tokens []string, _ string, _ string) []spec.Suggestion {

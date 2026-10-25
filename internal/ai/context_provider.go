@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/workspace"
+	"github.com/faustbrian/vuja/v2/internal/workspace"
 )
 
 type CommandContextProvider struct {

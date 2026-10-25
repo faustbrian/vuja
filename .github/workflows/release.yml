@@ -46,6 +46,9 @@ jobs:
       - name: Scan reachable vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
+      - name: Install supported shells
+        run: sudo apt-get update && sudo apt-get install --yes fish zsh
+
       - name: Run tests
         run: go test -v ./...
 
@@ -53,11 +56,14 @@ jobs:
         run: go build ./...
 
   compatibility:
-    name: Compatibility (${{ matrix.os }})
+    name: Compatibility (${{ matrix.os }}, Go ${{ matrix.go }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        go:
+          - '1.26.10'
+          - '1.27.3'
         os:
           - ubuntu-latest
           - macos-latest
@@ -70,7 +76,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.10'
+          go-version: ${{ matrix.go }}
           check-latest: true
           cache-dependency-path: go.sum
 
@@ -83,7 +89,7 @@ jobs:
         run: brew install fish
 
       - name: Exercise shell and terminal contracts
-        run: go test ./integration/shell ./root
+        run: go test ./integration/shell ./internal/vt ./root
 
   distribution:
     name: Distribution (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -116,14 +122,24 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          VERSION=dev
+          VERSION="dev-${GITHUB_SHA::12}"
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME}"
           fi
           mkdir -p dist
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
-            -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${VERSION}" \
+            -ldflags="-s -w -X github.com/faustbrian/vuja/v2/root.Version=${VERSION}" \
             -trimpath -o dist/vuja ./cmd/vuja
+
+      - name: Verify native distribution version
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        shell: bash
+        run: |
+          EXPECTED="dev-${GITHUB_SHA::12}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            EXPECTED="${GITHUB_REF_NAME}"
+          fi
+          test "$(./dist/vuja version)" = "vuja ${EXPECTED}"
 
       - name: Stage distribution notices
         run: cp LICENSE THIRD_PARTY_NOTICES.md dist/

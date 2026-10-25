@@ -7,7 +7,7 @@ import (
 )
 
 // Version is the current build version, injected at release time via ldflags
-// e.g. go build -ldflags="-X github.com/faustbrian/vuja/root.Version=v1.2.0"
+// e.g. go build -ldflags="-X github.com/faustbrian/vuja/v2/root.Version=v2.0.0"
 var Version = "dev"
 
 func init() {

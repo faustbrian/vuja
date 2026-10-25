@@ -6,7 +6,7 @@ import (
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 )
 
 const outputModelGraphemeLimit = 512

@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 )
 
 func TestOutputToolsSearchOwnsQueryAndKeepsShellInput(t *testing.T) {

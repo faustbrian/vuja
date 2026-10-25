@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/logger"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/logger"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 // The same policy is applied at startup, completion, import refresh and

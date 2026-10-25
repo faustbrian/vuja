@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func BenchmarkScoreCandidates(b *testing.B) {

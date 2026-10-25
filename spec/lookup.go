@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/faustbrian/vuja/integration/shell"
-	"github.com/faustbrian/vuja/internal/logger"
+	"github.com/faustbrian/vuja/v2/integration/shell"
+	"github.com/faustbrian/vuja/v2/internal/logger"
 )
 
 var (

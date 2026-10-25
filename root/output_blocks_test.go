@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 )
 
 func blocksFixture(t *testing.T, document string) (*terminalCompositor, *bytes.Buffer) {

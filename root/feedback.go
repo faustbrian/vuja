@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/policy"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 type suggestionFeedbackSession struct {

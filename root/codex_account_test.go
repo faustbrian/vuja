@@ -12,7 +12,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 	"golang.org/x/sys/unix"
 )
 

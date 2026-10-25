@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/faustbrian/vuja/root"
+	"github.com/faustbrian/vuja/v2/root"
 )
 
 func main() {

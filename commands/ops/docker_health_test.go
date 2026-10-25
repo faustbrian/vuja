@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestDockerHealthKeepsInventoryOutcomesIndependent(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 	"github.com/spf13/cobra"
 )
 

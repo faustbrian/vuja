@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/logger"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/logger"
 	"github.com/spf13/cobra"
 	"golang.org/x/mod/semver"
 )

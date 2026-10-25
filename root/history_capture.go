@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/v2/integration"
 )
 
 type commandExecutionTracker struct {

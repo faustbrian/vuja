@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/spec"
-	"github.com/faustbrian/vuja/tests/providerfixture"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/spec"
+	"github.com/faustbrian/vuja/v2/tests/providerfixture"
 	"golang.org/x/sys/unix"
 )
 

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/faustbrian/vuja/commands/js"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/commands/js"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestNpmScriptGenerator(t *testing.T) {

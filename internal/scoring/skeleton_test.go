@@ -3,7 +3,7 @@ package scoring
 import (
 	"testing"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestExtractSkeleton(t *testing.T) {

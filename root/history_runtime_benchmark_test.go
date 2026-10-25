@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 func BenchmarkCanonicalHistoryColdStoreLoad100K(b *testing.B) {

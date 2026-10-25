@@ -47,22 +47,19 @@ jobs:
         with:
           version: v2.12.2
 
+      - name: Install supported shells
+        run: sudo apt-get update && sudo apt-get install --yes fish zsh
+
       - name: Run tests
         run: go test ./...
 
       - name: Get version info
         id: version
         run: |
-          BASE=$(git describe --tags --abbrev=0 --exclude="*-nightly*" 2>/dev/null || echo "v0.0.0")
-          VERSION_NUM=${BASE#v}
-          VERSION_NUM=${VERSION_NUM%%-*}
-          IFS='.' read -r major minor patch <<< "$VERSION_NUM"
-          if [[ "$BASE" != *-rc.* ]]; then
-            patch=$((patch + 1))
-          fi
-          NEXT_BASE="v${major}.${minor}.${patch}"
+          BASE=$(git describe --tags --abbrev=0 --match="v2.*" --exclude="*-nightly*" 2>/dev/null || true)
           SHORT=$(git rev-parse --short HEAD)
-          echo "version=${NEXT_BASE}-nightly.${SHORT}" >> "$GITHUB_OUTPUT"
+          VERSION=$(bash scripts/nightly-version.sh "$BASE" "$SHORT")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build binaries
         run: |
@@ -73,8 +70,12 @@ jobs:
             IFS=/ read -r GOOS GOARCH <<< "$platform"
 
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
-              -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version=${{ steps.version.outputs.version }}" \
+              -ldflags="-s -w -X github.com/faustbrian/vuja/v2/root.Version=${{ steps.version.outputs.version }}" \
               -trimpath -o "dist/vuja" ./cmd/vuja
+
+            if [[ "$GOOS/$GOARCH" == "linux/amd64" ]]; then
+              test "$(./dist/vuja version)" = "vuja ${{ steps.version.outputs.version }}"
+            fi
 
             cd dist
             tar -czf "vuja_${GOOS}_${GOARCH}.tar.gz" vuja LICENSE THIRD_PARTY_NOTICES.md

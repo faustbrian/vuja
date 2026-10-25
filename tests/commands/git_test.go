@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/faustbrian/vuja/commands"
-	"github.com/faustbrian/vuja/spec"
+	_ "github.com/faustbrian/vuja/v2/commands"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // setupGitRepo creates a real git repo in a temp dir with:

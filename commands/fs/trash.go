@@ -1,7 +1,7 @@
 package fs
 
 import (
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func init() {

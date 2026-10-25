@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 )
 
 func TestIsNewer(t *testing.T) {

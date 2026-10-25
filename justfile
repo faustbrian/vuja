@@ -21,10 +21,10 @@ optimized-build:
     @GOAMD64=v4 go build -ldflags="-s -w" -trimpath -o vuja ./cmd/vuja
 
 # build a versioned release binary
-# usage: just build-release v1.2.0
+# usage: just build-release v2.0.0
 [group('build')]
 build-release version:
-    @GOAMD64=v3 go build -pgo=auto -ldflags="-s -w -X github.com/faustbrian/vuja/root.Version={{ version }}" -trimpath -o vuja ./cmd/vuja
+    @GOAMD64=v3 go build -pgo=auto -ldflags="-s -w -X github.com/faustbrian/vuja/v2/root.Version={{ version }}" -trimpath -o vuja ./cmd/vuja
 
 # run vuja
 [group('dev')]
@@ -111,9 +111,9 @@ debug-notify version="v1.99.0":
     VUJA_PID="" VUJA_MOCK_LATEST_VERSION="{{ version }}" ./vuja
 
 # test the install script locally
-# usage: just debug-install v1.0.0
+# usage: just debug-install v2.0.0
 [group('debug')]
-debug-install version="v1.0.0":
+debug-install version="v2.0.0":
     #!/bin/sh
     PORT=19998
     TMP=$(mktemp -d)
@@ -143,7 +143,7 @@ debug-install version="v1.0.0":
     ARCHIVE_NAME="vuja_${OS}_${ARCH}.tar.gz"
 
     echo "building vuja ({{ version }}, ${OS}_${ARCH})..."
-    go build -ldflags="-X github.com/faustbrian/vuja/root.Version={{ version }}" -o "$TMP/vuja" ./cmd/vuja
+    go build -ldflags="-X github.com/faustbrian/vuja/v2/root.Version={{ version }}" -o "$TMP/vuja" ./cmd/vuja
 
     echo "packaging archive ($ARCHIVE_NAME)..."
     tar -czf "$TMP/$ARCHIVE_NAME" -C "$TMP" vuja

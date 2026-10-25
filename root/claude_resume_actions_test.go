@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/vt"
+	"github.com/faustbrian/vuja/v2/internal/vt"
 )
 
 func renderedClaudeResumeTarget(wire, id string) string {

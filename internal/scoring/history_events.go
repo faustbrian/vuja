@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/policy"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/policy"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 type HistoryEvent struct {

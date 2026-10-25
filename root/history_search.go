@@ -4,7 +4,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/v2/integration"
 )
 
 type historyScope = integration.HistoryScope

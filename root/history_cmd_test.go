@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/integration"
+	"github.com/faustbrian/vuja/v2/integration"
 )
 
 func TestHistoryExplainReportsTheActualPostRankingCount(t *testing.T) {

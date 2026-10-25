@@ -3,7 +3,7 @@ package ai
 import (
 	"strings"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 var DefaultProviders = []*CommandContextProvider{

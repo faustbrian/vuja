@@ -3,7 +3,7 @@ package root
 import (
 	"testing"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestSuggestionPipelineReusesAndNarrowsTheLastResultImmediately(t *testing.T) {

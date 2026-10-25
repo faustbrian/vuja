@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/policy"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/policy"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // QA scenario 5: controls must be discoverable at the actual suggestion surface,

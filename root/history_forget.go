@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 )

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"syscall"
 
-	_ "github.com/faustbrian/vuja/commands"
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/logger"
+	_ "github.com/faustbrian/vuja/v2/commands"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/logger"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )

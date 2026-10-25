@@ -3,7 +3,7 @@ package scoring
 import (
 	"strings"
 
-	"github.com/faustbrian/vuja/internal/workspace"
+	"github.com/faustbrian/vuja/v2/internal/workspace"
 )
 
 type ContextRule interface {

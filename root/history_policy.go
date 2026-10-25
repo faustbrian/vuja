@@ -3,7 +3,7 @@ package root
 import (
 	"strings"
 
-	"github.com/faustbrian/vuja/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/policy"
 )
 
 const (

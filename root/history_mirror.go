@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/config"
-	"github.com/faustbrian/vuja/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/policy"
 )
 
 // mirrorHistorySubmission appends only the command accepted by Vuja's history

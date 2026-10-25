@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/integration"
-	"github.com/faustbrian/vuja/internal/health"
-	"github.com/faustbrian/vuja/internal/scoring"
+	"github.com/faustbrian/vuja/v2/integration"
+	"github.com/faustbrian/vuja/v2/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/scoring"
 )
 
 const (

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/faustbrian/vuja/commands/runner"
-	"github.com/faustbrian/vuja/spec"
+	_ "github.com/faustbrian/vuja/v2/commands/runner"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // Verify that the just command generator parses recipes and returns nil on read errors

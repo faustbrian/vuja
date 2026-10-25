@@ -3,7 +3,7 @@ package root
 import (
 	"strings"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func handleShellControlMessage(message string) bool {

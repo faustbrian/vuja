@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/policy"
+	"github.com/faustbrian/vuja/v2/internal/policy"
 
 	_ "modernc.org/sqlite"
 )

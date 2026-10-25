@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/workspace"
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/internal/workspace"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 func TestScore_GitInitAndStatusInGitRepo(t *testing.T) {

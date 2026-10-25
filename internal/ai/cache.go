@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 type cacheEntry struct {

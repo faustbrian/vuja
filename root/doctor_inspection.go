@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 )
 
 // Shared facts serve the existing detailed doctor and the allowlisted support

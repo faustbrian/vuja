@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/faustbrian/vuja/internal/config"
+	"github.com/faustbrian/vuja/v2/internal/config"
 )
 
 func previewForTest(t *testing.T, cfg *config.Config, label string, width int, mode string) string {

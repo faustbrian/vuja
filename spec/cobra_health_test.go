@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/faustbrian/vuja/internal/health"
+	"github.com/faustbrian/vuja/v2/internal/health"
 )
 
 // The process boundary is replaced, not the parser/cache/observer path. No

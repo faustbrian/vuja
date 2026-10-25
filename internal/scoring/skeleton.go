@@ -3,7 +3,7 @@ package scoring
 import (
 	"strings"
 
-	"github.com/faustbrian/vuja/spec"
+	"github.com/faustbrian/vuja/v2/spec"
 )
 
 // ExtractSkeleton extracts the subcommand skeleton of a command string for transition tracking.
