@@ -15,6 +15,81 @@ import (
 
 const qualificationSource = "1234567890abcdef1234567890abcdef12345678"
 
+func TestReleaseQualificationWorkflowForwardsOptionalModuleArgument(t *testing.T) {
+	workflow, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute the actual literal run block, not a second copy of its logic.
+	// actionlint separately validates YAML; indentation bounds this shell block.
+	_, step, found := strings.Cut(string(workflow), "      - name: Qualify published release bytes\n")
+	if !found {
+		t.Fatal("qualification step missing")
+	}
+	_, block, found := strings.Cut(step, "        run: |\n")
+	if !found {
+		t.Fatal("qualification shell block missing")
+	}
+	var script strings.Builder
+	for _, line := range strings.Split(block, "\n") {
+		if line == "" {
+			script.WriteByte('\n')
+			continue
+		}
+		line, indented := strings.CutPrefix(line, "          ")
+		if !indented {
+			break
+		}
+		script.WriteString(line + "\n")
+	}
+	for _, tc := range []struct {
+		name, module string
+		exit         int
+	}{
+		{"archive only", "false", 0},
+		{"module too", "true", 0},
+		{"helper failure", "false", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "scripts"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			helper := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGUMENTS_FILE\"\nexit \"$STUB_EXIT\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "scripts", "qualify-release.sh"), []byte(helper), 0600); err != nil {
+				t.Fatal(err)
+			}
+			arguments := filepath.Join(dir, "arguments")
+			cmd := exec.CommandContext(t.Context(), "/bin/bash", "--noprofile", "--norc", "-c", script.String())
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "RUNNER_TEMP=" + dir, "ARGUMENTS_FILE=" + arguments,
+				"RELEASE_TAG=v2.0.0-rc.2", "RELEASE_COMMIT=" + qualificationSource,
+				"RELEASE_PLATFORM=darwin/arm64", "QUALIFY_MODULE=" + tc.module, fmt.Sprintf("STUB_EXIT=%d", tc.exit)}
+			output, err := cmd.CombinedOutput()
+			if tc.exit == 0 && err != nil {
+				t.Fatalf("workflow wrapper: %v\n%s", err, output)
+			}
+			if tc.exit != 0 {
+				exit, ok := err.(*exec.ExitError)
+				if !ok || exit.ExitCode() != tc.exit {
+					t.Fatalf("helper failure not propagated: %v\n%s", err, output)
+				}
+			}
+			got, err := os.ReadFile(arguments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "v2.0.0-rc.2\n" + qualificationSource + "\ndarwin/arm64\n"
+			if tc.module == "true" {
+				want += "--go-install\n"
+			}
+			if string(got) != want {
+				t.Fatalf("forwarded arguments %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestReleaseQualificationInstallsPinnedArchiveAndModule(t *testing.T) {
 	fixture := newQualificationFixture(t, "linux/amd64", "v2.0.0-rc.1")
 	output, err := fixture.run(t, "--go-install")
