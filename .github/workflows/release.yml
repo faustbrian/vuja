@@ -364,3 +364,72 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  native-qualification:
+    name: Native release (${{ matrix.platform }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            module: true
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            module: false
+          - platform: darwin/amd64
+            runner: macos-15-intel
+            module: false
+          - platform: darwin/arm64
+            runner: macos-15
+            module: false
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go for published module install
+        if: matrix.module
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Qualify published release bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          QUALIFY_MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          module_args=()
+          if [[ "$QUALIFY_MODULE" == true ]]; then module_args+=(--go-install); fi
+          bash scripts/qualify-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT" \
+            "$RELEASE_PLATFORM" "${module_args[@]}" 2>&1 | tee "$RUNNER_TEMP/vuja-native-qualification.txt"
+
+      - name: Preserve native qualification evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: native-qualification-${{ strategy.job-index }}-${{ github.sha }}
+          path: ${{ runner.temp }}/vuja-native-qualification.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove native qualification report
+        if: always()
+        shell: bash
+        run: |
+          test -n "$RUNNER_TEMP" && test -d "$RUNNER_TEMP"
+          rm -f -- "$RUNNER_TEMP/vuja-native-qualification.txt"

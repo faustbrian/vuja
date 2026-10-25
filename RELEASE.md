@@ -111,6 +111,20 @@ evidence. Existing installed-binary checks and model/PTY tests do not certify
 a different release artifact. Record native execution for each target
 separately from a successful cross-build.
 
+After protected publication, the Release workflow's four `Native release`
+jobs download the named tag's actual archives, verify their checksums and
+GitHub provenance against the release workflow, tag and source commit, and
+install them into empty private directories on matching native runners. The
+Linux amd64 leg also resolves and installs the explicit published Go module
+with independent caches outside the checkout. All four jobs must pass; their
+seven-day `native-qualification-*` artifacts record the versions, authenticated
+provenance and cleanup outcome. A failed download or verification is a failure,
+not a passing skip. A failed job can be rerun against the same immutable tag.
+
+These checks cover fresh private archive installation and CLI identity, not
+interactive `setup`, upgrades, schema migrations, physical terminal/clipboard
+acceptance or multi-day use. Those gates above remain independently required.
+
 ## 5. Candidate promotion
 
 Dogfood the release candidate for at least three days, including one long-lived
