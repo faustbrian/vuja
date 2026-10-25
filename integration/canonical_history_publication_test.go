@@ -171,9 +171,10 @@ func TestCanonicalHistoryUnmovedRepeatPreservesSearchGenerationAndUpdatesEvents(
 		t.Run(position, func(t *testing.T) {
 			now := time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC)
 			liveTime := now.Add(2 * time.Hour)
-			if position == "newest" {
+			switch position {
+			case "newest":
 				liveTime = now.Add(4 * time.Hour)
-			} else if position == "oldest" {
+			case "oldest":
 				liveTime = now
 			}
 			entries := []HistoryEntry{
