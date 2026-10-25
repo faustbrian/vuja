@@ -161,43 +161,66 @@ func TestNativeClaudeResumeWorktreeGrammar(t *testing.T) {
 
 // QA D: use public search/selection input and inspect their semantic payloads.
 func TestClaudeResumePaneConsumers(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	c, out := blocksFixture(t, "")
-	server, _ := resumeFixtureServer(t)
-	c.SetCodexResumeLinker(server.Observe)
-	blocksExecution(c, "claude", "owned-prefix\r\n\x1b[2;2Hprivate-canvas\r\nResume this session with:\r\n"+testClaudeResumeCommand+"\r\n", "0")
-	blocksPrompt(c, "keep-input")
-	y := terminalLineIndex(terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24)), testClaudeResumeCommand, 0)
-	if y < 0 {
-		t.Fatal("resume command is missing from selectable pane output")
-	}
-	cardMouse(t, c, 0, 0, y, true)
-	cardMouse(t, c, 32, 59, y, true)
-	cardMouse(t, c, 0, 59, y, false)
-	start := out.Len()
-	var input terminalInputFilter
-	if got := input.FilterInput([]byte{3}, c, false, true); len(got) != 0 {
-		t.Fatal("selected resume text became shell input")
-	}
-	assertExecutionClipboard(t, out.String()[start:], testClaudeResumeCommand)
-	input.FilterInput([]byte("\x1b[18~"+testClaudeResumeID), c, false, true)
-	if len(c.viewport.search.matches) != 1 {
-		t.Fatal("pane search lost the complete resume ID")
-	}
-	input.FilterInput([]byte("\x15private-canvas"), c, false, true)
-	if len(c.viewport.search.matches) != 0 {
-		t.Fatal("pane search retained private canvas contents")
-	}
-	path, err := writeRetainedOutputExport(retainedExecution{rows: withoutPaneDividers(c.viewport.frozen, c.viewport.frozenDividers), newline: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || !bytes.Contains(data, []byte(testClaudeResumeCommand)) || bytes.Contains(data, []byte("private-canvas")) || bytes.Contains(data, []byte("\x1b")) {
-		t.Fatal("pane export lost the resume command or included private canvas/control bytes")
-	}
-	if _, err := writeRetainedOutputExport(c.viewport.executions.retained[0]); err == nil {
-		t.Fatal("resume metadata enabled native per-execution export")
+	for _, automatic := range []bool{true, false} {
+		t.Run(fmt.Sprintf("automatic-%t", automatic), func(t *testing.T) {
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			c, out := blocksFixture(t, fmt.Sprintf("[ui.chatbox]\ncopy-on-select=%t\n", automatic))
+			server, _ := resumeFixtureServer(t)
+			c.SetCodexResumeLinker(server.Observe)
+			blocksExecution(c, "claude", "owned-prefix\r\n\x1b[2;2Hprivate-canvas\r\nResume this session with:\r\n"+testClaudeResumeCommand+"\r\n", "0")
+			blocksPrompt(c, "keep-input")
+			y := terminalLineIndex(terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24)), testClaudeResumeCommand, 0)
+			if y < 0 {
+				t.Fatal("resume command is missing from selectable pane output")
+			}
+			start := out.Len()
+			cardMouse(t, c, 0, 0, y, true)
+			cardMouse(t, c, 32, 59, y, true)
+			if strings.Contains(out.String()[start:], "\x1b]52;") {
+				t.Fatal("resume selection copied before release")
+			}
+			cardMouse(t, c, 0, 59, y, false)
+			if automatic {
+				assertExecutionClipboard(t, out.String()[start:], testClaudeResumeCommand)
+			} else if strings.Contains(out.String()[start:], "\x1b]52;") {
+				t.Fatal("manual resume selection copied on release")
+			}
+			start = out.Len()
+			var input terminalInputFilter
+			want := "next"
+			if automatic {
+				want = "\x03next"
+			}
+			if got := input.FilterInput([]byte("\x03next"), c, false, true); string(got) != want {
+				t.Fatalf("resume selection changed subsequent shell input: got %q, want %q", got, want)
+			}
+			if automatic {
+				if strings.Contains(out.String()[start:], "\x1b]52;") {
+					t.Fatal("interrupt copied the resume selection twice")
+				}
+			} else {
+				assertExecutionClipboard(t, out.String()[start:], testClaudeResumeCommand)
+			}
+			input.FilterInput([]byte("\x1b[18~"+testClaudeResumeID), c, false, true)
+			if len(c.viewport.search.matches) != 1 {
+				t.Fatal("pane search lost the complete resume ID")
+			}
+			input.FilterInput([]byte("\x15private-canvas"), c, false, true)
+			if len(c.viewport.search.matches) != 0 {
+				t.Fatal("pane search retained private canvas contents")
+			}
+			path, err := writeRetainedOutputExport(retainedExecution{rows: withoutPaneDividers(c.viewport.frozen, c.viewport.frozenDividers), newline: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(data, []byte(testClaudeResumeCommand)) || bytes.Contains(data, []byte("private-canvas")) || bytes.Contains(data, []byte("\x1b")) {
+				t.Fatal("pane export lost the resume command or included private canvas/control bytes")
+			}
+			if _, err := writeRetainedOutputExport(c.viewport.executions.retained[0]); err == nil {
+				t.Fatal("resume metadata enabled native per-execution export")
+			}
+		})
 	}
 }
 

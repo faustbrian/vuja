@@ -1870,6 +1870,7 @@ func (f *FrecencyStore) replaceImportedHistoryEvents(ctx context.Context, events
 	if err != nil {
 		return err
 	}
+	defer oldRows.Close()
 	retained := make(map[string]bool, len(events))
 	for _, event := range events {
 		retained[event.EventKey] = true

@@ -25,7 +25,7 @@ func TestCombiningMarkJoinsPrecedingASCII(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			term := newTestTerminal(t, 10, 1)
-			term.WriteString(tc.input)
+			writeStringFixture(t, term, tc.input)
 			for x, want := range tc.want {
 				cell := term.CellAt(x, 0)
 				if cell == nil {
@@ -43,7 +43,7 @@ func TestCombiningMarkJoinsPrecedingASCII(t *testing.T) {
 // when the write ends or a caller reading the screen would not see it.
 func TestLastCharacterIsFlushedWhenTheWriteEnds(t *testing.T) {
 	term := newTestTerminal(t, 10, 1)
-	term.WriteString("hi")
+	writeStringFixture(t, term, "hi")
 	for x, want := range []string{"h", "i"} {
 		if cell := term.CellAt(x, 0); cell == nil || cell.Content != want {
 			t.Errorf("cell %d: got %v, want %q", x, cell, want)
@@ -68,7 +68,7 @@ func TestSingleShiftDoesNotLeakPastACluster(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			term := newTestTerminal(t, 10, 1)
-			term.WriteString(tc.input)
+			writeStringFixture(t, term, tc.input)
 			for x, want := range tc.want {
 				if cell := term.CellAt(x, 0); cell == nil || cell.Content != want {
 					t.Errorf("cell %d: got %v, want %q", x, cell, want)
@@ -93,7 +93,7 @@ func TestLongClusterRunStaysLinear(t *testing.T) {
 	go func() {
 		term := NewEmulator(80, 24)
 		start := time.Now()
-		term.WriteString(input)
+		writeStringFixture(t, term, input)
 		done <- time.Since(start)
 	}()
 

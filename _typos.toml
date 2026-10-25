@@ -9,6 +9,14 @@ OT = "OT"
 crypted = "crypted"
 uncomplete = "uncomplete"
 edn = "edn"
+iterm = "iterm"
+ITERM = "ITERM"
+# Deliberately fragmented protocol/UTF-8 fixtures, not prose.
+BA = "BA"
+caf = "caf"
+ist = "ist"
+gti = "gti"
+chckout = "chckout"
 
 [files]
 extend-exclude = ["internal/scoring/scorer_test.go"]

@@ -46,6 +46,7 @@ FROM history_counterpart_sources WHERE owner_hash IN (`+strings.TrimSuffix(strin
 		if err != nil {
 			return err
 		}
+		defer rows.Close()
 		for rows.Next() {
 			var owner, source string
 			var member historyCounterpartSource

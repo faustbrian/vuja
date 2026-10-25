@@ -100,7 +100,7 @@ func isClaudeResumeCommand(line string) bool {
 			return false
 		}
 		for _, b := range []byte(segment) {
-			if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '.' || b == '_' || b == '-') {
+			if (b < 'a' || b > 'z') && (b < 'A' || b > 'Z') && (b < '0' || b > '9') && b != '.' && b != '_' && b != '-' {
 				return false
 			}
 		}

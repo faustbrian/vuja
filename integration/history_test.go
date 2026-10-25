@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,7 +163,7 @@ func TestShellHistoryImportBoundsEntireZshLogicalRecord(t *testing.T) {
 	}
 	defer file.Close()
 	entries, err := loadShellHistory(file, "zsh")
-	if err != bufio.ErrTooLong || len(entries) != 0 {
+	if !errors.Is(err, bufio.ErrTooLong) || len(entries) != 0 {
 		t.Fatalf("oversized logical record escaped the scanner bound or admitted fragments: count=%d err=%v", len(entries), err)
 	}
 }

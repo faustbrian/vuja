@@ -38,11 +38,12 @@ func Observe(t *testing.T, mode string) (context.Context, *[]health.Observation)
 	t.Helper()
 	var values []health.Observation
 	ctx := health.WithObserver(t.Context(), func(value health.Observation) { values = append(values, value) })
-	if mode == "cancelled" {
+	switch mode {
+	case "cancelled":
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		cancel()
-	} else if mode == "expired" {
+	case "expired":
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
 		t.Cleanup(cancel)
@@ -65,7 +66,7 @@ func Check(t *testing.T, values []health.Observation, name string, want health.O
 		return
 	}
 	// The fixture does not impose a machine-dependent startup latency budget.
-	if len(matching) != 1 || matching[0].Outcome != want && !(want == health.Healthy && matching[0].Outcome == health.Slow) {
+	if len(matching) != 1 || matching[0].Outcome != want && (want != health.Healthy || matching[0].Outcome != health.Slow) {
 		t.Fatalf("actual %s outcome was discarded or conflated: %+v, want %v", name, values, want)
 	}
 }

@@ -26,9 +26,10 @@ func TestGitHealthKeepsActualInventoriesSeparate(t *testing.T) {
 					dir := providerfixture.Environment(t)
 					spec.SetShellCWD(dir)
 					body := "printf '%s\\n' '" + provider.output + "'"
-					if mode == "empty" {
+					switch mode {
+					case "empty":
 						body = "exit 0"
-					} else if mode == "failed" {
+					case "failed":
 						body = "exit 7"
 					}
 					if mode != "missing" {

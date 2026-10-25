@@ -35,7 +35,7 @@ Vuja supports Linux and macOS. Windows is not supported.
 - Linux or macOS
 - Zsh, Bash, or Fish
 - A terminal with ANSI color support
-- Go 1.26.6 or newer when building from source
+- Go 1.26.10 or newer when building from source
 - [`just`](https://github.com/casey/just) when using repository recipes
 
 ## Installation
@@ -1696,7 +1696,7 @@ Currently, Vuja natively supports **567** top-level CLI commands across **14** c
 | **`serverless`** | AWS profile to use with the command | [`serverless.go`](commands/ops/serverless.go) |
 | **`sfdx`** | Analyze (lint) Aura component code | [`sfdx.go`](commands/ops/sfdx.go) |
 | **`sftp`** | OpenSSH secure file transfer | [`sftp.go`](commands/ops/sftp.go) |
-| **`space`** | Deta Space CLI for mananging Deta Space projects | [`space.go`](commands/ops/space.go) |
+| **`space`** | Deta Space CLI for managing Deta Space projects | [`space.go`](commands/ops/space.go) |
 | **`sqlite3`** | A command line interface for SQLite version 3 | [`sqlite3.go`](commands/ops/sqlite3.go) |
 | **`src`** | Interact with Sourcegraph from the command line | [`src.go`](commands/ops/src.go) |
 | **`ssh`** | secure shell | [`ssh.go`](commands/ops/ssh.go) |

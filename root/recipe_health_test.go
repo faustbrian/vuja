@@ -43,8 +43,8 @@ func TestSessionHealthManifestFailureSurvivesUnrelatedRecipeSuccess(t *testing.T
 	if err := persistLatencySnapshot(recorder.snapshotCopy()); err != nil {
 		t.Fatal(err)
 	}
-	providers := runDiagnosticFixture(t)["health"].(map[string]any)["providers"].(map[string]any)
-	if providers["npm-scripts"].(map[string]any)["last_outcome"] != "failed" || providers["just-recipes"].(map[string]any)["last_outcome"] != "healthy" {
+	providers := diagnosticSection(t, diagnosticSection(t, runDiagnosticFixture(t), "health"), "providers")
+	if diagnosticSection(t, providers, "npm-scripts")["last_outcome"] != "failed" || diagnosticSection(t, providers, "just-recipes")["last_outcome"] != "healthy" {
 		t.Fatalf("sanitized diagnostics conflated the inventory sources: %+v", providers)
 	}
 	if err := os.WriteFile(manifest, []byte(`{"scripts":{"build":"echo fixture"}}`), 0o600); err != nil {

@@ -65,7 +65,7 @@ func TestPipHealthReflectsTheFinalInventoryFallback(t *testing.T) {
 			}
 			// This checks successful outcomes, not the host's process startup
 			// speed. A genuinely slow success is a valid classified attempt.
-			if len(observed) != 1 || observed[0].Source.Name() != "pip-installed" || (observed[0].Outcome != test.want && !(test.want == health.Healthy && observed[0].Outcome == health.Slow)) {
+			if len(observed) != 1 || observed[0].Source.Name() != "pip-installed" || (observed[0].Outcome != test.want && (test.want != health.Healthy || observed[0].Outcome != health.Slow)) {
 				t.Fatalf("final installed inventory outcome was discarded or a fallback became false recovery: %+v, want %v", observed, test.want)
 			}
 		})

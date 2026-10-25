@@ -67,7 +67,7 @@ esac`)
 	if err := persistLatencySnapshot(recorder.snapshotCopy()); err != nil {
 		t.Fatal(err)
 	}
-	providers := runDiagnosticFixture(t)["health"].(map[string]any)["providers"].(map[string]any)
+	providers := diagnosticSection(t, diagnosticSection(t, runDiagnosticFixture(t), "health"), "providers")
 	container, ok := providers["docker-containers-all"].(map[string]any)
 	if !ok || container["last_outcome"] != "failed" || container["failures"] != float64(1) {
 		t.Fatalf("sanitized diagnostics lost the actual container failure: %+v", providers)

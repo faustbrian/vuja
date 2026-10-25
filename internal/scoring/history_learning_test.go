@@ -210,9 +210,10 @@ INSERT INTO history_entries VALUES ('git status', '/repo', 3, ?)`, canonicalTime
 			}
 			outcomes, queryErr := store.QueryOutcomes(t.Context(), "/repo", "", "git status", 10)
 			wantSuccesses := 3
-			if fixture == "unattributed-transition" {
+			switch fixture {
+			case "unattributed-transition":
 				wantSuccesses = 1
-			} else if fixture == "excess-outcomes" {
+			case "excess-outcomes":
 				wantSuccesses = 100
 			}
 			if queryErr != nil || len(outcomes) != 1 || outcomes[0].Successes != wantSuccesses || outcomes[0].Failures != 0 {
@@ -287,9 +288,10 @@ func TestHistoryLearningPreservesAttributedNavigationAcrossWindowExpiry(t *testi
 					t.Fatal(err)
 				}
 				wantCount, wantRecent := 1, 0
-				if fixture == "recent" {
+				switch fixture {
+				case "recent":
 					wantRecent = 1
-				} else if fixture == "unexplained-count" {
+				case "unexplained-count":
 					wantCount, wantRecent = 2, 1
 					after, err := store.QueryHistoryChanges(t.Context(), 0, 100)
 					if err != nil || after.Latest != before.Latest {
@@ -343,9 +345,10 @@ func TestHistoryLearningPreservesCompatibleRecordWriters(t *testing.T) {
 							for _, table := range []string{"history_entries", "command_outcomes", "argument_values", "recent_failures"} {
 								column, predicate := "last_used", "cmd = ?"
 								value := command
-								if table == "argument_values" {
+								switch table {
+								case "argument_values":
 									predicate, value = "value = ?", "compatibility-token"
-								} else if table == "recent_failures" {
+								case "recent_failures":
 									column = "failed_at"
 								}
 								if _, err := store.db.ExecContext(t.Context(), "UPDATE "+table+" SET "+column+" = ? WHERE "+predicate, canonicalTimestamp(coarse), value); err != nil {

@@ -11,9 +11,10 @@ func TestProcessHealthReportsInventoryWithoutSendingSignals(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			dir := providerfixture.Environment(t)
 			body := "printf '%s\\n' 'PID COMMAND' '42 fixture' '42 fixture' 'malformed'"
-			if mode == "empty" {
+			switch mode {
+			case "empty":
 				body = "exit 0"
-			} else if mode == "failed" {
+			case "failed":
 				body = "exit 7"
 			}
 			if mode != "missing" {

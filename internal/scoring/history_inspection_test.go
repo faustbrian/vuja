@@ -54,14 +54,14 @@ func TestInspectHistoryDoesNotCreateOrInitializeDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec("CREATE TABLE existing_only (value TEXT)"); err != nil {
+	if _, err := db.ExecContext(t.Context(), "CREATE TABLE existing_only (value TEXT)"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := InspectHistory(context.Background(), legacy); err == nil {
 		t.Fatal("uninitialized schema was reported as supported")
 	}
 	var tables int
-	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table'").Scan(&tables); err != nil || tables != 1 {
+	if err := db.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_master WHERE type='table'").Scan(&tables); err != nil || tables != 1 {
 		t.Fatalf("inspection initialized an unsupported database: tables=%d err=%v", tables, err)
 	}
 }

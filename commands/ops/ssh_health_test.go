@@ -36,10 +36,11 @@ func TestSSHHealthReportsDiscoveryWithoutLosingPartialAliases(t *testing.T) {
 				want, outcome = nil, health.TimedOut
 			}
 			home, roots := sshFixture(t, files)
-			if mode == "unreadable" {
+			switch mode {
+			case "unreadable":
 				// ENOTDIR is deterministic even for privileged test runners.
 				roots[0].path = filepath.Join(roots[0].path, "child")
-			} else if mode == "partial" {
+			case "partial":
 				if err := os.Mkdir(filepath.Join(home, ".ssh", "nonregular"), 0o700); err != nil {
 					t.Fatal(err)
 				}

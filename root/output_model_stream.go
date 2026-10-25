@@ -117,7 +117,7 @@ func (s *outputModelStream) writeText(model *vt.Emulator, text []byte, width int
 			cluster, joinedWidth := ansi.FirstGraphemeCluster(last.cell.Content+string(text[:probe]), ansi.GraphemeWidth)
 			if extension := len(cluster) - len(last.cell.Content); extension > 0 {
 				if len(cluster) > outputModelGraphemeLimit || extension == probe && probe < len(text) {
-					_, _ = model.Write([]byte(fmt.Sprintf("\x1b[%d;%dH", last.place.Y+1, last.place.X+1)))
+					fmt.Fprintf(model, "\x1b[%d;%dH", last.place.Y+1, last.place.X+1)
 					model.SetCell(last.place.X, last.place.Y, nil)
 					s.writeShortened(model)
 					return len(text)
@@ -130,7 +130,7 @@ func (s *outputModelStream) writeText(model *vt.Emulator, text []byte, width int
 				} else {
 					// Rewriting through the SDK recalculates cursor/wrap geometry.
 					// These controls affect only the private shadow model.
-					_, _ = model.Write([]byte(fmt.Sprintf("\x1b[%d;%dH", last.place.Y+1, last.place.X+1)))
+					fmt.Fprintf(model, "\x1b[%d;%dH", last.place.Y+1, last.place.X+1)
 					model.SetCell(last.place.X, last.place.Y, nil)
 					s.clearAnchor()
 					s.writeText(model, []byte(cluster), joinedWidth)

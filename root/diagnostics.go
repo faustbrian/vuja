@@ -251,7 +251,7 @@ func collectDiagnosticReport(ctx context.Context) diagnosticReport {
 			providers := make(map[string]any)
 			for source := health.Files; source < health.SourceCount; source++ {
 				provider := observed.Providers[source]
-				outcome := "unknown"
+				var outcome string
 				switch provider.Outcome {
 				case health.Healthy:
 					outcome = "healthy"
@@ -357,7 +357,7 @@ func loadDiagnosticLatency() (latencySnapshot, error) {
 	f := os.NewFile(uintptr(fd), dir)
 	defer f.Close()
 	entries, err := f.ReadDir(4097)
-	if err != nil && err != io.EOF || len(entries) > 4096 {
+	if err != nil && !errors.Is(err, io.EOF) || len(entries) > 4096 {
 		return latencySnapshot{}, errors.New("diagnostic cache unavailable or oversized")
 	}
 	path := filepath.Join(dir, "suggestion-latency.json")

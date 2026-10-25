@@ -146,7 +146,11 @@ func (c historyCounterpartCandidates) Less(i, j int) bool {
 }
 func (c historyCounterpartCandidates) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
 func (c *historyCounterpartCandidates) Push(value any) {
-	*c = append(*c, value.(historyCounterpartCandidate))
+	candidate, ok := value.(historyCounterpartCandidate)
+	if !ok {
+		panic("history counterpart heap requires a candidate")
+	}
+	*c = append(*c, candidate)
 }
 func (c *historyCounterpartCandidates) Pop() any {
 	old := *c
@@ -172,6 +176,7 @@ func filterHistoryCounterparts(ctx context.Context, tx *sql.Tx, events []History
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var slots []historyCounterpartSlot
 	importedOrigins := make(map[string]bool)
 	for rows.Next() {
@@ -202,6 +207,7 @@ func filterHistoryCounterparts(ctx context.Context, tx *sql.Tx, events []History
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	reserved := make(map[string]bool)
 	reserve := func(event HistoryEvent, archiveOwned bool) {
 		if reserved[event.EventKey] {
@@ -379,7 +385,8 @@ func matchHistoryCounterpartSlots(ctx context.Context, slots []historyCounterpar
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		candidate := heap.Pop(&candidates).(historyCounterpartCandidate)
+		candidate := candidates[0]
+		heap.Pop(&candidates)
 		if singleMatchPerSlot && matchedSlots[candidate.slot] {
 			continue
 		}
@@ -509,6 +516,7 @@ FROM forgotten_native_history WHERE origin_source_hash <> '' AND native_identity
 		if err != nil {
 			return false, 0, err
 		}
+		defer rows.Close()
 		for rows.Next() {
 			slot := historyCounterpartSlot{forgotten: true}
 			var startedAt, forgottenAt string
@@ -552,6 +560,7 @@ FROM history_events WHERE started_at >= ? AND started_at <= ?`
 	if err != nil {
 		return false, 0, err
 	}
+	defer rows.Close()
 	stored, err := scanHistoryEvents(rows)
 	closeErr := rows.Close()
 	if err != nil {
@@ -648,6 +657,7 @@ func reconcileForgottenHistoryCounterparts(ctx context.Context, tx *sql.Tx, pres
 	if err != nil {
 		return 0, err
 	}
+	defer rows.Close()
 	events, err := scanHistoryEvents(rows)
 	closeErr := rows.Close()
 	if err != nil {
@@ -711,6 +721,7 @@ func filterExcludedHistoryImports(ctx context.Context, tx *sql.Tx, events []Hist
 		if err != nil {
 			return nil, err
 		}
+		defer rows.Close()
 		excluded := make(map[string]int)
 		for rows.Next() {
 			var hash string

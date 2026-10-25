@@ -22,9 +22,10 @@ func TestPackageHealthKeepsDifferentToolsIndependent(t *testing.T) {
 				t.Run(mode, func(t *testing.T) {
 					dir := providerfixture.Environment(t)
 					body := "printf '%s\\n' 'fixture-package'"
-					if mode == "empty" {
+					switch mode {
+					case "empty":
 						body = "exit 0"
-					} else if mode == "failed" {
+					case "failed":
 						body = "exit 7"
 					}
 					if mode != "missing" {

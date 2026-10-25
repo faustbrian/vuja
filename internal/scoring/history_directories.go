@@ -164,6 +164,7 @@ WHERE e.started_at >= ? AND e.started_at < ? GROUP BY v.path`, canonicalTimestam
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type expiredCohort struct{ all, actual int }
 	expired := make(map[string]expiredCohort)
 	for rows.Next() {
@@ -268,6 +269,7 @@ WHERE e.state NOT IN ('submitted', 'running', 'interrupted', 'failed') AND (e.ex
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	byPath := make(map[string]DirectoryImport)
 	actualByPath := make(map[string]DirectoryImport)
 	inferredVisits := make(map[string]string)

@@ -266,7 +266,7 @@ func TestHistoryPrivacyNativeForgetUsesStrongestEvidenceInPartialImportSnapshot(
 					t.Fatalf("partial snapshot selected the wrong counterpart: %+v %v", events, err)
 				}
 				for _, event := range events {
-					if event.EventKey != "native:retained" && !(keepCopy && event.EventKey == copy.EventKey) {
+					if event.EventKey != "native:retained" && (!keepCopy || event.EventKey != copy.EventKey) {
 						t.Fatalf("unexpected survivor: %+v", event)
 					}
 				}

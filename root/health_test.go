@@ -340,7 +340,7 @@ func TestSessionHealthPipelineDeadlinesRemainVisibleWithoutProviderObservation(t
 				t.Fatal(err)
 			}
 			report := runDiagnosticFixture(t)
-			latency := report["latency"].(map[string]any)
+			latency := diagnosticSection(t, report, "latency")
 			if latency["timeouts"] != float64(1) {
 				t.Fatalf("persisted diagnostics lost the pipeline deadline: %+v", latency)
 			}
@@ -376,7 +376,7 @@ func TestSessionHealthTimeoutSummaryCountsAffectedRequestsOnce(t *testing.T) {
 			if err := persistLatencySnapshot(snapshot); err != nil {
 				t.Fatal(err)
 			}
-			if latency := runDiagnosticFixture(t)["latency"].(map[string]any); latency["timeouts"] != float64(1) {
+			if latency := diagnosticSection(t, runDiagnosticFixture(t), "latency"); latency["timeouts"] != float64(1) {
 				t.Fatalf("diagnostics inflated overlapping timeout evidence: %+v", latency)
 			}
 			current = false

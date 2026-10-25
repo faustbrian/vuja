@@ -212,6 +212,7 @@ func historyLearningRowsWithLegacyClocks(ctx context.Context, tx *sql.Tx, legacy
 		if err != nil {
 			return nil, err
 		}
+		defer rows.Close()
 		columns, err := rows.Columns()
 		if err != nil {
 			_ = rows.Close()
@@ -235,7 +236,7 @@ func historyLearningRowsWithLegacyClocks(ctx context.Context, tx *sql.Tx, legacy
 					value := values[index]
 					// Legacy TEXT dates and modern TIMESTAMP dates can encode
 					// the same instant differently. Compare time semantics,
-					// retaining unparseable values exactly rather than guessing.
+					// retaining unparsable values exactly rather than guessing.
 					if column == "last_used" || column == "failed_at" {
 						if stamp, ok := value.(time.Time); ok {
 							value = stamp.Round(0).UTC().Format(time.RFC3339Nano)

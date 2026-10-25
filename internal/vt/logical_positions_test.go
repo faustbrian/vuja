@@ -9,7 +9,7 @@ func TestRetainedLogicalRowPositionsSurviveReflowAndEviction(t *testing.T) {
 	e := retainedFixture(t, 20, 4)
 	e.SetScrollbackSize(2)
 	for range 10 {
-		e.Write([]byte("long logical 日本語 line wrapping here\r\n"))
+		writeFixture(t, e, []byte("long logical 日本語 line wrapping here\r\n"))
 	}
 	for _, size := range [][2]int{{3, 2}, {80, 10}, {12, 4}} {
 		e.Resize(size[0], size[1])
@@ -18,7 +18,7 @@ func TestRetainedLogicalRowPositionsSurviveReflowAndEviction(t *testing.T) {
 			t.Fatalf("resize %v reassigned logical cursor row: %d (first %d)", size, got, first)
 		}
 	}
-	e.Write([]byte("next\r\nlast\r\n"))
+	writeFixture(t, e, []byte("next\r\nlast\r\n"))
 	_, rows := e.LogicalRowPositions()
 	if rows[e.CursorPosition().Y] != 12 {
 		t.Fatal("append/eviction reassigned logical row")
@@ -27,7 +27,7 @@ func TestRetainedLogicalRowPositionsSurviveReflowAndEviction(t *testing.T) {
 
 func TestRetainedTailDrawingPreservesControlsAndOwnership(t *testing.T) {
 	e := retainedFixture(t, 60, 4)
-	e.Write([]byte(strings.Repeat("a", 59) + "\rZ\r\n"))
+	writeFixture(t, e, []byte(strings.Repeat("a", 59)+"\rZ\r\n"))
 	want := "Z" + strings.Repeat("a", 58)
 	if got := e.LogicalLines()[0].Render(); got != want {
 		t.Fatalf("raw terminal fixture is wrong: %q", got)
@@ -40,7 +40,7 @@ func TestRetainedTailDrawingPreservesControlsAndOwnership(t *testing.T) {
 	if got := e.LogicalLines()[0].Render(); got != want {
 		t.Fatalf("drawing projection mutated authoritative output: %q", got)
 	}
-	e.Write([]byte("\x1b[H\x1b[2Jnew"))
+	writeFixture(t, e, []byte("\x1b[H\x1b[2Jnew"))
 	rows = e.RetainedTail(58, 4)
 	if len(rows) != 1 || rows[0].Line.Render() != "new" {
 		t.Fatalf("live drawing resurrected ED2 history: %+v", rows)
@@ -52,12 +52,12 @@ func TestRetainedTailDrawingPreservesControlsAndOwnership(t *testing.T) {
 
 func TestRetainedTailDrawingKeepsWideCellsAndBoundsFragments(t *testing.T) {
 	e := retainedFixture(t, 60, 4)
-	e.Write([]byte("ab界Z"))
+	writeFixture(t, e, []byte("ab界Z"))
 	rows := e.RetainedTail(3, 2)
 	if len(rows) != 2 || rows[0].Line[0].Content != "a" || rows[0].Line[1].Content != "b" || rows[1].Line[0].Content != "界" || rows[1].Line[0].Width != 2 || rows[1].Line[2].Content != "Z" {
 		t.Fatalf("wide-cell drawing boundary is wrong: %+v", rows)
 	}
-	e.Write([]byte(strings.Repeat("x", 20000)))
+	writeFixture(t, e, []byte(strings.Repeat("x", 20000)))
 	rows = e.RetainedTail(3, 2)
 	if len(rows) != 2 || len(rows[0].Line) != 3 || len(rows[1].Line) != 3 {
 		t.Fatal("one long logical line allocated an unbounded drawing result")

@@ -22,17 +22,23 @@ func TestAIEngineHealthObservesAttemptsButNotThrottleOrCancellation(t *testing.T
 		}
 		return nil, nil
 	})
-	engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context")
+	if _, err := engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context"); err == nil {
+		t.Fatal("provider failure was not returned")
+	}
 	if len(observations) != 1 || observations[0].Outcome != health.Failed {
 		t.Fatalf("actual AI failure was discarded: %+v", observations)
 	}
-	engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context")
+	if _, err := engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context"); err != nil {
+		t.Fatal("throttled call returned an error")
+	}
 	if len(observations) != 1 {
 		t.Fatal("throttle skip falsely reported provider recovery")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	engine.Suggest(cancelled, "git fixture", EnvSnapshot{}, "fictional context")
+	if _, err := engine.Suggest(cancelled, "git fixture", EnvSnapshot{}, "fictional context"); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled call did not return cancellation")
+	}
 	if len(observations) != 1 {
 		t.Fatal("user cancellation became provider failure")
 	}
@@ -40,7 +46,9 @@ func TestAIEngineHealthObservesAttemptsButNotThrottleOrCancellation(t *testing.T
 	engine.lastCallTime = time.Now().Add(-24 * time.Hour)
 	engine.mu.Unlock()
 	fail = false
-	engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context")
+	if _, err := engine.Suggest(ctx, "git fixture", EnvSnapshot{}, "fictional context"); err != nil {
+		t.Fatal("successful call returned an error")
+	}
 	if len(observations) != 2 || observations[1].Outcome != health.Healthy {
 		t.Fatal("actual successful empty response was not distinguished from a skip")
 	}

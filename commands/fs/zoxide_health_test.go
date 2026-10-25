@@ -20,9 +20,10 @@ func TestZoxideHealthPreservesLocalDirectoriesOnExternalFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := "printf '%s\\n' '/fixture/visited'"
-			if mode == "empty" {
+			switch mode {
+			case "empty":
 				body = "exit 0"
-			} else if mode == "failed" {
+			case "failed":
 				body = "exit 7"
 			}
 			if mode != "missing" {

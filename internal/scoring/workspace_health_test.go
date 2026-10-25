@@ -36,9 +36,10 @@ func TestWorkspaceHealthSignalConsumerReceivesActualMetadataOutcome(t *testing.T
 				want = health.Failed
 			}
 			ctx, values := providerfixture.Observe(t, mode)
-			if mode == "cancelled" {
+			switch mode {
+			case "cancelled":
 				want = health.Unknown
-			} else if mode == "expired" {
+			case "expired":
 				want = health.TimedOut
 			}
 			result := CollectSignalsWithRanking(ctx, cwd, "git", "git", nil, "", "", "balanced")

@@ -1608,11 +1608,12 @@ func TestInteractiveBlocksCompactBoundaryGeometry(t *testing.T) {
 				blocksExecution(c, "second-card", "second-output\r\n", "0")
 				blocksPrompt(c, "input")
 				width, height := 60, 24
-				if variant == "resized" {
+				switch variant {
+				case "resized":
 					width, height = 42, 28
 					out.Reset()
 					c.Resize(width, height)
-				} else if variant == "restored" {
+				case "restored":
 					c.Close()
 					c, out = blocksFixture(t, document)
 					if err := c.ConfigureOutputRecovery(dir, "compact-boundary", nil); err != nil {
@@ -1704,9 +1705,10 @@ func TestInteractiveBlocksDividerFollowsLastVisibleCardRow(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%s/%t", mode, kind, dividers), func(t *testing.T) {
 					c, out := blocksFixture(t, fmt.Sprintf("[ui.chatbox]\ncompleted-command=%q\nblock-dividers=%t\n", mode, dividers))
 					output := ""
-					if kind == "body" {
+					switch kind {
+					case "body":
 						output = "edge-body\r\n"
-					} else if kind == "native" {
+					case "native":
 						output = "\x1b[?1049hprivate-canvas\x1b[?1049l"
 					}
 					blocksExecution(c, "edge-command", output, "0")

@@ -652,7 +652,7 @@ func (r *outputRecovery) persist(snapshot outputCheckpointSnapshot) (superseded 
 		if err != nil {
 			return err
 		}
-		if err == nil && state.Owner != r.owner {
+		if state.Owner != r.owner {
 			superseded = true
 			return nil
 		}

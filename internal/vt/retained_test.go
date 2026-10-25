@@ -28,7 +28,7 @@ func retainedFixture(t *testing.T, width, height int) *Emulator {
 func TestRetainedResizeKeepsLogicalTextAcrossBothDimensions(t *testing.T) {
 	e := retainedFixture(t, 80, 8)
 	text := "first abcdefghijklmnopqrstuvwxyz\nsecond  with  spaces\nlast 日本語 👩‍💻"
-	e.Write([]byte(strings.ReplaceAll(text, "\n", "\r\n")))
+	writeFixture(t, e, []byte(strings.ReplaceAll(text, "\n", "\r\n")))
 	for _, size := range [][2]int{{20, 8}, {1, 1}, {7, 2}, {120, 12}, {80, 8}} {
 		e.Resize(size[0], size[1])
 		if got := retainedText(e); got != text {
@@ -42,12 +42,12 @@ func TestRetainedResizeKeepsLogicalTextAcrossBothDimensions(t *testing.T) {
 
 func TestRetainedResizePreservesCursorAboveTheTail(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
-	e.Write([]byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
+	writeFixture(t, e, []byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
 	e.Resize(8, 1)
 	if got := retainedText(e); got != "top\nmiddle\nbottom" {
 		t.Fatalf("height shrink discarded the hidden tail: %q", got)
 	}
-	e.Write([]byte("X"))
+	writeFixture(t, e, []byte("X"))
 	e.Resize(40, 5)
 	if got := retainedText(e); got != "Xop\nmiddle\nbottom" {
 		t.Fatalf("resized cursor did not edit its original logical row: %q", got)
@@ -57,9 +57,9 @@ func TestRetainedResizePreservesCursorAboveTheTail(t *testing.T) {
 func TestRetainedResizePreservesPendingWrap(t *testing.T) {
 	for _, width := range []int{10, 20, 40} {
 		e := retainedFixture(t, 20, 4)
-		e.Write([]byte("abcdefghijklmnopqrst"))
+		writeFixture(t, e, []byte("abcdefghijklmnopqrst"))
 		e.Resize(width, 4)
-		e.Write([]byte("x"))
+		writeFixture(t, e, []byte("x"))
 		if got := retainedText(e); got != "abcdefghijklmnopqrstx" {
 			t.Fatalf("pending wrap at new width %d overwrote text: %q", width, got)
 		}
@@ -69,7 +69,7 @@ func TestRetainedResizePreservesPendingWrap(t *testing.T) {
 func TestRetainedResizeUsesSemanticOverwriteAndErasure(t *testing.T) {
 	e := retainedFixture(t, 80, 4)
 	e.Resize(20, 4)
-	e.Write([]byte("abcdefghijklmnopqrstuvwxyz\rREPLACED\x1b[K\r\n"))
+	writeFixture(t, e, []byte("abcdefghijklmnopqrstuvwxyz\rREPLACED\x1b[K\r\n"))
 	if got := retainedText(e); got != "abcdefghijklmnopqrstREPLACED\n" {
 		t.Fatalf("projection kept erased bytes or inserted a soft-wrap newline: %q", got)
 	}
@@ -81,12 +81,12 @@ func TestRetainedResizeUsesSemanticOverwriteAndErasure(t *testing.T) {
 
 func TestRetainedResizeRespectsDisabledAutowrap(t *testing.T) {
 	e := retainedFixture(t, 20, 4)
-	e.Write([]byte("\x1b[?7labcdefghijklmnopqrstuvwxyz"))
+	writeFixture(t, e, []byte("\x1b[?7labcdefghijklmnopqrstuvwxyz"))
 	if got := retainedText(e); got != "abcdefghijklmnopqrsz" {
 		t.Fatalf("disabled autowrap did not overwrite the final cell: %q", got)
 	}
 	e.Resize(10, 4)
-	e.Write([]byte("Z"))
+	writeFixture(t, e, []byte("Z"))
 	if got := retainedText(e); got != "abcdefghijklmnopqrsZ" {
 		t.Fatalf("resize altered disabled-autowrap cursor semantics: %q", got)
 	}
@@ -94,7 +94,7 @@ func TestRetainedResizeRespectsDisabledAutowrap(t *testing.T) {
 
 func TestRetainedProjectionKeepsMutationAliasesAndIsDefensive(t *testing.T) {
 	e := retainedFixture(t, 6, 2)
-	e.Write([]byte("abcdefghi"))
+	writeFixture(t, e, []byte("abcdefghi"))
 	e.CellAt(1, 0).Content = "B"
 	e.SetCell(2, 1, &uv.Cell{Content: "I", Width: 1})
 	if got := retainedText(e); got != "aBcdefghI" {
@@ -105,7 +105,7 @@ func TestRetainedProjectionKeepsMutationAliasesAndIsDefensive(t *testing.T) {
 	if got := retainedText(e); got != "aBcdefghI" {
 		t.Fatalf("projection aliases live model cells: %q", got)
 	}
-	e.Write([]byte("\r\nnext\r\n"))
+	writeFixture(t, e, []byte("\r\nnext\r\n"))
 	if e.ScrollbackLen() == 0 {
 		t.Fatal("fixture never reached scrollback")
 	}
@@ -118,7 +118,7 @@ func TestRetainedProjectionKeepsMutationAliasesAndIsDefensive(t *testing.T) {
 func TestRetainedResizeDoesNotChangeTheDefaultCanvasPolicy(t *testing.T) {
 	e := NewEmulator(20, 4)
 	t.Cleanup(func() { _ = e.Close() })
-	e.Write([]byte("abcdefghijklmnopqrstuvwxyz"))
+	writeFixture(t, e, []byte("abcdefghijklmnopqrstuvwxyz"))
 	e.Resize(10, 4)
 	if e.Width() != 10 || e.Height() != 4 || e.CellAt(10, 0) != nil {
 		t.Fatal("non-opted-in canvas no longer has upstream resize geometry")
@@ -129,7 +129,7 @@ func TestRetainedScrollbackLimitCountsLogicalLinesNotResizeRows(t *testing.T) {
 	e := retainedFixture(t, 80, 1)
 	e.SetScrollbackSize(3)
 	first, second, third := strings.Repeat("a", 100), strings.Repeat("b", 100), strings.Repeat("c", 100)
-	e.Write([]byte(first + "\r\n" + second + "\r\n" + third + "\r\n"))
+	writeFixture(t, e, []byte(first+"\r\n"+second+"\r\n"+third+"\r\n"))
 	for _, width := range []int{20, 1, 80} {
 		e.Resize(width, 1)
 		if got := retainedText(e); got != first+"\n"+second+"\n"+third+"\n" {
@@ -139,7 +139,7 @@ func TestRetainedScrollbackLimitCountsLogicalLinesNotResizeRows(t *testing.T) {
 			t.Fatal("reshape was falsely reported as eviction")
 		}
 	}
-	e.Write([]byte("fourth\r\n"))
+	writeFixture(t, e, []byte("fourth\r\n"))
 	if got := retainedText(e); got != second+"\n"+third+"\nfourth\n" || !e.RetainedOutputTruncated() {
 		t.Fatalf("actual retention did not evict exactly the oldest logical line: %q", got)
 	}
@@ -149,7 +149,7 @@ func TestRetainedScrollbackBoundsLongSessionsAndMutableAliasEdits(t *testing.T) 
 	e := retainedFixture(t, 120, 1)
 	e.SetScrollbackSize(10000)
 	for range 10000 {
-		e.Write([]byte(strings.Repeat("x", 120) + "\r\n"))
+		writeFixture(t, e, []byte(strings.Repeat("x", 120)+"\r\n"))
 	}
 	s := e.Scrollback()
 	if !e.RetainedOutputTruncated() || s.cost > retainedScrollbackBytes || s.Len() >= 10000 {
@@ -157,7 +157,7 @@ func TestRetainedScrollbackBoundsLongSessionsAndMutableAliasEdits(t *testing.T) 
 	}
 	line := s.Line(0)
 	line[0].Content = strings.Repeat("x", retainedScrollbackBytes+1)
-	e.Write([]byte("last\r\n"))
+	writeFixture(t, e, []byte("last\r\n"))
 	if s.cost > retainedScrollbackBytes || !strings.HasSuffix(retainedText(e), "last\n") {
 		t.Fatal("an outstanding mutable alias defeated later retention or lost newest output")
 	}
@@ -169,9 +169,9 @@ func TestRetainedScrollbackBoundsLongSessionsAndMutableAliasEdits(t *testing.T) 
 
 func TestRetainedEraseScreenRetainsHiddenTail(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
-	e.Write([]byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
+	writeFixture(t, e, []byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
 	e.Resize(8, 1)
-	e.Write([]byte("\x1b[2J"))
+	writeFixture(t, e, []byte("\x1b[2J"))
 	got := retainedText(e)
 	for _, want := range []string{"top", "middle", "bottom"} {
 		if !strings.Contains(got, want) {
@@ -189,7 +189,7 @@ func TestRetainedSafeEmulatorSerializesProjectionWriteAndResize(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		for range 500 {
-			e.Write([]byte("retained 日本語\r\n"))
+			writeFixture(t, e, []byte("retained 日本語\r\n"))
 		}
 	}()
 	go func() {
@@ -212,7 +212,7 @@ func TestRetainedSafeEmulatorSerializesProjectionWriteAndResize(t *testing.T) {
 		}
 	}()
 	workers.Wait()
-	e.Write([]byte("final-sentinel\r\n"))
+	writeFixture(t, e, []byte("final-sentinel\r\n"))
 	lines := e.LogicalLines()
 	var text strings.Builder
 	for _, line := range lines {
@@ -225,12 +225,12 @@ func TestRetainedSafeEmulatorSerializesProjectionWriteAndResize(t *testing.T) {
 
 func TestRetainedPrimaryPendingWrapSurvivesAlternateScreenResize(t *testing.T) {
 	e := retainedFixture(t, 20, 4)
-	e.Write([]byte("abcdefghijklmnopqrst\x1b[?1049happlication-canvas"))
+	writeFixture(t, e, []byte("abcdefghijklmnopqrst\x1b[?1049happlication-canvas"))
 	e.Resize(40, 6)
 	if got := retainedText(e); got != "abcdefghijklmnopqrst" {
 		t.Fatalf("alternate canvas replaced primary retained text: %q", got)
 	}
-	e.Write([]byte("\x1b[?1049lx"))
+	writeFixture(t, e, []byte("\x1b[?1049lx"))
 	if got := retainedText(e); got != "abcdefghijklmnopqrstx" {
 		t.Fatalf("alternate resize lost primary pending wrap: %q", got)
 	}
@@ -240,9 +240,9 @@ func TestRetainedSavedPendingWrapSurvivesResizeAndRestore(t *testing.T) {
 	for _, controls := range [][2]string{{"\x1b7", "\x1b8"}, {"\x1b[?1048h", "\x1b[?1048l"}, {"\x1b[s", "\x1b8"}} {
 		for _, width := range []int{10, 40} {
 			e := retainedFixture(t, 20, 6)
-			e.Write([]byte("abcdefghijklmnopqrst" + controls[0] + "\rXX"))
+			writeFixture(t, e, []byte("abcdefghijklmnopqrst"+controls[0]+"\rXX"))
 			e.Resize(width, 6)
-			e.Write([]byte(controls[1] + "x"))
+			writeFixture(t, e, []byte(controls[1]+"x"))
 			if got := retainedText(e); got != "XXcdefghijklmnopqrstx" {
 				t.Fatalf("saved pending wrap %q at width %d restored the wrong insertion point: %q", controls, width, got)
 			}
@@ -252,7 +252,7 @@ func TestRetainedSavedPendingWrapSurvivesResizeAndRestore(t *testing.T) {
 
 func TestRetainedEraseScreenKeepsInteriorBlankLines(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
-	e.Write([]byte("top\r\n\r\nbottom\x1b[2J"))
+	writeFixture(t, e, []byte("top\r\n\r\nbottom\x1b[2J"))
 	if got := retainedText(e); !strings.HasPrefix(got, "top\n\nbottom\n") {
 		t.Fatalf("erase-screen scrollback collapsed an actual blank line: %q", got)
 	}
@@ -260,9 +260,9 @@ func TestRetainedEraseScreenKeepsInteriorBlankLines(t *testing.T) {
 
 func TestRetainedResizePreservesSavedCursorBeyondWrittenText(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
-	e.Write([]byte("\x1b[1;15H\x1b7\x1b[1;1Habc"))
+	writeFixture(t, e, []byte("\x1b[1;15H\x1b7\x1b[1;1Habc"))
 	e.Resize(10, 5)
-	e.Write([]byte("\x1b8X"))
+	writeFixture(t, e, []byte("\x1b8X"))
 	if got := retainedText(e); got != "abc           X" {
 		t.Fatalf("reflow discarded the saved insertion column: %q", got)
 	}
@@ -271,9 +271,9 @@ func TestRetainedResizePreservesSavedCursorBeyondWrittenText(t *testing.T) {
 func TestRetainedReplacingEdgeCellWithWideClusterKeepsLogicalText(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
 	prefix := strings.Repeat("x", 19)
-	e.Write([]byte(prefix + "✈"))
+	writeFixture(t, e, []byte(prefix+"✈"))
 	e.SetCell(19, 0, nil)
-	e.Write([]byte("\x1b[1;20H✈️ done"))
+	writeFixture(t, e, []byte("\x1b[1;20H✈️ done"))
 	if got := retainedText(e); got != prefix+"✈️ done" {
 		t.Fatalf("replacing the edge cell changed semantic spacing: %q", got)
 	}
@@ -281,7 +281,7 @@ func TestRetainedReplacingEdgeCellWithWideClusterKeepsLogicalText(t *testing.T) 
 
 func TestRetainedResizeMapsAnExplicitCellAnchor(t *testing.T) {
 	e := retainedFixture(t, 20, 5)
-	e.Write([]byte("same same same"))
+	writeFixture(t, e, []byte("same same same"))
 	before := e.CellAt(10, 0).Clone()
 	mapped, ok := e.ResizeWithAnchor(4, 5, uv.Pos(10, 0))
 	if !ok || mapped != uv.Pos(2, 2) {
@@ -295,7 +295,7 @@ func TestRetainedResizeMapsAnExplicitCellAnchor(t *testing.T) {
 func TestRetainedResizeAnchorDoesNotGuessOutsideItsOwnedVisibleCanvas(t *testing.T) {
 	t.Run("hidden tail", func(t *testing.T) {
 		e := retainedFixture(t, 20, 5)
-		e.Write([]byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
+		writeFixture(t, e, []byte("top\r\nmiddle\r\nbottom\x1b[1;1H"))
 		if _, ok := e.ResizeWithAnchor(8, 1, uv.Pos(0, 2)); ok {
 			t.Fatal("hidden tail was returned as a visible cell")
 		}
@@ -305,7 +305,7 @@ func TestRetainedResizeAnchorDoesNotGuessOutsideItsOwnedVisibleCanvas(t *testing
 	})
 	t.Run("alternate screen", func(t *testing.T) {
 		e := retainedFixture(t, 20, 5)
-		e.Write([]byte("retained\x1b[?1049happlication"))
+		writeFixture(t, e, []byte("retained\x1b[?1049happlication"))
 		if _, ok := e.ResizeWithAnchor(8, 2, uv.Pos(0, 0)); ok {
 			t.Fatal("application canvas supplied a retained-output anchor")
 		}
@@ -316,7 +316,7 @@ func TestRetainedResizeAnchorDoesNotGuessOutsideItsOwnedVisibleCanvas(t *testing
 	t.Run("default canvas", func(t *testing.T) {
 		e := NewEmulator(20, 5)
 		t.Cleanup(func() { _ = e.Close() })
-		e.Write([]byte("ordinary canvas"))
+		writeFixture(t, e, []byte("ordinary canvas"))
 		if _, ok := e.ResizeWithAnchor(8, 2, uv.Pos(0, 0)); ok {
 			t.Fatal("default canvas opted into retained reflow implicitly")
 		}
@@ -330,7 +330,7 @@ func TestRetainedSafeScrollbackCellReadersSerializeAliasTracking(t *testing.T) {
 	e := NewSafeEmulator(20, 2)
 	e.SetReflow(true)
 	t.Cleanup(func() { _ = e.Close() })
-	e.Write([]byte("first\r\nsecond\r\nthird\r\n"))
+	writeFixture(t, e, []byte("first\r\nsecond\r\nthird\r\n"))
 	if e.ScrollbackLen() == 0 {
 		t.Fatal("fixture did not reach scrollback")
 	}

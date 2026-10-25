@@ -342,9 +342,10 @@ func (l *codexResumeLinkifier) consumeEscape(char byte) bool {
 			return true
 		}
 	case codexResumeEscapeString:
-		if char == '\x9c' {
+		switch char {
+		case '\x9c':
 			l.escapeState = codexResumeEscapeNone
-		} else if char == '\x1b' {
+		case '\x1b':
 			l.escapeState = codexResumeEscapeStringEnd
 		}
 		return true
@@ -748,7 +749,7 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 	case <-timer.C:
 		result = action.cancel(errors.New("resume receiver did not respond; click again at an idle prompt"))
 	case <-s.stop:
-		result = action.cancel(errors.New("Vuja session closed before resume activation"))
+		result = action.cancel(errors.New("vuja session closed before resume activation"))
 	}
 	if result.consumed {
 		s.mu.Lock()
@@ -813,7 +814,7 @@ func dispatchCodexResumeURL(rawURL, actionsDir string) error {
 	_ = connection.SetReadDeadline(time.Now().Add(3 * codexResumeActionTimeout))
 	reply, err := bufio.NewReader(io.LimitReader(connection, 512)).ReadString('\n')
 	if err != nil {
-		return errors.New("Vuja did not confirm resume activation; inspect the originating terminal")
+		return errors.New("vuja did not confirm resume activation; inspect the originating terminal")
 	}
 	if reply == "ok\n" {
 		return nil

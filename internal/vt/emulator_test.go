@@ -1,10 +1,25 @@
 package vt
 
 import (
+	"io"
 	"testing"
 
 	uv "github.com/charmbracelet/ultraviolet"
 )
+
+func writeFixture(t testing.TB, writer io.Writer, data []byte) {
+	t.Helper()
+	if n, err := writer.Write(data); err != nil || n != len(data) {
+		t.Errorf("fixture write = %d/%d bytes, %v", n, len(data), err)
+	}
+}
+
+func writeStringFixture(t testing.TB, writer io.StringWriter, text string) {
+	t.Helper()
+	if n, err := writer.WriteString(text); err != nil || n != len(text) {
+		t.Errorf("fixture string write = %d/%d bytes, %v", n, len(text), err)
+	}
+}
 
 // testLogger wraps a testing.TB to implement the Logger interface.
 type testLogger struct {
@@ -1791,7 +1806,7 @@ func TestTerminal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			term := newTestTerminal(t, tt.w, tt.h)
 			for _, in := range tt.input {
-				term.Write([]byte(in))
+				writeFixture(t, term, []byte(in))
 			}
 			got := termText(term)
 			if len(got) != len(tt.want) {

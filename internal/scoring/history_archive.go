@@ -187,6 +187,7 @@ func (f *FrecencyStore) ImportHistoryArchiveEvents(ctx context.Context, events [
 		if err != nil {
 			return 0, err
 		}
+		defer rows.Close()
 		stored, scanErr := scanHistoryEvents(rows)
 		closeErr := rows.Close()
 		if scanErr != nil {
@@ -238,6 +239,7 @@ WHERE imported = 0 AND session_id <> ''`)
 	if err != nil {
 		return 0, err
 	}
+	defer rows.Close()
 	owners := make(map[nativeArchiveOrder]string)
 	for rows.Next() {
 		var session, key string
@@ -263,7 +265,7 @@ WHERE imported = 0 AND session_id <> ''`)
 			}
 		}
 	}
-	statement, err := tx.PrepareContext(ctx, "INSERT INTO history_events ("+archiveHistoryColumns+", archive_owned, archive_payload_hash) "+
+	statement, err := tx.PrepareContext(ctx, "INSERT INTO history_events ("+archiveHistoryColumns+", archive_owned, archive_payload_hash) "+ //nolint:sqlclosecheck // The closure borrows this statement; the enclosing function defers its Close below.
 		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)")
 	if err != nil {
 		return 0, err

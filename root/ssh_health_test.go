@@ -53,7 +53,7 @@ func TestSessionHealthSSHDiscoveryReachesBadgeAndSanitizedDiagnostics(t *testing
 	if err := persistLatencySnapshot(recorder.snapshotCopy()); err != nil {
 		t.Fatal(err)
 	}
-	providers := runDiagnosticFixture(t)["health"].(map[string]any)["providers"].(map[string]any)
+	providers := diagnosticSection(t, diagnosticSection(t, runDiagnosticFixture(t), "health"), "providers")
 	state, ok := providers["ssh-hosts"].(map[string]any)
 	if !ok || state["last_outcome"] != "failed" || state["failures"] != float64(1) {
 		t.Fatalf("sanitized diagnostics omitted actual SSH failure: %+v", providers)

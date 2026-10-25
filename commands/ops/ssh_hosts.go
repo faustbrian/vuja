@@ -124,7 +124,7 @@ func sameSSHFile(a, b os.FileInfo) bool {
 	}
 	// Change-time detects edits with restored mtime. Do not compare access-time:
 	// reading the configuration may change it without changing its contents.
-	return os.SameFile(a, b) && a.ModTime() == b.ModTime() && a.Size() == b.Size() && a.Mode() == b.Mode() && reflect.DeepEqual(sshChangeTime(a), sshChangeTime(b))
+	return os.SameFile(a, b) && a.ModTime().Equal(b.ModTime()) && a.Size() == b.Size() && a.Mode() == b.Mode() && reflect.DeepEqual(sshChangeTime(a), sshChangeTime(b))
 }
 
 func sshChangeTime(info os.FileInfo) any {
@@ -461,8 +461,8 @@ func (p *sshHostParser) glob(pattern string) []string {
 			return nil
 		}
 		entries, err := f.ReadDir(sshDirectoryEntries + 1)
-		f.Close()
-		if err != nil && err != io.EOF {
+		_ = f.Close()
+		if err != nil && !errors.Is(err, io.EOF) {
 			p.fail(err)
 			return nil
 		}
@@ -532,7 +532,7 @@ func sshGlobMatcher(part string) (*regexp.Regexp, error) {
 				r := runes[i]
 				if r == '[' && i+1 < len(runes) && runes[i+1] == ':' {
 					end := i + 2
-					for end+1 < len(runes) && !(runes[end] == ':' && runes[end+1] == ']') {
+					for end+1 < len(runes) && (runes[end] != ':' || runes[end+1] != ']') {
 						end++
 					}
 					if end+1 >= len(runes) {

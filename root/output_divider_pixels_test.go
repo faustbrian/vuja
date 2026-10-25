@@ -97,7 +97,7 @@ func (w *dividerWire) readOutput(t *testing.T, out *bytes.Buffer) string {
 					t.Fatal(err)
 				}
 				pixels, err := io.ReadAll(io.LimitReader(decoder, 1<<20+1))
-				decoder.Close()
+				_ = decoder.Close()
 				if err != nil || len(pixels) != number("s")*number("v")*3 {
 					t.Fatalf("RGB dimensions disagree with pixel bytes: %v", err)
 				}
@@ -748,33 +748,56 @@ func TestInteractiveBlocksPixelDividerLateAllocationOwnership(t *testing.T) {
 }
 
 func TestInteractiveBlocksPixelDividerDoesNotAlterSelectedText(t *testing.T) {
-	c, out := blocksFixture(t, "[ui.chatbox]\ncompleted-command='command'\n")
-	c.EnablePixelDividers()
-	blocksExecution(c, "first", "first\r\n", "1")
-	blocksExecution(c, "second", "copied café 日本語\r\n", "0")
-	blocksPrompt(c, "input")
-	wire := newDividerWire(9, 19)
-	wire.settle(t, c, out)
-	lines := terminalScreenLines(applyTerminalOutput(t, dividerTextProjection(out.Bytes()), 60, 24))
-	y := terminalLineIndex(lines, "copied", 0)
-	cardMouse(t, c, 0, 2, y, true)
-	cardMouse(t, c, 32, 21, y, true)
-	cardMouse(t, c, 0, 21, y, false)
-	wire.settle(t, c, out)
-	start := out.Len()
-	var filter terminalInputFilter
-	if got := filter.FilterInput([]byte{3}, c, false, true); len(got) != 0 {
-		t.Fatal("plain-drag selection became an interrupt with graphics enabled")
-	}
-	assertExecutionClipboard(t, out.String()[start:], "copied café 日本語")
-	wire.settle(t, c, out)
-	c.mu.Lock()
-	c.clearOutputViewport(3)
-	c.renderOutputViewport()
-	c.mu.Unlock()
-	wire.settle(t, c, out)
-	if len(wire.images) != 0 || len(wire.placements) != 0 {
-		t.Fatal("clear left a graphical boundary floating over the empty pane")
+	for _, automatic := range []bool{true, false} {
+		t.Run(fmt.Sprintf("automatic-%t", automatic), func(t *testing.T) {
+			c, out := blocksFixture(t, fmt.Sprintf("[ui.chatbox]\ncompleted-command='command'\ncopy-on-select=%t\n", automatic))
+			c.EnablePixelDividers()
+			blocksExecution(c, "first", "first\r\n", "1")
+			blocksExecution(c, "second", "copied café 日本語\r\n", "0")
+			blocksPrompt(c, "input")
+			wire := newDividerWire(9, 19)
+			wire.settle(t, c, out)
+			lines := terminalScreenLines(applyTerminalOutput(t, dividerTextProjection(out.Bytes()), 60, 24))
+			y := terminalLineIndex(lines, "copied", 0)
+			start := out.Len()
+			cardMouse(t, c, 0, 2, y, true)
+			cardMouse(t, c, 32, 21, y, true)
+			if strings.Contains(out.String()[start:], "\x1b]52;") {
+				t.Fatal("selection copied before release")
+			}
+			cardMouse(t, c, 0, 21, y, false)
+			wire.settle(t, c, out)
+			if automatic {
+				assertExecutionClipboard(t, out.String()[start:], "copied café 日本語")
+			} else if strings.Contains(out.String()[start:], "\x1b]52;") {
+				t.Fatal("manual selection copied on release")
+			}
+			start = out.Len()
+			var filter terminalInputFilter
+			want := "next"
+			if automatic {
+				want = "\x03next"
+			}
+			if got := filter.FilterInput([]byte("\x03next"), c, false, true); string(got) != want {
+				t.Fatalf("selection changed subsequent shell input: got %q, want %q", got, want)
+			}
+			if automatic {
+				if strings.Contains(out.String()[start:], "\x1b]52;") {
+					t.Fatal("interrupt copied the selection twice")
+				}
+			} else {
+				assertExecutionClipboard(t, out.String()[start:], "copied café 日本語")
+			}
+			wire.settle(t, c, out)
+			c.mu.Lock()
+			c.clearOutputViewport(3)
+			c.renderOutputViewport()
+			c.mu.Unlock()
+			wire.settle(t, c, out)
+			if len(wire.images) != 0 || len(wire.placements) != 0 {
+				t.Fatal("clear left a graphical boundary floating over the empty pane")
+			}
+		})
 	}
 }
 

@@ -67,7 +67,7 @@ func TestOutputClearZshInteractiveProducer(t *testing.T) {
 			}()
 			defer func() {
 				cancel()
-				terminal.Close()
+				_ = terminal.Close()
 				_ = cmd.Process.Kill() // Only this captured fixture-owned child.
 				_ = cmd.Wait()
 				<-done

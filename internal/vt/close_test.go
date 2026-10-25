@@ -96,7 +96,11 @@ func TestEmulatorCloseAfterInputPipeEOF(t *testing.T) {
 	if err := <-written; err != nil {
 		t.Fatal(err)
 	}
-	if err := e.InputPipe().(io.Closer).Close(); err != nil {
+	closer, ok := e.InputPipe().(io.Closer)
+	if !ok {
+		t.Fatal("input pipe does not support closing")
+	}
+	if err := closer.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := e.Read(payload); n != 0 || !errors.Is(err, io.EOF) {

@@ -8,6 +8,10 @@ here.
 
 ## Hard Block: Never Build Vuja Or Disrupt Live Sessions
 
+For the v2.0.0 stabilization goal, the Hosted CI Exception below overrides
+this section only for isolated GitHub-hosted jobs. All local build,
+installation, reload and existing-session prohibitions remain in force.
+
 Codex and every agent, subagent, automation, tool, and subprocess acting on its
 behalf MUST NOT build or install Vuja, start a watchdog, reload or replace an
 existing Vuja process, or otherwise interfere with an existing session. A
@@ -45,6 +49,22 @@ builds, installations and reloads himself. Agents MAY perform read-only runtime
 inspection, verified read-only CLI checks and isolated installed-binary
 verification without asking Brian to run them. The repository policy itself
 must be deliberately changed before Codex may run any other forbidden command.
+
+## Hosted CI Exception For v2.0.0 Stabilization
+
+Agents MAY trigger and inspect the repository's existing GitHub Actions
+checks, isolated test builds, cross-platform artifact builds and release
+packaging for the authorized v2.0.0 stabilization goal. These jobs MUST run
+on disposable GitHub-hosted runners, MUST NOT access or control existing
+user terminal sessions, and MUST NOT deploy or install Vuja on user machines.
+Publishing release candidates and the stable release remains subject to
+the authorized release scope and every gate in `RELEASE.md`; this exception
+MUST NOT authorize replacing published tags or unrelated tag deletion.
+
+Agents MUST NOT use hosted CI to bypass a failed release gate or to perform
+any otherwise unauthorized runtime mutation. Local builds, installations,
+newly compiled Vuja execution, watchdogs, reloads and interference with live
+sessions remain forbidden.
 
 ## Isolated Installed-Binary Verification
 

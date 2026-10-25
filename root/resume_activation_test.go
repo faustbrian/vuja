@@ -383,7 +383,7 @@ func TestCodexResumeInFlightTimeoutIsAmbiguousAndNeverReplayed(t *testing.T) {
 func TestCodexResumeExpiredQueuedTransportCannotExecute(t *testing.T) {
 	server, dir := resumeFixtureServer(t)
 	target := server.Observe(testCodexResumeID)
-	connection, err := net.Dial("unix", server.socketPath)
+	connection, err := (&net.Dialer{}).DialContext(t.Context(), "unix", server.socketPath)
 	if err != nil {
 		t.Fatal(err)
 	}

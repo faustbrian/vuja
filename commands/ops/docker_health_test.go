@@ -54,11 +54,12 @@ func TestDockerHealthKeepsInventoryOutcomesIndependent(t *testing.T) {
 					}
 					var observed []health.Observation
 					ctx := health.WithObserver(t.Context(), func(value health.Observation) { observed = append(observed, value) })
-					if mode == "cancelled" {
+					switch mode {
+					case "cancelled":
 						var cancel context.CancelFunc
 						ctx, cancel = context.WithCancel(ctx)
 						cancel()
-					} else if mode == "expired" {
+					case "expired":
 						var cancel context.CancelFunc
 						ctx, cancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
 						defer cancel()
@@ -75,7 +76,7 @@ func TestDockerHealthKeepsInventoryOutcomesIndependent(t *testing.T) {
 					}
 					// Successful queries may legitimately be slow under host
 					// load; this fixture is not a process-latency benchmark.
-					if len(observed) != 1 || observed[0].Source.Name() != provider.name || (observed[0].Outcome != want && !(want == health.Healthy && observed[0].Outcome == health.Slow)) {
+					if len(observed) != 1 || observed[0].Source.Name() != provider.name || (observed[0].Outcome != want && (want != health.Healthy || observed[0].Outcome != health.Slow)) {
 						t.Fatalf("actual Docker inventory outcome was discarded or conflated: %+v, want %s/%v", observed, provider.name, want)
 					}
 				})

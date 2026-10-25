@@ -310,7 +310,7 @@ func TestHistoryArchiveIntegerOrderRoundTripIsExact(t *testing.T) {
 }
 
 func TestHistoryArchiveRetryPreservesPartiallyRetainedAggregate(t *testing.T) {
-	store := historyArchiveFixture(t)
+	historyArchiveFixture(t)
 	config.Get().History.Retention, config.Get().History.MaxEvents = "bounded", 2
 	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	event := scoring.HistoryEvent{EventKey: "legacy:compact", Command: "git status", Cwd: "/repo",
@@ -331,7 +331,7 @@ func TestHistoryArchiveRetryPreservesPartiallyRetainedAggregate(t *testing.T) {
 		if _, err := runHistoryArchiveFixture(t, "import", "native", path, "--old-sessions-restarted"); err != nil {
 			t.Fatalf("retry archive after partial retention (step=%d): %v", step, err)
 		}
-		store, err = scoring.GetFrecencyStore()
+		store, err := scoring.GetFrecencyStore()
 		if err != nil {
 			t.Fatal(err)
 		}

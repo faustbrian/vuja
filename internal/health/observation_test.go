@@ -47,7 +47,7 @@ func TestReportKeepsOptionalMissesAndCancellationQuiet(t *testing.T) {
 
 func TestReportUsesRealDeadlineAndSupportsUnobservedCallers(t *testing.T) {
 	var observation Observation
-	ctx := WithObserver(nil, func(value Observation) { observation = value })
+	ctx := WithObserver(nil, func(value Observation) { observation = value }) //nolint:staticcheck // Exercise WithObserver's supported nil-context fallback.
 	expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 	defer cancel()
 	Report(expired, Completion, time.Millisecond, nil)
@@ -55,5 +55,5 @@ func TestReportUsesRealDeadlineAndSupportsUnobservedCallers(t *testing.T) {
 		t.Fatal("an expired provider deadline was mistaken for success")
 	}
 	Report(context.Background(), Completion, time.Second, errors.New("private-error"))
-	Report(nil, Completion, 0, nil)
+	Report(nil, Completion, 0, nil) //nolint:staticcheck // Report deliberately accepts an unobserved nil context.
 }

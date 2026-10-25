@@ -17,6 +17,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func diagnosticSection(t *testing.T, document map[string]any, key string) map[string]any {
+	t.Helper()
+	section, ok := document[key].(map[string]any)
+	if !ok {
+		t.Fatalf("diagnostic section %q is missing or not an object", key)
+	}
+	return section
+}
+
 func diagnosticFixture(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -89,19 +98,19 @@ func TestDiagnosticsReportsMetadataAndSanitizedLatency(t *testing.T) {
 			t.Fatalf("diagnostics omitted %s", field)
 		}
 	}
-	if report["configuration"].(map[string]any)["state"] != "valid" {
+	if diagnosticSection(t, report, "configuration")["state"] != "valid" {
 		t.Fatalf("fixture configuration was not inspected: %+v", report["configuration"])
 	}
-	latency := report["latency"].(map[string]any)
-	paint, ok := latency["phases"].(map[string]any)["first-paint"].(map[string]any)
+	latency := diagnosticSection(t, report, "latency")
+	paint, ok := diagnosticSection(t, latency, "phases")["first-paint"].(map[string]any)
 	if !ok {
 		t.Fatalf("known latency fixture was not read: %+v", latency)
 	}
 	if paint["samples"] != float64(3) || paint["p50_us"] != float64(2000) || paint["p95_us"] != float64(4000) || latency["timeouts"] != float64(3) {
 		t.Fatalf("incorrect summary of known telemetry: %+v", latency)
 	}
-	terminal := report["terminal"].(map[string]any)
-	visual := report["visual"].(map[string]any)
+	terminal := diagnosticSection(t, report, "terminal")
+	visual := diagnosticSection(t, report, "visual")
 	if terminal["width"] != float64(120) || terminal["height"] != float64(40) || visual["model_recoveries"] != float64(2) || visual["backdrop_recoveries"] != float64(1) || visual["visual_recoveries"] != float64(4) {
 		t.Fatalf("runtime observations missing: terminal=%+v visual=%+v", terminal, visual)
 	}
@@ -135,7 +144,7 @@ func TestDiagnosticsReadsRealModelCountersAndRecorderSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := runDiagnosticFixture(t)
-	if report["visual"].(map[string]any)["model_recoveries"] != float64(1) {
+	if diagnosticSection(t, report, "visual")["model_recoveries"] != float64(1) {
 		t.Fatalf("persisted runtime observation was not reported: %+v", report["visual"])
 	}
 }
@@ -165,7 +174,7 @@ func TestDiagnosticsDoesNotReplayOrMutateHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := runDiagnosticFixture(t)
-	history := report["history"].(map[string]any)
+	history := diagnosticSection(t, report, "history")
 	if history["database"] != "readable" || history["recovery_pending"] != true {
 		t.Fatalf("expected readable canonical database with separate pending recovery: %+v", history)
 	}
@@ -224,7 +233,7 @@ func TestDiagnosticsInvocationIsIsolatedFromRuntimeBootstrap(t *testing.T) {
 		}
 		if len(args) == 2 {
 			var report map[string]any
-			if err != nil || json.Unmarshal(out.Bytes(), &report) != nil || report["configuration"].(map[string]any)["state"] != "invalid-or-unreadable" {
+			if err != nil || json.Unmarshal(out.Bytes(), &report) != nil || diagnosticSection(t, report, "configuration")["state"] != "invalid-or-unreadable" {
 				t.Fatalf("invalid configuration prevented a sanitized report: %v %q", err, out.String())
 			}
 		} else if err == nil {
@@ -280,19 +289,19 @@ func TestDiagnosticsRejectsNonregularAndOversizedInputs(t *testing.T) {
 			report := runDiagnosticFixture(t)
 			switch input {
 			case "config-fifo":
-				if report["configuration"].(map[string]any)["state"] != "invalid-or-unreadable" {
+				if diagnosticSection(t, report, "configuration")["state"] != "invalid-or-unreadable" {
 					t.Fatal("nonregular configuration was reported valid")
 				}
 			case "cache-fifo", "oversized-latency":
-				if report["latency"].(map[string]any)["state"] != "unavailable" {
+				if diagnosticSection(t, report, "latency")["state"] != "unavailable" {
 					t.Fatal("unsafe telemetry was reported available")
 				}
 			case "counter-fifo":
-				if report["history"].(map[string]any)["persistence_failures_state"] != "unavailable" {
+				if diagnosticSection(t, report, "history")["persistence_failures_state"] != "unavailable" {
 					t.Fatal("unsafe failure counter was reported available")
 				}
 			case "journal-fifo":
-				if report["history"].(map[string]any)["recovery_state"] != "unavailable" {
+				if diagnosticSection(t, report, "history")["recovery_state"] != "unavailable" {
 					t.Fatal("unsafe journal was reported empty")
 				}
 			}
@@ -311,7 +320,7 @@ func TestDiagnosticsMissingInputsAreNotCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := runDiagnosticFixture(t)
-	if report["configuration"].(map[string]any)["state"] != "unavailable" || report["latency"].(map[string]any)["state"] != "unavailable" || report["history"].(map[string]any)["database"] != "unavailable" {
+	if diagnosticSection(t, report, "configuration")["state"] != "unavailable" || diagnosticSection(t, report, "latency")["state"] != "unavailable" || diagnosticSection(t, report, "history")["database"] != "unavailable" {
 		t.Fatal("missing sources were reported available")
 	}
 	for _, absent := range []string{cache, path, filepath.Join(home, ".local", "share", "vuja", "history.db")} {

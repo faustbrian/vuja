@@ -92,7 +92,7 @@ func TestClaudeResumeLinksExcludeC1Strings(t *testing.T) {
 		}
 	}
 	// These valid UTF-8 runes contain C1-shaped continuation bytes, not controls.
-	input := "ؐ؝؜😀\r\nResume this session with:\r\n" + testClaudeResumeCommand + "\r\n"
+	input := "ؐ؝\u061c😀\r\nResume this session with:\r\n" + testClaudeResumeCommand + "\r\n"
 	for split := 0; split <= len(input); split++ {
 		l := newCodexResumeLinkifier(func(string) string { return "vuja://claude-resume/" + testClaudeResumeID })
 		got := string(l.Transform([]byte(input[:split]))) + string(l.Transform([]byte(input[split:]))) + string(l.Flush())
