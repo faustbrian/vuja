@@ -1242,12 +1242,44 @@ The stable channel excludes every prerelease. The `rc` channel accepts release
 candidates and their eventual stable promotion but excludes nightlies. The
 `nightly` channel selects nightly builds.
 
-Updater state is stored under Vuja's user state directory. Development builds
-use the version `dev` and do not display release notifications.
+Updater state is stored under Vuja's user state directory. Local unversioned
+builds use `dev`; untagged CI artifacts include their commit suffix. Neither
+form displays release notifications.
 
 Nightly releases run daily at 02:17 UTC or on manual dispatch. The workflow
 retains the newest 14 nightly releases and removes older nightly releases and
 their tags.
+
+### Upgrading from v1
+
+Binary installer/updater commands and archive names are unchanged. Go source
+installation uses `github.com/faustbrian/vuja/v2/cmd/vuja`; package consumers
+must likewise use the `/v2` import prefix. The unsuffixed module remains v1.
+
+Before upgrading, keep a private backup of your configuration and Vuja data.
+Configuration migration can be previewed with `vuja config migrate`; only
+`--write` changes it, creating a backup first. History migrations are described
+in [History](#history), including the owner-only pre-lifecycle backup. Do not
+delete or replace the live history database to complete an upgrade, and do not
+assume an older binary can read every newer history schema when rolling back.
+
+New defaults include interactive command blocks, a pinned full-width surface
+and copy-on-release selection. Explicit existing layout settings are retained.
+For the manual selection-copy workflow use:
+
+```toml
+[ui.chatbox]
+copy-on-select = false
+```
+
+Output checkpoints preserve retained text, not running processes. Account
+status does not authenticate either agent. Resume actions still require an
+eligible idle, empty Zsh editor; unsupported or busy contexts retain a manual
+resume command instead.
+
+Stable update channels do not select candidates or nightlies. Start a new
+terminal session after updating to qualify the new binary; source checks and
+existing old sessions do not prove the candidate's behavior.
 
 ## Troubleshooting
 

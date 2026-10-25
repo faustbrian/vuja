@@ -1,6 +1,6 @@
 # Release process
 
-This checklist is mandatory for `v1.0.0` and subsequent stable releases. A
+This checklist is mandatory for stable releases, including `v2.0.0`. A
 green source test suite is necessary but does not substitute for real-terminal
 verification.
 
@@ -18,6 +18,9 @@ verification.
       guidance describe the release behavior.
 - [ ] Terminal dependencies are pinned to reviewed revisions and their resize,
       scroll-region, and recovery regressions pass.
+- [ ] Linux/macOS compatibility passes on the minimum patched Go toolchain
+      and the newer supported family selected by the workflow; supported-shell
+      journeys execute rather than silently skipping unavailable shells.
 
 ## 2. Performance and durability gates
 
@@ -27,6 +30,7 @@ Run and retain the output for the release commit:
 go test -run '^$' -bench 'BenchmarkCanonicalHistory' -benchmem ./integration ./root
 go test -run '^$' -bench 'Benchmark(ScoreCandidates|FileGeneratorPrefix|Search.*RichHistory.*10K)$' -benchmem -count=5 ./internal/scoring ./spec ./integration
 go test -run '^$' -bench 'Benchmark(Chatbox|MergeResults|Prompt|Repository|Status|SuggestionPipeline|System)' -benchmem -count=5 ./root
+go test ./internal/vt -run '^$' -bench '^BenchmarkRetainedSession(Footprint|Resize)$' -benchtime=1x -count=3 -benchmem
 ```
 
 - [ ] Histories with at least 100,000 events and 10,000 distinct commands stay
@@ -85,6 +89,16 @@ shutdown, forced termination, and restart recovery.
 - [ ] Upgrade from the newest stable release and newest nightly release.
 - [ ] Exercise configuration and history migrations from every supported schema.
 - [ ] Verify uninstall and rollback instructions without losing user history.
+- [ ] In an isolated matching environment, install the explicit candidate
+      module version with `go install github.com/faustbrian/vuja/v2/cmd/vuja@v2.0.0-rc.N`
+      and verify `vuja version` reports that exact candidate. A checkout build
+      with linker flags does not prove published module resolution.
+
+Use private configuration/data/cache directories for candidate rehearsals.
+Do not overwrite or reload a live terminal merely to collect acceptance
+evidence. Existing installed-binary checks and model/PTY tests do not certify
+a different release artifact. Record native execution for each target
+separately from a successful cross-build.
 
 ## 5. Candidate promotion
 

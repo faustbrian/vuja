@@ -2,21 +2,21 @@
 
 ## Supported environments
 
-Vuja v1 supports these primary environments:
+Vuja's stable releases target these primary environments:
 
 | Platform | Architectures | Shells | Primary terminals |
 | --- | --- | --- | --- |
 | macOS | arm64, amd64 | Zsh, Bash, Fish | Ghostty, iTerm2 |
 | Linux | arm64, amd64 | Zsh, Bash, Fish | ANSI-compatible terminals |
 
-Windows and shells other than Zsh, Bash, and Fish are not supported in v1.
+Windows and shells other than Zsh, Bash, and Fish are not supported.
 Terminal-specific behavior outside Ghostty and iTerm2 is supported on a
 best-effort basis unless it is represented in the release compatibility
 matrix.
 
 ## Compatibility guarantees
 
-Within the v1 major series:
+Within a stable major series:
 
 - documented configuration remains compatible or is migrated automatically;
 - Vuja-owned history is migrated transactionally and is not discarded during
@@ -29,6 +29,12 @@ Within the v1 major series:
 An unavoidable incompatible change requires a new major version and migration
 guidance. Experimental or undocumented internals are not compatibility
 contracts.
+
+Go module paths follow the major version: v2 uses
+`github.com/faustbrian/vuja/v2`, while existing v1 source consumers retain
+the unsuffixed path. Binary distribution names and user-data locations do
+not change merely because the module major changes. See the
+[upgrade guidance](README.md#upgrading-from-v1) before moving between majors.
 
 ## Maintained versions
 
