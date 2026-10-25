@@ -45,6 +45,9 @@ Versioning after `v1.0.0`.
   pane restoration, without assuming a later resize notification.
 - Delayed history recovery, bounded interactive lock waits, native Zsh/Fish
   history policy and complete accepted multiline input.
+- Repeated history submissions reuse unchanged search data. Overlapping
+  publication, typo fallback and alias activation no longer hide eligible
+  history matches.
 - Clear-command handling, retained output across restarts, frozen reading
   anchors, Unicode resize semantics and independent pane checkpoint recovery.
 - Stable suggestion identity during asynchronous refreshes, deterministic
