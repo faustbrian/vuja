@@ -163,22 +163,33 @@ func publishCanonicalHistoryEntry(entry HistoryEntry) bool {
 		commandIndex = -1
 	}
 	newestIndex, hasNewest := historyCommandEntryIndex[command]
-	candidateOrderChanged := !hasNewest || historyEntryNewer(entry, richHistoryEntries[newestIndex])
-	if candidateOrderChanged {
+	newestChanged := !hasNewest || historyEntryNewer(entry, richHistoryEntries[newestIndex])
+	candidateOrderChanged := false
+	if newestChanged {
 		historyCommandEntryIndex[command] = index
-		commands = append([]string(nil), historyCache...)
-		if commandIndex >= 0 {
-			commands = append(commands[:commandIndex], commands[commandIndex+1:]...)
-		}
 		// Use execution time, not arrival time: journal replay and cross-window
 		// updates can arrive after newer executions. Existing repeated commands
 		// retain their newest occurrence, including deterministic tie-breaks.
-		position := sort.Search(len(commands), func(i int) bool {
+		limit := len(commands)
+		if commandIndex >= 0 {
+			limit = commandIndex // A newer occurrence can only move toward the front.
+		}
+		position := sort.Search(limit, func(i int) bool {
 			return historyEntryNewer(entry, richHistoryEntries[historyCommandEntryIndex[commands[i]]])
 		})
-		commands = append(commands, "")
-		copy(commands[position+1:], commands[position:])
-		commands[position] = command
+		candidateOrderChanged = position != commandIndex
+		if candidateOrderChanged {
+			// Off-lock readers retain this generation (SearchCachedHistory and
+			// SearchHistoryContext). Reuse it when only event metadata changed;
+			// otherwise detach before changing candidate order or search indexes.
+			commands = append([]string(nil), historyCache...)
+			if commandIndex >= 0 {
+				commands = append(commands[:commandIndex], commands[commandIndex+1:]...)
+			}
+			commands = append(commands, "")
+			copy(commands[position+1:], commands[position:])
+			commands[position] = command
+		}
 	}
 	ids := idMapCache
 	if candidateOrderChanged {

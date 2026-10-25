@@ -248,6 +248,19 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 	history := historyCache
 	statsIDs := idMapCache
 	searcher := searcherCache
+	var previousQuery, previousAliases string
+	var previousResults []HistResult
+	var previousTruncated bool
+	if query != "" {
+		// Publication replaces the searcher with its command/rank generation.
+		// Capture narrowing state in the same lock order as publication.
+		historySearchMu.Lock()
+		previousQuery = lastSearchQuery
+		previousAliases = lastSearchAliases
+		previousResults = append([]HistResult(nil), lastSearchResults...)
+		previousTruncated = lastSearchTruncated
+		historySearchMu.Unlock()
+	}
 	mu.RUnlock()
 
 	if query == "" {
@@ -293,13 +306,9 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 	candidateHistory := history
 	candidateSearcher := searcher
 	aliasesKey := historyAliasesKey(aliases)
-	historySearchMu.Lock()
-	previousQuery := lastSearchQuery
-	previousAliases := lastSearchAliases
-	previousResults := append([]HistResult(nil), lastSearchResults...)
-	previousTruncated := lastSearchTruncated
-	historySearchMu.Unlock()
-	if previousQuery != "" && strings.HasPrefix(strings.ToLower(query), strings.ToLower(previousQuery)) &&
+	// Completing an alias or its target can activate a new alternative query
+	// absent from prior results, even when the raw query only gained a suffix.
+	if len(alternativeQueries) == 0 && previousQuery != "" && strings.HasPrefix(strings.ToLower(query), strings.ToLower(previousQuery)) &&
 		aliasesKey == previousAliases && len(previousResults) > 0 && !previousTruncated {
 		candidateHistory = make([]string, 0, len(previousResults))
 		for _, result := range previousResults {
@@ -459,6 +468,9 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 	// fallback: if subcommand filter produced nothing, retry without it
 	// so typos like "git chckout" still surface fuzzy matches
 	if len(results) == 0 {
+		// Prefix narrowing used the stricter filter; it cannot constrain this
+		// broader fallback without dropping matches available to a cold search.
+		candidateHistory, candidateSearcher = history, searcher
 		addMatches(query, false)
 		for _, altQ := range alternativeQueries {
 			addMatches(altQ, false)
@@ -515,12 +527,18 @@ func SearchHistoryContext(ctx context.Context, query string, aliases map[string]
 		return nil, err
 	}
 
-	historySearchMu.Lock()
-	lastSearchQuery = query
-	lastSearchAliases = aliasesKey
-	lastSearchResults = append([]HistResult(nil), results...)
-	lastSearchTruncated = truncated
-	historySearchMu.Unlock()
+	mu.RLock()
+	// An off-lock search may finish after publication. Cache its results only
+	// while its captured searcher still identifies the current generation.
+	if searcherCache == searcher {
+		historySearchMu.Lock()
+		lastSearchQuery = query
+		lastSearchAliases = aliasesKey
+		lastSearchResults = append([]HistResult(nil), results...)
+		lastSearchTruncated = truncated
+		historySearchMu.Unlock()
+	}
+	mu.RUnlock()
 	return results, nil
 }
 
