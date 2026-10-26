@@ -262,7 +262,7 @@ if [ -n "$VUJA_PID" ] && [ -n "$VUJA_FD" ]; then
   add-zsh-hook precmd _vuja_precmd
   add-zsh-hook preexec _vuja_preexec
 fi
-`, binaryPath, shellEditorQueryPrefix) + shellResumeEditorScript()
+`, binaryPath, shellEditorQueryPrefix) + shellMouseEditorScript() + shellResumeEditorScript()
 	case "bash":
 		return fmt.Sprintf(`
 # Vuja Autostart Hook

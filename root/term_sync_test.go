@@ -34,6 +34,80 @@ func TestTerminalInputFilterPreservesKeyboardEscapeSequences(t *testing.T) {
 	}
 }
 
+func TestMouseExitReportsLeaveActualResumeEditorEmpty(t *testing.T) {
+	for _, command := range []string{"codex resume " + testCodexResumeID, testClaudeResumeCommand} {
+		t.Run(command, func(t *testing.T) {
+			f := newResumeShellFixture(t, `claude() { print -u 3 -N -r -- "FIXTURE_CLAUDE:$#:${(j:|:)@}"; }`)
+			c, _ := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\n")
+			var filter terminalInputFilter
+			report := "\x1b[<51;16;31M\x1b[<0;16;32m"
+			input := filter.FilterInput([]byte(report[:7]), c, false, false)
+			input = append(input, filter.FilterInput([]byte(report[7:]), c, false, false)...)
+			if _, err := f.terminal.Write(input); err != nil {
+				t.Fatal(err)
+			}
+			f.snapshot(t, "")
+			f.wait(t, "FIXTURE_PREBUFFER:")
+			s, dir := resumeFixtureServer(t)
+			observed := command
+			if strings.HasPrefix(command, "codex ") {
+				observed = testCodexResumeID
+			}
+			target := s.Observe(observed)
+			if err := dispatchResumeFixture(t, s, target, dir, false, "", 0, f.editor); err != nil {
+				t.Fatal(err)
+			}
+			want := "FIXTURE_RUN:2:resume:" + testCodexResumeID
+			if strings.HasPrefix(command, "claude ") {
+				want = "FIXTURE_CLAUDE:2:--resume|" + testClaudeResumeID
+			}
+			f.wait(t, want)
+			f.wait(t, "FIXTURE_EDITOR_READY")
+			f.snapshot(t, "")
+		})
+	}
+}
+
+func TestMouseReportAfterSearchClosePreservesAdjacentInput(t *testing.T) {
+	for _, next := range []string{"typed\r", "\x1b[200~pasted\r\ntext\x1b[201~"} {
+		c, _ := blocksFixture(t, "")
+		blocksExecution(c, "first", "output\r\n", "0")
+		blocksPrompt(c, "")
+		var f terminalInputFilter
+		f.FilterInput([]byte("\x1b[18~"), c, false, true)
+		if !c.OutputSearchActive() {
+			t.Fatal("fixture did not open output search")
+		}
+		report := "\x1b[<51;16;31M"
+		f.FilterInput([]byte(report[:7]), c, false, true)
+		c.Resize(60, 1)
+		if c.OutputSearchActive() {
+			t.Fatal("geometry handoff did not close search")
+		}
+		if got := f.FilterInput([]byte(report[7:]+next), c, false, false); string(got) != next {
+			t.Fatalf("mouse completion swallowed adjacent input: got %q want %q", got, next)
+		}
+	}
+}
+
+func TestUnownedLegacyMouseBytesRemainExact(t *testing.T) {
+	// Raw X10 and UTF-8 mode 1005 share an ambiguous prefix. Do not guess
+	// their payload boundary, or raw coordinates can consume adjacent typing.
+	for _, report := range []string{"\x1b[M \xc2\xa1", "\x1b[M \xc2\x84!"} {
+		for _, next := range []string{"next", "\x1b[200~paste\x1b[201~"} {
+			for split := 0; split <= len(report); split++ {
+				c, _ := blocksFixture(t, "")
+				var f terminalInputFilter
+				got := f.FilterInput([]byte(report[:split]), c, false, false)
+				got = append(got, f.FilterInput([]byte(report[split:]+next), c, false, true)...)
+				if string(got) != report+next {
+					t.Fatalf("split=%d: unknown legacy bytes or following input changed: %q", split, got)
+				}
+			}
+		}
+	}
+}
+
 func TestInputFramingPreservesMetaUnderscore(t *testing.T) {
 	for _, shell := range []bool{true, false} {
 		for _, graphics := range []string{"disabled", "enabled", "pending"} {
