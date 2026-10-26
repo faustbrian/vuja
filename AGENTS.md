@@ -6,6 +6,14 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
 [RFC2119] [RFC8174] when, and only when, they appear in all capitals, as shown
 here.
 
+## Main-Only Workflow
+
+Agents MUST perform all work in this repository directly on `main`.
+Agents MUST NOT create or use task branches or separate Git worktrees.
+This repository-specific rule overrides default branch and worktree setup
+in procedural skills. Existing unrelated changes MUST still be preserved.
+Commit, push, review and verification requirements remain in force.
+
 ## Hard Block: Never Build Vuja Or Disrupt Live Sessions
 
 For the v2.0.0 stabilization goal, the Hosted CI Exception below overrides
