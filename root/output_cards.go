@@ -879,8 +879,8 @@ func (c *terminalCompositor) handleOutputInteraction(data []byte, suggestions bo
 			s.clearSelection()
 			s.focus, s.focused = nil, nil
 			c.viewport.executions.selected, c.viewport.executions.notice = nil, ""
-			// Freezing the plain model releases pointer state; capture exactly
-			// the visible frame before that transition, as card reading does.
+			// Card reading releases pointer state; keep its visible frame.
+			// Plain reading refreshes it from the aligned immutable pane below.
 			frame := slices.Clone(s.frame)
 			if plain && c.viewport.frozen == nil {
 				// ED2 can hide retained history, and stored rows can coalesce
@@ -896,6 +896,11 @@ func (c *terminalCompositor) handleOutputInteraction(data []byte, suggestions bo
 						break
 					}
 				}
+				// Physical row rendering can omit spaces before soft wraps.
+				// Copy from the same logical snapshot that selection displays.
+				c.viewport.dirty = true
+				c.renderOutputViewport()
+				frame = slices.Clone(s.frame)
 			}
 			s.press = &cardPress{point: point}
 			if cards && y >= 0 && y < len(s.frame) {

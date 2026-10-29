@@ -503,3 +503,26 @@ func TestPlainOutputExecutionSnapshotKeepsActionIdentity(t *testing.T) {
 	filter.FilterInput([]byte("\x1b[23~"), c, false, true)
 	assertExecutionClipboard(t, out.String(), "old-only\n")
 }
+
+func TestPlainOutputSoftSpacesCopy(t *testing.T) {
+	for _, frozen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("frozen=%t", frozen), func(t *testing.T) {
+			c, out := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\n")
+			want := "abc" + strings.Repeat(" ", 57) + "def"
+			blocksExecution(c, "spaces", want+"\r\n", "0")
+			blocksPrompt(c, "pending-input")
+			if frozen {
+				c.HandleViewportInput([]byte("\x1b[5~"), false)
+			}
+			y := terminalLineIndex(terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24)), "abc", 0)
+			if y < 0 {
+				t.Fatal("fixture missing")
+			}
+			out.Reset()
+			cardMouse(t, c, 0, 0, y, true)
+			cardMouse(t, c, 32, 2, y+1, true)
+			cardMouse(t, c, 0, 2, y+1, false)
+			assertExecutionClipboard(t, out.String(), want)
+		})
+	}
+}
