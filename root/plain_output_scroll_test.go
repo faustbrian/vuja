@@ -453,3 +453,53 @@ func TestPlainOutputTitlelessBadgeWheelClearsSelection(t *testing.T) {
 		t.Fatal("wheel left a stale selection that copied old text instead of interrupting")
 	}
 }
+
+func TestPlainOutputSelectionPreservesTrailingBlankCanvas(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\n")
+	blocksPrompt(c, "running-command")
+	c.WritePTY(terminalMarkerBytes("blocks", "command-start"))
+	c.WritePTY([]byte("old" + strings.Repeat(" ", 4000) + "\r\nselected\r\n"))
+	document := strings.Join(retainedModelRows(c.viewport.model), "\n")
+	initial := append([]byte(nil), out.Bytes()...)
+	before := terminalScreenLines(applyTerminalOutput(t, initial, 60, 24))
+	y := terminalLineIndex(before, "selected", 0)
+	if y < 0 {
+		t.Fatal("selection fixture missing")
+	}
+	out.Reset()
+	cardMouse(t, c, 0, 0, y, true)
+	if strings.Join(c.viewport.frozen, "\n") != document {
+		t.Fatal("blank drawing columns changed the semantic search/export document")
+	}
+	after := terminalScreenLines(applyTerminalOutput(t, append(initial, out.Bytes()...), 60, 24))
+	for row := 0; row < c.viewportContentRows(); row++ {
+		if before[row] != after[row] {
+			t.Fatalf("press moved blank output row %d: %q -> %q", row, before[row], after[row])
+		}
+	}
+	cardMouse(t, c, 32, 7, y, true)
+	out.Reset()
+	cardMouse(t, c, 0, 7, y, false)
+	assertExecutionClipboard(t, out.String(), "selected")
+}
+
+func TestPlainOutputExecutionSnapshotKeepsActionIdentity(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\n")
+	blocksExecution(c, "old-command", "old-only\r\n", "0")
+	blocksExecution(c, "new-command", "new-only\r\n", "0")
+	blocksPrompt(c, "pending-input")
+	var filter terminalInputFilter
+	for range 2 {
+		filter.FilterInput([]byte("\x1b[21~"), c, false, true)
+	}
+	y := terminalLineIndex(terminalScreenLines(applyTerminalOutput(t, out.Bytes(), 60, 24)), "old-only", 0)
+	if y < 0 {
+		t.Fatal("older execution fixture missing")
+	}
+	cardMouse(t, c, 0, 0, y, true)
+	cardMouse(t, c, 32, 7, y, true)
+	cardMouse(t, c, 0, 7, y, false)
+	out.Reset()
+	filter.FilterInput([]byte("\x1b[23~"), c, false, true)
+	assertExecutionClipboard(t, out.String(), "old-only\n")
+}

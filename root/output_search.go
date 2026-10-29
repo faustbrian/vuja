@@ -69,6 +69,7 @@ func (c *terminalCompositor) freezeOutputViewport() {
 		return
 	}
 	var rows []string
+	var columns []int
 	var base uint64
 	var states []blockState
 	var dividers map[int]bool
@@ -83,12 +84,13 @@ func (c *terminalCompositor) freezeOutputViewport() {
 			states[i] = blockStateAt(reading.states, base+uint64(i))
 		}
 	} else {
-		rows = retainedModelRows(v.model)
+		rows, columns = retainedModelRowsAndColumns(v.model)
 		base, _ = v.model.LogicalRowPositions()
 		states = v.rowStates(len(rows))
 		dividers = v.paneDividerIndexes(base, rows)
 	}
 	v.setFrozen(rows)
+	v.frozenColumns = columns
 	v.frozenBase = base
 	v.frozenPane = true
 	v.frozenStates = states

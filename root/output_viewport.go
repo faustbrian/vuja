@@ -23,6 +23,7 @@ type outputViewport struct {
 	frozen            []string
 	frozenLayout      []frozenOutputRow
 	frozenOrigin      *frozenOutputRow
+	frozenColumns     []int
 	frozenWidth       int
 	frozenTruncated   bool
 	top               int

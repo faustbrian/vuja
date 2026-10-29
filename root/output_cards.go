@@ -160,7 +160,8 @@ func (c *terminalCompositor) latestCardReading() {
 }
 
 func (c *terminalCompositor) plainOutputSelectionAvailable() bool {
-	return c.viewport != nil && c.chatboxConfig.Scrollback == "output" && c.viewport.search == nil
+	return c.viewport != nil && c.chatboxConfig.Scrollback == "output" && c.viewport.search == nil &&
+		(c.viewport.frozen == nil || c.viewport.frozenPane)
 }
 
 func (c *terminalCompositor) interactiveOutputMouse() bool {

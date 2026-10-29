@@ -103,12 +103,19 @@ func (a *outputExecutionCapture) snapshot() retainedExecution {
 // Retained semantic text is independent of the width used for drawing. All
 // consumers use this SDK projection; none reconstruct a terminal transcript.
 func retainedModelRows(model *vt.Emulator) []string {
+	rows, _ := retainedModelRowsAndColumns(model)
+	return rows
+}
+
+func retainedModelRowsAndColumns(model *vt.Emulator) ([]string, []int) {
 	lines := model.LogicalLines()
 	rows := make([]string, len(lines))
+	columns := make([]int, len(lines))
 	for i, line := range lines {
 		rows[i] = line.Render()
+		columns[i] = len(line)
 	}
-	return rows
+	return rows, columns
 }
 
 // The compositor's existing native-control predicate is authoritative, whether

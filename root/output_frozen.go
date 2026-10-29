@@ -1,6 +1,10 @@
 package root
 
-import "github.com/charmbracelet/x/ansi"
+import (
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+)
 
 // Frozen text stays logical and immutable. This is only a drawing index into
 // that snapshot: it cannot erase text or reinterpret terminal controls.
@@ -19,6 +23,7 @@ func (v *outputViewport) setFrozen(rows []string) {
 	v.frozenDividers = nil
 	v.frozenLayout = nil
 	v.frozenOrigin = nil
+	v.frozenColumns = nil
 	v.frozenWidth = 0
 	v.frozenTruncated = false
 }
@@ -34,7 +39,14 @@ func (v *outputViewport) layoutFrozen(width int) {
 	v.frozenLayout = nil
 	for row, line := range v.frozen {
 		first, column := 0, 0
-		for text := ansi.Strip(line); len(text) > 0; {
+		text := ansi.Strip(line)
+		if row < len(v.frozenColumns) {
+			// UV Line.Render omits trailing EmptyCell spaces. SDK LogicalLines
+			// retains their used/wrap extent; drawing needs those blank columns
+			// without padding the immutable search/export document itself.
+			text += strings.Repeat(" ", max(v.frozenColumns[row]-ansi.StringWidth(text), 0))
+		}
+		for len(text) > 0 {
 			cluster, size := ansi.FirstGraphemeCluster(text, ansi.GraphemeWidth)
 			// SDK prefix eviction is cluster-aligned, not width-aligned
 			// (vt/scrollback.go:trimRetained). Keep the live canvas seam
