@@ -64,6 +64,20 @@ func (e *Emulator) LogicalRowPositions() (first uint64, rows []uint64) {
 	return first, rows
 }
 
+// LogicalCanvasOrigin maps primary canvas cell (0,0) into LogicalLines.
+// A stored scrollback entry can contain many soft wraps. Its retained cell
+// prefix, not its entry count, supplies the display-column offset.
+func (e *Emulator) LogicalCanvasOrigin() (logical uint64, column int) {
+	if sb := e.scrs[0].scrollback; sb != nil {
+		logical = sb.droppedLines + uint64(sb.logicalLines)
+		if last := len(sb.wrap) - 1; last >= 0 && sb.wrap[last] > 0 {
+			logical--
+			column = max(contentWidth(sb.lines[last]), sb.used[last], sb.wrap[last])
+		}
+	}
+	return logical, column
+}
+
 // RetainedViewRow is a defensive drawing fragment, not new terminal state.
 type RetainedViewRow struct {
 	Line    uv.Line
@@ -434,6 +448,12 @@ func (se *SafeEmulator) LogicalRowPositions() (uint64, []uint64) {
 	se.mu.RLock()
 	defer se.mu.RUnlock()
 	return se.Emulator.LogicalRowPositions()
+}
+
+func (se *SafeEmulator) LogicalCanvasOrigin() (uint64, int) {
+	se.mu.RLock()
+	defer se.mu.RUnlock()
+	return se.Emulator.LogicalCanvasOrigin()
 }
 
 func (se *SafeEmulator) RetainedTail(width, limit int) []RetainedViewRow {

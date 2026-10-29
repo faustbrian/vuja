@@ -265,16 +265,12 @@ func (c *terminalCompositor) setViewportMouse(enabled bool) {
 	// Xterm mouse tracking reports clicks as well as wheel input. With native
 	// selection preferred, leave the pointer to the terminal even while the
 	// pinned output viewport owns the screen.
-	enabled = enabled && (c.chatboxConfig.OutputMouse == "navigate" || c.interactiveBlockMouse())
-	if c.interactiveBlockMouse() && c.viewport != nil && (c.viewport.search != nil || c.viewport.frozen != nil) {
-		// Text-only search/legacy snapshots have no card hit targets. Return
-		// selection to the terminal instead of capturing and discarding drags.
-		enabled = false
-	}
+	enabled = enabled && (c.chatboxConfig.OutputMouse == "navigate" || c.interactiveOutputMouse())
 	if !enabled {
 		c.setViewportMotion(false)
 		if c.viewportMouse && c.viewport != nil {
 			c.viewport.cards.releasePointer()
+			c.viewport.dirty = true
 		}
 	}
 	if c.viewportMouse == enabled {
@@ -283,7 +279,7 @@ func (c *terminalCompositor) setViewportMouse(enabled bool) {
 	}
 	c.viewportMouse = enabled
 	if enabled {
-		if c.interactiveBlockMouse() {
+		if c.interactiveOutputMouse() {
 			// Button-motion reports let ordinary drags select without modifiers.
 			_, _ = io.WriteString(c.out, "\x1b[?1002h\x1b[?1006h")
 		} else {
@@ -312,7 +308,7 @@ func (c *terminalCompositor) setViewportMotion(enabled bool) {
 		// Leaving all-motion mode must restore normal reporting for wheel input.
 		if c.viewportMouse {
 			mode := "1000"
-			if c.interactiveBlockMouse() {
+			if c.interactiveOutputMouse() {
 				mode = "1002"
 			}
 			_, _ = fmt.Fprintf(c.out, "\x1b[?%sh", mode)
@@ -499,6 +495,9 @@ func (c *terminalCompositor) renderOutputViewport() {
 	frame.WriteString(terminalSyncStart + "\x1b7\x1b[?25l\x1b[?7l")
 	var projected []vt.RetainedViewRow
 	cardRows, usingCards := c.layoutOutputCards(c.viewportContentRows())
+	if !usingCards && c.plainOutputSelectionAvailable() {
+		v.cards.frame = nil
+	}
 	var liveRows []uint64
 	if !usingCards && v.frozen == nil && c.blockGutter() > 0 {
 		projected = v.model.RetainedTail(c.outputContentWidth(), rows)
@@ -548,6 +547,17 @@ func (c *terminalCompositor) renderOutputViewport() {
 		}
 		if strings.Contains(line, "vuja://claude-resume/") {
 			line = bareClaudeResumeLink.ReplaceAllString(line, "")
+		}
+		if !usingCards && c.plainOutputSelectionAvailable() {
+			logical := uint64(row)
+			if v.frozen != nil && v.top+row < len(v.frozenLayout) {
+				logical = uint64(v.frozenLayout[v.top+row].logical)
+			} else if row < len(liveRows) {
+				logical = liveRows[row]
+			}
+			visible := cardRow{line: line, kind: 4, width: c.width, logical: logical, key: plainOutputSelectionKey}
+			v.cards.frame = append(v.cards.frame, visible)
+			line = c.paintCardRow(visible, row)
 		}
 		fmt.Fprintf(&frame, "\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m", row+1, line)
 	}
@@ -623,7 +633,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	if c.closed || !c.outputViewportEnabled() || bytes.Contains(data, bracketedPasteStart) {
 		return false
 	}
-	if c.handleCardInput(data, suggestions) {
+	if c.handleOutputInteraction(data, suggestions) {
 		return true
 	}
 	if c.viewport != nil && c.viewport.search != nil {
@@ -636,6 +646,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 		_, left, width := c.viewportBadge()
 		hover := y == c.viewportBadgeRow() && x > left && x <= left+width
 		if pressed && button&^28 == 0 && hover {
+			c.viewport.cards.releasePointer()
 			c.viewport.frozen = nil
 			c.viewport.search = nil
 			c.viewport.executions.selected = nil
@@ -703,6 +714,7 @@ func (c *terminalCompositor) HandleViewportInput(data []byte, suggestions bool) 
 	}
 	v.dirty = true
 	if v.frozen == nil {
+		v.cards.releasePointer()
 		v.search = nil
 		v.executions.selected = nil
 		v.executions.notice = ""

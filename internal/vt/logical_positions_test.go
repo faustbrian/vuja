@@ -25,6 +25,21 @@ func TestRetainedLogicalRowPositionsSurviveReflowAndEviction(t *testing.T) {
 	}
 }
 
+func TestLogicalCanvasOriginTracksSoftWrappedPrefix(t *testing.T) {
+	e := retainedFixture(t, 6, 3)
+	if logical, column := e.LogicalCanvasOrigin(); logical != 0 || column != 0 {
+		t.Fatalf("empty canvas origin = (%d,%d)", logical, column)
+	}
+	writeFixture(t, e, []byte(strings.Repeat("abcdef", 10)))
+	if logical, column := e.LogicalCanvasOrigin(); logical != 0 || column != 42 {
+		t.Fatalf("soft-wrapped canvas origin = (%d,%d), want (0,42)", logical, column)
+	}
+	e.Resize(4, 3)
+	if logical, column := e.LogicalCanvasOrigin(); logical != 0 || column != 48 {
+		t.Fatalf("reflowed canvas origin = (%d,%d), want (0,48)", logical, column)
+	}
+}
+
 func TestRetainedTailDrawingPreservesControlsAndOwnership(t *testing.T) {
 	e := retainedFixture(t, 60, 4)
 	writeFixture(t, e, []byte(strings.Repeat("a", 59)+"\rZ\r\n"))

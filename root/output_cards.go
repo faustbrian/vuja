@@ -38,6 +38,10 @@ type cardRow struct {
 	index               int
 }
 
+// Input rows use the zero selection key. The plain pane is a separate
+// selection document; this local key is never an execution/action identity.
+const plainOutputSelectionKey uint64 = 1
+
 type cardPoint struct{ x, y int }
 type cardSelection struct {
 	first, last cardPoint
@@ -155,8 +159,14 @@ func (c *terminalCompositor) latestCardReading() {
 	c.viewport.executions.selected, c.viewport.executions.notice = nil, ""
 }
 
-func (c *terminalCompositor) interactiveBlockMouse() bool {
-	return c.cardProjectionAvailable() && c.chatboxConfig.OutputMouse == "interact"
+func (c *terminalCompositor) plainOutputSelectionAvailable() bool {
+	return c.viewport != nil && c.chatboxConfig.Scrollback == "output" && c.viewport.search == nil
+}
+
+func (c *terminalCompositor) interactiveOutputMouse() bool {
+	// Plain output owns the same drag gestures as cards. Search and legacy
+	// snapshots still yield selection to the terminal, not a hidden card.
+	return c.chatboxConfig.OutputMouse == "interact" && (c.cardProjectionAvailable() || c.plainOutputSelectionAvailable())
 }
 
 func (c *terminalCompositor) beginCardOutput() {
@@ -769,8 +779,9 @@ func (c *terminalCompositor) copyCardOutput(target *retainedExecution) {
 	}
 }
 
-func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool {
-	if !c.cardProjectionAvailable() || suggestions {
+func (c *terminalCompositor) handleOutputInteraction(data []byte, suggestions bool) bool {
+	cards, plain := c.cardProjectionAvailable(), c.plainOutputSelectionAvailable()
+	if (!cards && !plain) || suggestions {
 		return false
 	}
 	s := &c.viewport.cards
@@ -788,6 +799,9 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 			s.clearSelection()
 			c.viewport.dirty = true
 		}
+		if !cards {
+			return false
+		}
 		if string(data) == "\x1b[18~" {
 			// Search takes over the drawing surface, not the selected execution.
 			return false
@@ -801,7 +815,10 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 		c.viewport.executions.selected = nil
 		return false
 	}
-	if !c.interactiveBlockMouse() {
+	if !c.interactiveOutputMouse() {
+		return false
+	}
+	if plain && s.press == nil && c.viewport.frozen != nil && (button&32 != 0 || y == c.viewportBadgeRow()) {
 		return false
 	}
 	x, y = x-1, y-1
@@ -818,6 +835,10 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 		wheel, _ := viewportWheel(data, c.width, c.height-c.surfaceRows)
 		if wheel == 0 {
 			return true
+		}
+		if !cards {
+			s.clearSelection()
+			return false
 		}
 		direction := 3 * wheel
 		s.clearSelection()
@@ -857,8 +878,23 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 			s.clearSelection()
 			s.focus, s.focused = nil, nil
 			c.viewport.executions.selected, c.viewport.executions.notice = nil, ""
+			// Freezing the plain model releases pointer state; capture exactly
+			// the visible frame before that transition, as card reading does.
+			frame := slices.Clone(s.frame)
+			if plain && c.viewport.frozen == nil {
+				// ED2 can hide retained history, and stored rows can coalesce
+				// soft wraps. Freeze at the SDK's actual logical canvas origin.
+				logical, column := c.viewport.model.LogicalCanvasOrigin()
+				c.freezeOutputViewport()
+				for i, span := range c.viewport.frozenLayout {
+					if c.viewport.frozenBase+uint64(span.logical) == logical && span.first == column {
+						c.viewport.top = i
+						break
+					}
+				}
+			}
 			s.press = &cardPress{point: point}
-			if y >= 0 && y < len(s.frame) {
+			if cards && y >= 0 && y < len(s.frame) {
 				row := s.frame[y]
 				if row.kind != 0 && x >= 0 && x < row.width {
 					c.freezeCardReading()
@@ -877,7 +913,6 @@ func (c *terminalCompositor) handleCardInput(data []byte, suggestions bool) bool
 				}
 				s.press.target = s.focused
 			}
-			frame := slices.Clone(s.frame)
 			for len(frame) < c.height-c.surfaceRows {
 				frame = append(frame, cardRow{width: c.width})
 			}
