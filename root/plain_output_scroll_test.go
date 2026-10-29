@@ -399,3 +399,57 @@ func TestPlainOutputSelectionPreservesSoftWrappedCanvas(t *testing.T) {
 		})
 	}
 }
+
+func TestPlainOutputSelectionPreservesTrimmedCanvas(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\n")
+	blocksPrompt(c, "pending-input")
+	c.WritePTY(terminalMarkerBytes("blocks", "command-start"))
+	c.WritePTY([]byte(strings.Repeat("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ", 18000)))
+	initial := append([]byte(nil), out.Bytes()...)
+	before := terminalScreenLines(applyTerminalOutput(t, initial, 60, 24))
+	out.Reset()
+	cardMouse(t, c, 0, 3, 2, true)
+	after := terminalScreenLines(applyTerminalOutput(t, append(initial, out.Bytes()...), 60, 24))
+	for row := 0; row < c.viewportContentRows(); row++ {
+		if before[row] != after[row] {
+			t.Fatalf("press moved trimmed output row %d: %q -> %q", row, before[row], after[row])
+		}
+	}
+	cardMouse(t, c, 32, 10, 2, true)
+	out.Reset()
+	cardMouse(t, c, 0, 10, 2, false)
+	assertExecutionClipboard(t, out.String(), before[2][3:11])
+	document := strings.Join(c.viewport.frozen, "\n")
+	c.Resize(32, 24)
+	afterResize := terminalScreenLines(applyTerminalOutput(t, append(initial, out.Bytes()...), 32, 24))
+	if !strings.HasPrefix(afterResize[0], before[0][:32]) {
+		t.Fatalf("resize lost the trimmed canvas seam: %q", afterResize[0])
+	}
+	if strings.Join(c.viewport.frozen, "\n") != document {
+		t.Fatal("drawing alignment changed the retained search/export document")
+	}
+}
+
+func TestPlainOutputTitlelessBadgeWheelClearsSelection(t *testing.T) {
+	c, out := blocksFixture(t, "[ui.chatbox]\nscrollback='output'\ncopy-on-select=false\ntitle-left=[]\ntitle-right=[]\ncodex-account=false\nclaude-account=false\n")
+	var body strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&body, "row-%02d selected\r\n", i)
+	}
+	blocksExecution(c, "emit-lines", body.String(), "0")
+	blocksPrompt(c, "pending-input")
+	cardMouse(t, c, 0, 0, 2, true)
+	cardMouse(t, c, 32, 7, 2, true)
+	cardMouse(t, c, 0, 7, 2, false)
+	before := screenLine(applyTerminalOutput(t, out.Bytes(), 60, 24), 2)
+	cardMouse(t, c, 64, 2, c.viewportBadgeRow()-1, true)
+	after := screenLine(applyTerminalOutput(t, out.Bytes(), 60, 24), 2)
+	if before == after {
+		t.Fatal("titleless badge wheel did not browse output")
+	}
+	out.Reset()
+	var filter terminalInputFilter
+	if got := filter.FilterInput([]byte{3}, c, false, true); string(got) != "\x03" || strings.Contains(out.String(), "\x1b]52;") {
+		t.Fatal("wheel left a stale selection that copied old text instead of interrupting")
+	}
+}

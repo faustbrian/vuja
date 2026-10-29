@@ -818,7 +818,7 @@ func (c *terminalCompositor) handleOutputInteraction(data []byte, suggestions bo
 	if !c.interactiveOutputMouse() {
 		return false
 	}
-	if plain && s.press == nil && c.viewport.frozen != nil && (button&32 != 0 || y == c.viewportBadgeRow()) {
+	if plain && s.press == nil && c.viewport.frozen != nil && button&64 == 0 && (button&32 != 0 || y == c.viewportBadgeRow()) {
 		return false
 	}
 	x, y = x-1, y-1
@@ -886,6 +886,9 @@ func (c *terminalCompositor) handleOutputInteraction(data []byte, suggestions bo
 				// soft wraps. Freeze at the SDK's actual logical canvas origin.
 				logical, column := c.viewport.model.LogicalCanvasOrigin()
 				c.freezeOutputViewport()
+				c.viewport.frozenOrigin = &frozenOutputRow{logical: int(logical - c.viewport.frozenBase), first: column}
+				c.viewport.frozenWidth = 0
+				c.viewport.layoutFrozen(c.outputContentWidth())
 				for i, span := range c.viewport.frozenLayout {
 					if c.viewport.frozenBase+uint64(span.logical) == logical && span.first == column {
 						c.viewport.top = i

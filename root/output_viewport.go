@@ -22,6 +22,7 @@ type outputViewport struct {
 	done              chan struct{}
 	frozen            []string
 	frozenLayout      []frozenOutputRow
+	frozenOrigin      *frozenOutputRow
 	frozenWidth       int
 	frozenTruncated   bool
 	top               int

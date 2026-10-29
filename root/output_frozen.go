@@ -18,6 +18,7 @@ func (v *outputViewport) setFrozen(rows []string) {
 	v.frozenStates = nil
 	v.frozenDividers = nil
 	v.frozenLayout = nil
+	v.frozenOrigin = nil
 	v.frozenWidth = 0
 	v.frozenTruncated = false
 }
@@ -35,7 +36,11 @@ func (v *outputViewport) layoutFrozen(width int) {
 		first, column := 0, 0
 		for text := ansi.Strip(line); len(text) > 0; {
 			cluster, size := ansi.FirstGraphemeCluster(text, ansi.GraphemeWidth)
-			if column > first && column-first+size > width {
+			// SDK prefix eviction is cluster-aligned, not width-aligned
+			// (vt/scrollback.go:trimRetained). Keep the live canvas seam
+			// addressable without cropping the immutable retained document.
+			atOrigin := v.frozenOrigin != nil && v.frozenOrigin.logical == row && v.frozenOrigin.first == column
+			if column > first && (column-first+size > width || atOrigin) {
 				v.frozenLayout = append(v.frozenLayout, frozenOutputRow{row, first, column})
 				first = column
 			}
