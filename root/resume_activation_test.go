@@ -384,9 +384,22 @@ func TestCodexResumeInFlightTimeoutIsAmbiguousAndNeverReplayed(t *testing.T) {
 	case <-time.After(4 * time.Second):
 		t.Fatal("in-flight write left the caller hanging")
 	}
-	if err := dispatchCodexResumeURL(target, dir); err == nil {
-		t.Fatal("uncertain in-flight write allowed duplicate activation")
+	assertDuplicateRejected := func() {
+		t.Helper()
+		if err := dispatchCodexResumeURL(target, dir); err == nil {
+			t.Fatal("uncertain in-flight write allowed duplicate activation")
+		}
+		select {
+		case <-server.Actions():
+			t.Fatal("uncertain in-flight write allowed a second action to be queued")
+		default:
+		}
 	}
+	assertDuplicateRejected()
+	// An unfinished write must remain protected after transient duplicate
+	// history retires; an error caused only by consumer timeout is not enough.
+	time.Sleep(codexResumeActionTimeout)
+	assertDuplicateRejected()
 }
 
 func TestCodexResumeExpiredQueuedTransportCannotExecute(t *testing.T) {
