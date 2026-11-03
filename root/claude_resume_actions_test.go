@@ -192,8 +192,17 @@ func TestClaudeResumeLinkedCheckpointRebinds(t *testing.T) {
 	}
 	c.Close()
 	data, err := os.ReadFile(c.outputRecovery.path)
-	if err != nil || bytes.Contains(data, []byte(old.token)) || bytes.Contains(data, []byte(old.socketPath)) || bytes.Contains(data, []byte("private-canvas")) {
-		t.Fatal("checkpoint lost metadata or leaked credentials/canvas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedStale, parseErr := url.Parse(stale)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	for _, private := range []string{parsedStale.Query().Get("token"), old.token, old.socketPath, "private-canvas"} {
+		if bytes.Contains(data, []byte(private)) {
+			t.Fatal("checkpoint leaked credentials/canvas")
+		}
 	}
 	old.Close()
 	fresh, err := newCodexResumeActionServerIn(actions, "fedcba9876543210fedcba9876543210")

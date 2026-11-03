@@ -232,10 +232,16 @@ func TestCodexResumeNativeCheckpointRebindsWithoutLeakingCapabilities(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(data, []byte(old.token)) || bytes.Contains(data, []byte(old.socketPath)) || bytes.Contains(data, []byte("private-checkpoint-canvas")) {
-		t.Fatal("native checkpoint leaked private canvas or activation credentials")
-	}
 	stale := old.Observe(testCodexResumeID)
+	parsedStale, err := url.Parse(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{parsedStale.Query().Get("token"), old.token, old.socketPath, "private-checkpoint-canvas"} {
+		if bytes.Contains(data, []byte(private)) {
+			t.Fatal("native checkpoint leaked private canvas or activation credentials")
+		}
+	}
 	old.Close()
 	fresh, err := newCodexResumeActionServerIn(actions, "fedcba9876543210fedcba9876543210")
 	if err != nil {

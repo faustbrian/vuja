@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +35,43 @@ func TestResumeLinksRemainReusableAfterCompletedUse(t *testing.T) {
 	}
 }
 
+func TestResumeClockRollbackDoesNotInvalidateIdleLink(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "vrc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "clock.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	server := &codexResumeActionServer{
+		socketPath: path, token: "0123456789abcdef0123456789abcdef",
+		actions: make(chan *codexResumeAction, 1), notices: make(chan string, 4), stop: make(chan struct{}),
+		// A wire clock that moved backward sees the last submission in its
+		// future even though no work remains. No system clock is modified.
+		lastSubmission: time.Now().Add(time.Hour),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		connection, err := listener.AcceptUnix()
+		if err == nil {
+			server.handle(connection)
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close(); <-done })
+	var input bytes.Buffer
+	if err := dispatchResumeFixture(t, server, server.Observe(testCodexResumeID), dir, false, "", 0, &input); err != nil {
+		t.Fatalf("fresh idle click was invalidated by old wall-clock state: %v", err)
+	}
+	if input.String() != "codex resume "+testCodexResumeID+"\r" {
+		t.Fatal("clock reconciliation changed the resume command")
+	}
+}
+
 func TestResumeQueuedClicksDoNotCrossSubmissionBoundary(t *testing.T) {
 	server, dir := resumeFixtureServer(t)
 	values := []string{testCodexResumeID, testClaudeResumeCommand}
@@ -42,7 +81,8 @@ func TestResumeQueuedClicksDoNotCrossSubmissionBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		connection, err := net.DialTimeout("unix", server.socketPath, time.Second)
+		dialer := net.Dialer{Timeout: time.Second}
+		connection, err := dialer.DialContext(t.Context(), "unix", server.socketPath)
 		if err != nil {
 			t.Fatal(err)
 		}

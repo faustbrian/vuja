@@ -739,7 +739,13 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 	// idle-prompt intent. Fresh explicit clicks remain reusable; actual prompt
 	// admission and ambiguous-write reservations still belong to the editor.
 	requestStarted := deadline.Add(-codexResumeActionTimeout)
-	if !requestStarted.After(s.lastSubmission) || s.pending.inFlight() {
+	// Only requests from this bounded horizon can still be queued. Use
+	// monotonic elapsed time to retire history across wall-clock corrections;
+	// an actual unfinished write remains protected independently below.
+	submissionAge := time.Since(s.lastSubmission)
+	recentSubmission := submissionAge >= 0 && submissionAge < codexResumeActionTimeout
+	queuedDuplicate := recentSubmission && !requestStarted.After(s.lastSubmission)
+	if queuedDuplicate || s.pending.inFlight() {
 		reply(codexResumeResult{err: errors.New("resume submission is already pending; wait for an idle empty prompt before clicking again")})
 		return
 	}
