@@ -1,5 +1,11 @@
 # Vuja
 
+> [!IMPORTANT]
+> **Archived — no longer maintained.** Vuja has been retired in favor of a
+> simpler setup using native Zsh, Starship, zsh-autosuggestions, and
+> zsh-syntax-highlighting. The source and existing releases remain available
+> for reference, but no further updates or support are planned.
+
 TTY-native predictive shell completion combining structured command specs with
 personalized history ranking.
 
