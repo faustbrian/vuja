@@ -250,9 +250,10 @@ that shell is idle and its prompt is empty. `vuja setup` registers the private
 `vuja://` action handler on macOS and Linux; `vuja uninstall` removes it.
 Native-screen exit summaries keep working links after the prompt returns.
 Rejected clicks report a reason and do not queue execution for later; clear the
-prompt or wait for it to become idle, then click again. Links expire after ten
-minutes and successful submissions are single-use. If a link has expired, run
-the displayed resume command manually. Checkpoints never store activation
+prompt or wait for it to become idle, then click again. Codex and Claude links
+remain reusable while their originating Vuja session is open, including after
+earlier completed resumes. Each click still has a short execution deadline;
+queued duplicates and unresolved submissions cannot run later. Checkpoints never store activation
 credentials; restored panes obtain fresh links from their current owner.
 Reopen pre-upgrade Vuja sessions to use the acknowledged activation protocol.
 Automatic activation currently requires Zsh's editor integration. It checks the

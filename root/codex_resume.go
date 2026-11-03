@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -30,7 +31,6 @@ const (
 	codexReconnectLinePrefix   = "To reconnect, run"
 	codexSessionIDLinePrefix   = "Session ID:"
 	codexResumeLineLimit       = 2048
-	codexResumeTTL             = 10 * time.Minute
 	codexResumeSocketPathLimit = 100
 	codexResumeActionTimeout   = time.Second
 )
@@ -432,8 +432,9 @@ type codexResumeActionServer struct {
 	stop       chan struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
-	mu         sync.Mutex
-	observed   map[string]time.Time
+	// Owned by the serialized socket handler, not a per-target history.
+	pending        *codexResumeAction
+	lastSubmission time.Time
 }
 
 type codexResumeResult struct {
@@ -449,6 +450,7 @@ type codexResumeAction struct {
 	deadline time.Time
 	mu       sync.Mutex
 	done     bool
+	running  bool
 	result   chan codexResumeResult
 }
 
@@ -475,10 +477,23 @@ func (a *codexResumeAction) run(submit func() codexResumeResult) codexResumeResu
 		return result
 	}
 	a.done = true
+	a.running = true
 	a.mu.Unlock()
 	result := submit()
+	a.mu.Lock()
+	a.running = false
+	a.mu.Unlock()
 	a.result <- result
 	return result
+}
+
+func (a *codexResumeAction) inFlight() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.running
 }
 
 func (a *codexResumeAction) cancel(err error) codexResumeResult {
@@ -588,14 +603,17 @@ func newCodexResumeActionServerIn(directory, token string) (*codexResumeActionSe
 	server := &codexResumeActionServer{
 		listener: listener, socketPath: socketPath, token: token,
 		actions: make(chan *codexResumeAction, 4), notices: make(chan string, 4),
-		stop: make(chan struct{}), done: make(chan struct{}), observed: make(map[string]time.Time),
+		stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	go server.serve()
 	return server, nil
 }
 
 func codexResumeSocketPath(actionsDir, token string) (string, error) {
-	name := fmt.Sprintf("%d-%s.sock", os.Getpid(), token[:12])
+	// The token now signs reusable target capabilities. Do not disclose any
+	// of its secret bits through the public socket name.
+	digest := sha256.Sum256([]byte(token))
+	name := fmt.Sprintf("%d-%x.sock", os.Getpid(), digest[:6])
 	preferred := filepath.Join(actionsDir, name)
 	if len(preferred) < codexResumeSocketPathLimit {
 		return preferred, nil
@@ -631,27 +649,21 @@ func (s *codexResumeActionServer) Observe(value string) string {
 	if s == nil || !valid {
 		return ""
 	}
-	now := time.Now()
-	s.mu.Lock()
-	for observedID, expires := range s.observed {
-		if !expires.After(now) {
-			delete(s.observed, observedID)
-		}
-	}
-	if len(s.observed) >= 64 {
-		for observedID := range s.observed {
-			delete(s.observed, observedID)
-			break
-		}
-	}
-	s.observed[target.key()] = now.Add(codexResumeTTL)
-	s.mu.Unlock()
 	u := target.uri()
 	query := u.Query()
 	query.Set("socket", s.socketPath)
-	query.Set("token", s.token)
+	query.Set("token", s.targetToken(target))
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+func (s *codexResumeActionServer) targetToken(target resumeTarget) string {
+	// Authenticate the exact provider/command without retaining an expiring
+	// registry. A URL never exposes the owner secret or authorizes another ID.
+	mac := hmac.New(sha256.New, []byte(s.token))
+	_, _ = mac.Write([]byte(target.key()))
+	// Preserve the existing 32-hex-character wire field with a 128-bit MAC.
+	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
 func (s *codexResumeActionServer) Actions() <-chan *codexResumeAction {
@@ -696,7 +708,7 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		return
 	}
 	parts := strings.Split(strings.TrimSpace(line), "\t")
-	if (len(parts) != 3 && len(parts) != 4) || parts[0] != s.token || !isCodexResumeID(parts[1]) {
+	if (len(parts) != 3 && len(parts) != 4) || !isCodexResumeToken(parts[0]) || !isCodexResumeID(parts[1]) {
 		reply(codexResumeResult{err: errors.New("invalid resume activation credentials")})
 		return
 	}
@@ -710,7 +722,10 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 			return
 		}
 	}
-	key := target.key()
+	if !hmac.Equal([]byte(parts[0]), []byte(s.targetToken(target))) {
+		reply(codexResumeResult{err: errors.New("resume link does not match this target or Vuja session; use its displayed command")})
+		return
+	}
 	now := time.Now()
 	deadlineNS, err := strconv.ParseInt(parts[2], 10, 64)
 	deadline := time.Unix(0, deadlineNS)
@@ -720,15 +735,12 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		reply(codexResumeResult{err: errors.New("resume activation request expired; click again at an idle prompt")})
 		return
 	}
-	s.mu.Lock()
-	expires, observed := s.observed[key]
-	if !expires.After(now) {
-		delete(s.observed, key)
-		observed = false
-	}
-	s.mu.Unlock()
-	if !observed {
-		reply(codexResumeResult{err: errors.New("resume link expired or was already used; run the displayed resume command manually")})
+	// A second click already queued before submission completed is not a new
+	// idle-prompt intent. Fresh explicit clicks remain reusable; actual prompt
+	// admission and ambiguous-write reservations still belong to the editor.
+	requestStarted := deadline.Add(-codexResumeActionTimeout)
+	if !requestStarted.After(s.lastSubmission) || s.pending.inFlight() {
+		reply(codexResumeResult{err: errors.New("resume submission is already pending; wait for an idle empty prompt before clicking again")})
 		return
 	}
 	action := &codexResumeAction{id: id, deadline: deadline, result: make(chan codexResumeResult, 1)}
@@ -737,6 +749,7 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 	}
 	select {
 	case s.actions <- action:
+		s.pending = action
 	default:
 		reply(codexResumeResult{err: errors.New("resume receiver is busy; click again")})
 		return
@@ -752,11 +765,7 @@ func (s *codexResumeActionServer) handle(connection *net.UnixConn) {
 		result = action.cancel(errors.New("vuja session closed before resume activation"))
 	}
 	if result.consumed {
-		s.mu.Lock()
-		if s.observed[key].Equal(expires) {
-			delete(s.observed, key)
-		}
-		s.mu.Unlock()
+		s.lastSubmission = time.Now()
 	}
 	reply(result)
 }

@@ -134,8 +134,8 @@ func TestCodexResumeNativeLiveLinkRetainsActivation(t *testing.T) {
 			if repainted != target {
 				t.Fatal("resize changed or discarded the action target")
 			}
-			if err := dispatchCodexResumeURL(repainted, dir); err == nil {
-				t.Fatal("repaint re-armed a consumed activation")
+			if err := dispatchResumeFixture(t, server, repainted, dir, false, "", 0, &input); err != nil {
+				t.Fatalf("repainted link failed at a later idle prompt: %v", err)
 			}
 			if strings.Contains(strings.Join(retainedModelRows(c.viewport.model), "\n"), "private-application-canvas") {
 				t.Fatal("resume retention admitted private canvas text")
@@ -180,8 +180,8 @@ func TestCodexResumeUnsafeClickCanRetry(t *testing.T) {
 			if input.String() != "codex resume "+testCodexResumeID+"\r" {
 				t.Fatal("retry did not submit exactly one command")
 			}
-			if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, &input); err == nil {
-				t.Fatal("successful retry left the target executable")
+			if err := dispatchResumeFixture(t, server, target, dir, true, "", 0, &input); err == nil {
+				t.Fatal("busy prompt after successful retry accepted another command")
 			}
 			if input.String() != "codex resume "+testCodexResumeID+"\r" {
 				t.Fatal("consumed retry submitted duplicate input")
@@ -190,15 +190,9 @@ func TestCodexResumeUnsafeClickCanRetry(t *testing.T) {
 	}
 }
 
-func TestCodexResumeExpiredActivationReportsFailure(t *testing.T) {
+func TestCodexResumeInvalidCredentialsReportFailure(t *testing.T) {
 	server, dir := resumeFixtureServer(t)
 	target := server.Observe(testCodexResumeID)
-	server.mu.Lock()
-	server.observed[testCodexResumeID] = time.Now().Add(-time.Second)
-	server.mu.Unlock()
-	if err := dispatchCodexResumeURL(target, dir); err == nil {
-		t.Fatal("expired resume link falsely reports success")
-	}
 	parsed, err := url.Parse(target)
 	if err != nil {
 		t.Fatal(err)
@@ -300,8 +294,8 @@ func TestCodexResumeWriteFailureAndPartialDelivery(t *testing.T) {
 				if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, &input); err != nil {
 					t.Fatal("zero-byte failure consumed retry:", err)
 				}
-			} else if err := dispatchCodexResumeURL(target, dir); err == nil {
-				t.Fatal("ambiguous partial write was re-armed")
+			} else if err := dispatchResumeFixture(t, server, target, dir, true, "", 0, &input); err == nil || input.Len() != 0 {
+				t.Fatal("ambiguous partial write bypassed prompt reservation")
 			}
 		})
 	}
@@ -398,7 +392,11 @@ func TestCodexResumeExpiredQueuedTransportCannotExecute(t *testing.T) {
 	}
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := fmt.Fprintf(connection, "%s\t%s\t%d\n", server.token, testCodexResumeID, time.Now().Add(-time.Second).UnixNano()); err != nil {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(connection, "%s\t%s\t%d\n", parsed.Query().Get("token"), testCodexResumeID, time.Now().Add(-time.Second).UnixNano()); err != nil {
 		t.Fatal(err)
 	}
 	reply, err := bufio.NewReader(connection).ReadString('\n')
@@ -437,10 +435,14 @@ func TestCodexResumeConcurrentClicksSubmitAtMostOnce(t *testing.T) {
 	}
 	var input bytes.Buffer
 	accepted := 0
+	busy := false
 	for completed := 0; completed < 2; {
 		select {
 		case action := <-server.Actions():
-			submitCodexResumeAction(action, false, resumeFixtureEditor{Writer: &input}, nil)
+			submitCodexResumeAction(action, busy, resumeFixtureEditor{Writer: &input}, func() func() {
+				busy = true
+				return func() { busy = false }
+			})
 		case err := <-results:
 			if err == nil {
 				accepted++

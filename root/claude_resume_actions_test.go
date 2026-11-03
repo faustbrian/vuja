@@ -165,8 +165,8 @@ func TestClaudeResumeActionsKeepProviderAndWorktree(t *testing.T) {
 		if input.String() != commands[i]+"\r" {
 			t.Fatalf("wrong provider/worktree: %q", input.String())
 		}
-		if err := dispatchCodexResumeURL(target, dir); err == nil {
-			t.Fatal("consumed action could execute twice")
+		if err := dispatchResumeFixture(t, s, target, dir, true, "", 0, &input); err == nil {
+			t.Fatal("busy Claude prompt accepted duplicate activation")
 		}
 	}
 }
@@ -381,11 +381,16 @@ func TestClaudeResumeShellRejectsEditorTextAndAmbiguousReplay(t *testing.T) {
 		t.Fatal("lost acknowledgement falsely confirmed execution")
 	}
 	f.wait(t, "FIXTURE_CLAUDE:2:--resume|"+testClaudeResumeID)
-	if err := dispatchCodexResumeURL(target, dir); err == nil {
+	if err := dispatchResumeFixture(t, s, target, dir, true, "", 0, f.editor); err == nil {
 		t.Fatal("ambiguous Claude action was rearmed")
 	}
 	f.wait(t, "FIXTURE_EDITOR_READY")
 	f.snapshot(t, "")
+	f.dropSubmitted.Store(false)
+	if err := dispatchResumeFixture(t, s, target, dir, false, "", 0, f.editor); err != nil {
+		t.Fatal("Claude link remained unusable after prompt reconciliation:", err)
+	}
+	f.wait(t, "FIXTURE_CLAUDE:2:--resume|"+testClaudeResumeID)
 	for _, shell := range []string{"bash", "fish"} {
 		a := &codexResumeAction{id: testClaudeResumeID, command: testClaudeResumeCommand, deadline: time.Now().Add(time.Second), result: make(chan codexResumeResult, 1)}
 		if got := submitCodexResumeAction(a, false, &shellResumeEditor{shell: shell}, nil); got.err == nil || got.consumed {

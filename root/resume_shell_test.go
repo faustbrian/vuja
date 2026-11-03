@@ -298,6 +298,10 @@ func TestCodexResumeShellSocketChecksActualEditorNotParentPrefix(t *testing.T) {
 	f.wait(t, "FIXTURE_RUN:2:resume:"+testCodexResumeID)
 	f.wait(t, "FIXTURE_EDITOR_READY")
 	f.snapshot(t, "")
+	if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, f.editor); err != nil {
+		t.Fatal("link remained unusable after prompt reconciliation:", err)
+	}
+	f.wait(t, "FIXTURE_RUN:2:resume:"+testCodexResumeID)
 }
 
 func TestCodexResumeShellQueuedDuringCommandCannotExecuteLater(t *testing.T) {
@@ -332,11 +336,18 @@ func TestCodexResumeShellLostAcknowledgementCannotReplay(t *testing.T) {
 		t.Fatal("lost acknowledgement falsely reported confirmed submission")
 	}
 	f.wait(t, "FIXTURE_RUN:2:resume:"+testCodexResumeID)
-	if err := dispatchCodexResumeURL(target, dir); err == nil {
+	// Model the wrapper's unresolved-submission reservation, not an absent
+	// fixture consumer (which would merely leave a canceled action queued).
+	if err := dispatchResumeFixture(t, server, target, dir, true, "", 0, f.editor); err == nil {
 		t.Fatal("uncertain executed action was re-armed")
 	}
 	f.wait(t, "FIXTURE_EDITOR_READY")
 	f.snapshot(t, "")
+	f.dropSubmitted.Store(false)
+	if err := dispatchResumeFixture(t, server, target, dir, false, "", 0, f.editor); err != nil {
+		t.Fatal("link remained unusable after prompt reconciliation:", err)
+	}
+	f.wait(t, "FIXTURE_RUN:2:resume:"+testCodexResumeID)
 }
 
 func TestCodexResumeShellViEditorAcceptsWithoutOrdinaryEnterBinding(t *testing.T) {
