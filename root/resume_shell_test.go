@@ -89,6 +89,9 @@ func newResumeShellFixture(t *testing.T, options ...string) *resumeShellFixture 
 	command := exec.CommandContext(ctx, path, "-d", "-f", "-i")
 	command.Dir = dir
 	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "ZDOTDIR=" + dir, "TMPDIR=" + dir, "XDG_CONFIG_HOME=" + dir, "XDG_DATA_HOME=" + dir, "XDG_CACHE_HOME=" + dir, "XDG_RUNTIME_DIR=" + dir, "TERM=xterm-256color", "VUJA_PID=1", "VUJA_IS_CHILD=true", "VUJA_FD=3", "VUJA_RESUME_FD=4", "VUJA_HISTORY_ACK_FD=6"}
+	// The sanitized fixture cannot inherit the runner's UTF-8 locale. Linux
+	// otherwise starts ZLE in C locale and corrupts literal Unicode input.
+	command.Env = append(command.Env, "LANG=en_US.UTF-8")
 	command.ExtraFiles = []*os.File{ipcWriter, requestReader, releaseReader, ackReader}
 	terminal, err := pty.StartWithSize(command, &pty.Winsize{Rows: 12, Cols: 80})
 	if err != nil {
